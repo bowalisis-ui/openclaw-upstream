@@ -10,7 +10,7 @@ import {
   defaultRuntime,
   type RuntimeEnv,
 } from "openclaw/plugin-sdk/runtime-env";
-import { resolveUserPath } from "openclaw/plugin-sdk/text-utility-runtime";
+import { resolveUserPath, safeParseJson } from "openclaw/plugin-sdk/text-utility-runtime";
 import { resolveOAuthDir } from "./auth-store.runtime.js";
 import {
   assertWebCredsPathRegularFileOrMissing,
@@ -95,9 +95,20 @@ export type WhatsAppWebCredsPayload = {
   } | null;
 };
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isWhatsAppWebCredsPayload(value: unknown): value is WhatsAppWebCredsPayload {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+  return value.me === undefined || value.me === null || isObjectRecord(value.me);
+}
+
 function parseWebCredsPayload(raw: string): WhatsAppWebCredsPayload | null {
   const parsed = safeParseJson<unknown>(raw);
-  return parsed !== null && typeof parsed === "object" ? (parsed as WhatsAppWebCredsPayload) : null;
+  return isWhatsAppWebCredsPayload(parsed) ? parsed : null;
 }
 
 function hasUsableWebIdentity(payload: WhatsAppWebCredsPayload): boolean {
