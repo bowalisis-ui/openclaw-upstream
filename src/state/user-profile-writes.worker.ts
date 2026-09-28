@@ -48,22 +48,17 @@ import {
   UserProfileOwnerError,
 } from "./user-profiles-schema.js";
 import { normalizeInitialDisplayName, selectUserProfileListItemById } from "./user-profiles.js";
-import type { ProfileDisplayRow, UserProfileEmailBinding } from "./user-profiles.types.js";
-
-type GitHubAuthenticationAlias =
-  | { kind: "email"; email: string }
-  | { kind: "github-login"; login: string };
+import type {
+  ProfileDisplayRow,
+  UserProfileEmailBinding,
+  UserProfileGitHubSyncInput,
+} from "./user-profiles.types.js";
+import type {
+  UserProfileAvatarError,
+  UserProfileWriteResult,
+} from "./user-profiles.worker-contract.js";
 
 type UserProfileListItem = ReturnType<typeof selectUserProfileListItemById>;
-type UserProfileAvatarError =
-  | { code: "avatar_too_large"; maxBytes: number }
-  | { code: "unsupported_avatar_mime"; mime: string };
-
-export type UserProfileWriteResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; kind: "not-found"; profileId: string }
-  | { ok: false; kind: "merge"; message: string }
-  | { ok: false; kind: "owner"; code: UserProfileOwnerError["code"] };
 type PendingPublication = {
   before: Map<string, ProfileDisplayRow | undefined>;
   emailBindings: Map<string, UserProfileEmailBinding>;
@@ -384,7 +379,7 @@ export function linkEmail(
 }
 
 function normalizeGitHubAuthenticationAlias(
-  alias: GitHubAuthenticationAlias,
+  alias: UserProfileGitHubSyncInput["authenticationAlias"],
 ): { kind: "email"; email: string } | { kind: "github-login"; subject: string } {
   return alias.kind === "email"
     ? { kind: "email", email: normalizeEmail(alias.email) }
@@ -392,13 +387,7 @@ function normalizeGitHubAuthenticationAlias(
 }
 
 export function syncGitHubIdentity(
-  params: {
-    identity: { accountId: number; login: string; name?: string };
-    authenticationAlias: GitHubAuthenticationAlias;
-    initialDisplayName?: string;
-    /** OIDC enrichment must retain the authenticated email profile and its credit preference. */
-    preserveEmailProfile?: boolean;
-  },
+  params: UserProfileGitHubSyncInput,
   options: UserProfileMutationOptions = {},
 ): UserProfileListItem {
   const alias = normalizeGitHubAuthenticationAlias(params.authenticationAlias);

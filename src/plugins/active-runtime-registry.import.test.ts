@@ -2,11 +2,11 @@ import { afterEach, expect, it, vi } from "vitest";
 import "../test-utils/prepare-compiled-subprocesses.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
 import {
-  clearActivePluginRegistry,
   getActivePluginRegistry,
   resetPluginRuntimeStateForTest,
   setActivePluginRegistry,
 } from "./runtime.js";
+import { clearActivePluginRegistry } from "./runtime.test-support.js";
 
 afterEach(async () => {
   vi.doUnmock("./loader-runtime-load.js");

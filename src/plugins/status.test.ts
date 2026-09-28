@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearPluginMetadataLifecycleCaches } from "./plugin-metadata-lifecycle.js";
 import * as status from "./status.js";
 import {
+  buildPluginCompatibilityNotices,
+  buildPluginCompatibilityWarnings,
+} from "./status-compatibility.js";
+import {
   createAutoEnabledStatusConfig,
   createCompatChainFixture,
   createCompatibilityNotice,
@@ -288,13 +292,13 @@ describe("plugin status reports", () => {
         { level: "error", pluginId: "old", message: "sessionFile missing" },
       ],
     });
-    const notices = status.buildPluginCompatibilityNotices({ report });
+    const notices = buildPluginCompatibilityNotices({ report });
     expect(notices).toEqual([
       createCompatibilityNotice({ pluginId: "old", code: "hook-only" }),
       createCompatibilityNotice({ pluginId: "old", code: "removed-session-transcript-file-api" }),
       createCompatibilityNotice({ pluginId: "api", code: "removed-session-transcript-file-api" }),
     ]);
-    expect(status.buildPluginCompatibilityWarnings({ report })).toEqual([
+    expect(buildPluginCompatibilityWarnings({ report })).toEqual([
       `old ${HOOK_ONLY_MESSAGE}`,
       `old ${REMOVED_SESSION_TRANSCRIPT_FILE_API_MESSAGE}`,
       `api ${REMOVED_SESSION_TRANSCRIPT_FILE_API_MESSAGE}`,

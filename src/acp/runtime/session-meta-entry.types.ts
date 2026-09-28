@@ -1,4 +1,4 @@
-import type { SessionEntryReplacementPublication } from "../../config/sessions/session-accessor.sqlite-entry-cache.js";
+import type { SessionEntryReplacementPublication } from "../../config/sessions/session-accessor.sqlite-entry-cache.types.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { AcpSessionControlBinding } from "./session-meta-control.types.js";
 import type { AcpSessionEntryExpectation } from "./session-meta-entry.kernel.js";

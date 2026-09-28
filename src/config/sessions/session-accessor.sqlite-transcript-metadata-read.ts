@@ -10,8 +10,8 @@ import type { DB } from "../../state/openclaw-agent-db.generated.js";
 import type {
   LatestTranscriptAssistantMessage,
   LatestTranscriptAssistantText,
+  ResolvedTranscriptReadScope,
 } from "./session-accessor.sqlite-contract.js";
-import type { ResolvedTranscriptReadScope } from "./session-accessor.sqlite-scope.js";
 import { readHotSessionTranscriptSnapshot } from "./session-cold-storage-read.js";
 import { assertSessionTranscriptHot } from "./session-cold-storage-state.js";
 import { resolveSqliteSessionTranscriptReadFence } from "./session-transcript-read-fence.js";

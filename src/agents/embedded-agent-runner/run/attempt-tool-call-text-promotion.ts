@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { stripCompactionReplayCheckpointInPlace } from "@openclaw/ai/transports";
+import { stripCompactionReplayCheckpointInPlace } from "../../../../packages/ai/src/transports/provider-compaction-checkpoint.js";
 import {
   createPromotedPlainTextToolCallEvents,
   normalizePlainTextToolCallStreamEvents,

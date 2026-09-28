@@ -56,8 +56,9 @@ const resolveUpdateInstallSurfaceMock =
   vi.fn<
     typeof import("../../infra/update-runner-install-surface.js").resolveUpdateInstallSurface
   >();
-const resolveStartupInstallStatusMock =
-  vi.fn<typeof import("../../infra/update-install-status.js").resolveStartupInstallStatus>();
+const resolveStartupInstallStatusMock = vi.hoisted(() =>
+  vi.fn<typeof import("../../infra/update-install-status.js").resolveStartupInstallStatus>(),
+);
 const detectRespawnSupervisorMock = vi.fn<() => RespawnSupervisor | null>();
 const startManagedServiceUpdateHandoffMock = vi.fn<
   typeof import("../../infra/update-managed-service-handoff.js").startManagedServiceUpdateHandoff

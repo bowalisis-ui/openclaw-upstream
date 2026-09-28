@@ -1,6 +1,8 @@
 import { throwSqliteLifecycleErrors } from "../infra/sqlite-lifecycle-errors.js";
+import { readDatabasePathIdentity } from "../infra/sqlite-worker-identity.js";
 import {
   createSqliteWorkerWriteAdmission,
+  runSqliteWorkerStoreOperation,
   type SqliteWorkerStore,
 } from "../infra/sqlite-worker-store.js";
 import { openOpenClawStateDatabase } from "./openclaw-state-db.js";
@@ -22,6 +24,10 @@ import type {
 } from "./openclaw-state-lease.types.js";
 import { captureOpenClawStateWorkerContext } from "./openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
+import {
+  openOpenClawStateWorkerCleanupStore,
+  runOpenClawStateWorkerOperation,
+} from "./openclaw-state-worker-store.js";
 
 export async function acquireLease(
   database: OpenClawStateLeaseDatabase,
@@ -56,7 +62,6 @@ export async function acquireLease(
       });
     }
   };
-  const { runOpenClawStateWorkerOperation } = await import("./openclaw-state-worker-store.js");
   assertAdmission();
   const result = await runOpenClawStateWorkerOperation(
     context,
@@ -102,7 +107,6 @@ function admittedWorkerOperation<T>(
   operation: LeaseWorkerOperation<T>,
 ) {
   return async (admission: WorkerLeaseScope): Promise<T> => {
-    const { runOpenClawStateWorkerOperation } = await import("./openclaw-state-worker-store.js");
     return runOpenClawStateWorkerOperation(
       context,
       (scope) => operation(scope, admission.identity),
@@ -127,7 +131,6 @@ export function createOpenClawStateLeaseWorkerStorage(
       assertCurrent: () => void,
     ): Promise<T> {
       assertCurrent();
-      const { runOpenClawStateWorkerOperation } = await import("./openclaw-state-worker-store.js");
       return runOpenClawStateWorkerOperation(context, () => operation(context), { assertCurrent });
     },
     acquire(
@@ -230,10 +233,6 @@ export function createOpenClawStateLeaseWorkerStorage(
     },
     release(owner: LeaseWorkerOwner, operationLabel: string): Promise<void> {
       return owner.runLifecycle("release", async (admission) => {
-        const { readDatabasePathIdentity } = await import("../infra/sqlite-worker-identity.js");
-        const { runSqliteWorkerStoreOperation } = await import("../infra/sqlite-worker-store.js");
-        const { openOpenClawStateWorkerCleanupStore } =
-          await import("./openclaw-state-worker-store.js");
         admission.assertCurrent();
         const expectedIdentity = context.admission.identity.key;
         const observed = await readDatabasePathIdentity(storage.path);

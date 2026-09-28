@@ -783,6 +783,9 @@ vi.mock("../logger.js", () => ({
 
 vi.mock("../model.js", () => ({
   buildModelAliasLines: () => [],
+  resolveModelAsync: () => {
+    throw new Error("Embedded attempt fixtures already provide the resolved model");
+  },
 }));
 
 vi.mock("../sandbox-info.js", () => ({

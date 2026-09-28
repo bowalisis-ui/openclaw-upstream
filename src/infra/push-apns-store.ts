@@ -12,6 +12,10 @@ import type {
 } from "../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import {
+  executeOpenClawStateWorker,
+  runOpenClawStateWorkerOperation,
+} from "../state/openclaw-state-worker-store.js";
+import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
@@ -351,8 +355,6 @@ export async function registerApnsRegistration(
   const nowMs = Date.now();
   const expectedPairingGeneration = params.expectedPairingGeneration;
   const assertCurrent = params.assertCurrent;
-  const { runOpenClawStateWorkerOperation } =
-    await import("../state/openclaw-state-worker-store.js");
   const result = await runOpenClawStateWorkerOperation(
     context,
     (scope) =>
@@ -390,7 +392,6 @@ export async function loadApnsRegistration(
     return null;
   }
   const context = captureOpenClawStateWorkerContext(apnsStateDatabaseOptions(baseDir));
-  const { executeOpenClawStateWorker } = await import("../state/openclaw-state-worker-store.js");
   return executeOpenClawStateWorker(context, {
     type: "apns.registration.read",
     input: normalizedNodeId,
@@ -427,7 +428,6 @@ export async function loadApnsRegistrations(
     return [];
   }
   const context = captureOpenClawStateWorkerContext(apnsStateDatabaseOptions(baseDir));
-  const { executeOpenClawStateWorker } = await import("../state/openclaw-state-worker-store.js");
   const registrations = await executeOpenClawStateWorker(context, {
     type: "apns.registrations.read",
     input: uniqueNodeIds,

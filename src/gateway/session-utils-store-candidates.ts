@@ -1,7 +1,7 @@
 import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
 import type { SessionEntryReadSource } from "../config/sessions/session-entry-read-source.types.js";
 import { isPerAgentSessionStoreConfig } from "../config/sessions/session-store-config.js";
-import type { SessionStoreTarget } from "../config/sessions/targets-collision.js";
+import type { SessionStoreTarget } from "../config/sessions/session-store-target.types.js";
 import { isConfiguredSessionStoreAgentId } from "../config/sessions/targets-configured-agents.js";
 import {
   resolveExistingAgentSessionStoreTargetsSync,

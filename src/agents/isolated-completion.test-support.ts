@@ -80,14 +80,6 @@ vi.mock("./model-auth.js", () => ({
 vi.mock("./prepared-model-runtime.js", () => ({
   acquireAgentRunPreparedModelRuntime: isolatedCompletionMocks.acquireAgentRunPreparedModelRuntime,
 }));
-vi.mock("./simple-completion-runtime.js", async () => ({
-  // Selection stays real so utility completions can be prepared end to end;
-  // only host credential preparation is owned by the test.
-  ...(await vi.importActual<typeof import("./simple-completion-runtime.js")>(
-    "./simple-completion-runtime.js",
-  )),
-  prepareSimpleCompletionModel: isolatedCompletionMocks.prepareSimpleCompletionModel,
-}));
 vi.mock("./runtime-plan/prepare-auth.js", async () => {
   const actual = await vi.importActual<typeof import("./runtime-plan/prepare-auth.js")>(
     "./runtime-plan/prepare-auth.js",
@@ -118,6 +110,7 @@ vi.mock("../infra/tmp-openclaw-dir.js", () => ({
 }));
 
 // Static re-exports bypass Vitest's import hoisting and can load runtime before mocks.
+const simpleCompletionRuntime = await import("./simple-completion-runtime.js");
 const { runIsolatedCompletion } = await import("./isolated-completion.js");
 export { runIsolatedCompletion };
 
@@ -176,6 +169,10 @@ export const nativeAuthPlan = {
 export function resetIsolatedCompletionTestState(): void {
   vi.clearAllMocks();
   isolatedCompletionMocks.hasAvailableAuthForProvider.mockResolvedValue(false);
+  // Concurrent imports must observe the same runtime namespace.
+  vi.spyOn(simpleCompletionRuntime, "prepareSimpleCompletionModel").mockImplementation(
+    isolatedCompletionMocks.prepareSimpleCompletionModel,
+  );
   preparedModelRuntime = {
     config: {},
     agentDir: "/tmp/agent",

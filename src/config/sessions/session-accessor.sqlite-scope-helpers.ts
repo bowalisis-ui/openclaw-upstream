@@ -7,6 +7,7 @@ import {
 } from "../../routing/session-key.js";
 import type { OpenClawAgentDatabaseOptions } from "../../state/openclaw-agent-db-contract.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
+import type { ResolvedSqliteReadScope } from "./session-accessor.sqlite-contract.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 
 type SessionSqliteDatabase = Pick<
@@ -38,27 +39,6 @@ type SessionSqliteDatabase = Pick<
   | "transcript_events"
 > & {
   sqlite_schema: { name: string | null; type: string };
-};
-
-export type ResolvedSqliteScope = {
-  agentId: string;
-  databaseAgentId?: string;
-  env?: NodeJS.ProcessEnv;
-  ownerStorePath?: string;
-  path?: string;
-  sessionKey: string;
-};
-
-export type ResolvedSqliteReadScope = Omit<ResolvedSqliteScope, "sessionKey"> & {
-  sessionKey?: string;
-};
-
-export type ResolvedTranscriptScope = ResolvedSqliteScope & {
-  sessionId: string;
-};
-
-export type ResolvedTranscriptReadScope = ResolvedSqliteReadScope & {
-  sessionId: string;
 };
 
 export function getSessionKysely(database: import("node:sqlite").DatabaseSync) {

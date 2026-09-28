@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { measureGatewayBootstrapStep } from "../cli/startup-trace.js";
 import { shouldManageGatewayService } from "../commands/doctor-service-repair-policy.js";
+import { randomToken } from "../commands/random-token.js";
 import { ConfigWritePostCommitError } from "../config/io.write-errors.js";
 import {
   DoctorStateMigrationRefusalError,
@@ -41,7 +42,6 @@ export type { DoctorHealthFlowContext } from "./doctor-health-contribution-types
 
 const loadCommandFormatModule = async () => await import("../cli/command-format.js");
 const loadNoteModule = async () => await import("../../packages/terminal-core/src/note.js");
-const loadOnboardHelpersModule = async () => await import("../commands/onboard-helpers.js");
 const loadSecretTypesModule = async () => await import("../config/types.secrets.js");
 const MAX_DEFERRED_LEGACY_STATE_DETAILS = 20;
 
@@ -161,7 +161,6 @@ async function runGatewayAuthHealth(ctx: DoctorHealthFlowContext): Promise<void>
       const { createVerifiedSqliteSnapshot } = await import("../infra/sqlite-snapshot.js");
       const { resolveOpenClawStateSqlitePath } =
         await import("../state/openclaw-state-db.paths.js");
-      const { randomToken } = await loadOnboardHelpersModule();
       const database = { env: ctx.env ?? process.env };
       const entry = { scope: { kind: "team" as const }, name: gatewayTokenRef.id, database };
       let rollback: (() => boolean) | undefined;
@@ -232,7 +231,6 @@ async function runGatewayAuthHealth(ctx: DoctorHealthFlowContext): Promise<void>
   if (!shouldSetToken) {
     return;
   }
-  const { randomToken } = await loadOnboardHelpersModule();
   const nextToken = randomToken();
   ctx.cfg = {
     ...ctx.cfg,

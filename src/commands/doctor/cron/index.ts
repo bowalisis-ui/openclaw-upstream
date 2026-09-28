@@ -10,12 +10,7 @@ import { resolveOpenClawStateSqlitePath } from "../../../state/openclaw-state-db
 import { shortenHomePath } from "../../../utils.js";
 import type { DoctorPrompter, DoctorOptions } from "../../doctor-prompter.js";
 import { countLabel as pluralize } from "../../doctor-state-integrity-format.js";
-import {
-  applyLegacyCronStoreRepair,
-  loadLegacyCronRepairState,
-  type LegacyCronRepairResult,
-  type LegacyCronRepairState,
-} from "./legacy-repair.js";
+import type { LegacyCronRepairResult, LegacyCronRepairState } from "./legacy-repair.js";
 import {
   formatLegacyIssuePreview,
   formatLegacyGatewayExecAdvisory,
@@ -131,6 +126,7 @@ function legacyCronStoreFinding(params: {
 export async function collectLegacyCronStoreHealthFindings(params: {
   cfg: OpenClawConfig;
 }): Promise<readonly HealthFinding[]> {
+  const { loadLegacyCronRepairState } = await import("./legacy-repair.js");
   let state: LegacyCronRepairState | null;
   try {
     state = await loadLegacyCronRepairState({ cfg: params.cfg, readOnly: true });
@@ -330,6 +326,8 @@ export async function maybeRepairLegacyCronStore(params: {
   options: DoctorOptions;
   prompter: Pick<DoctorPrompter, "confirm">;
 }) {
+  const { applyLegacyCronStoreRepair, loadLegacyCronRepairState } =
+    await import("./legacy-repair.js");
   let state: LegacyCronRepairState | null;
   try {
     state = await loadLegacyCronRepairState({ cfg: params.cfg });

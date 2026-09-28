@@ -14,13 +14,15 @@ import {
   isUserProfileMutationPublication,
   type UserProfileMutationPublication,
 } from "./user-profile-mutation.js";
-import type { UserProfileWriteResult } from "./user-profile-writes.worker.js";
 import {
   UserProfileMergeError,
   UserProfileNotFoundError,
   UserProfileOwnerError,
 } from "./user-profiles-schema.js";
-import type { UserProfileWriteOperations } from "./user-profiles.worker.js";
+import type {
+  UserProfileWriteOperations,
+  UserProfileWriteResult,
+} from "./user-profiles.worker-contract.js";
 
 type ProfileWriteOptions = Pick<OpenClawStateDatabaseOptions, "path" | "env"> & {
   assertCurrent?: () => void;

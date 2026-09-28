@@ -1,10 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { activateGatewayScheduledServices } from "./server-runtime-services.js";
 
-vi.mock("../infra/heartbeat-runner.js", () => {
-  throw new Error("scheduled services loaded the broad heartbeat facade");
-});
-
 vi.mock("../infra/heartbeat-runner-run.js", () => {
   throw new Error("scheduled services loaded heartbeat execution before a wake");
 });

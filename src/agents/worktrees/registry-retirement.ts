@@ -1,5 +1,6 @@
 import { createSqliteWorkerOperationAdmission } from "../../infra/sqlite-worker-operation-admission.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import { runOpenClawStateWorkerOperation } from "../../state/openclaw-state-worker-store.js";
 import type { WorktreeWorkerOperations } from "./dispatch.worker.js";
 
 type WorktreeRetirementOperations = Pick<
@@ -36,8 +37,6 @@ async function mutateCleanupRecord<Key extends keyof WorktreeRetirementOperation
   assertCurrent?: () => void,
 ) {
   const context = captureOpenClawStateWorkerContext({ env });
-  const { runOpenClawStateWorkerOperation } =
-    await import("../../state/openclaw-state-worker-store.js");
   return await runOpenClawStateWorkerOperation(context, (scope) => scope.execute(command), {
     createAdmission: () => ({
       nativeLocations: [context.admission.databasePath],

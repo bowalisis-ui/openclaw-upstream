@@ -10,6 +10,10 @@ import {
   type OpenClawAgentReadOnlyDatabase,
 } from "../../state/openclaw-agent-db-readonly-open.js";
 import { readSessionBranchSummaries } from "./session-accessor.sqlite-branch-summaries.js";
+import type {
+  SessionBranchSummaryReadRequest,
+  SessionBranchSummaryReadResult,
+} from "./session-accessor.sqlite-contract.js";
 import { readSessionEntryRow } from "./session-accessor.sqlite-entry-read.js";
 import {
   readSessionTranscriptHotWatermark,
@@ -25,17 +29,6 @@ type SessionBranchCacheEntry = SessionTranscriptWatermark & {
   appendSafe?: boolean;
   identity: OpenClawAgentDatabaseIdentity;
 };
-
-export type SessionBranchSummaryReadRequest = {
-  database: { agentId: string; path: string };
-  databaseIdentity: string;
-  sessionKey: string;
-  sessionId: string;
-  lifecycleRevision?: string;
-};
-export type SessionBranchSummaryReadResult =
-  | ({ status: "ok"; branches: SessionBranchSummary[] } & SessionTranscriptWatermark)
-  | { status: "missing-session" | "failed" };
 
 // Host and worker isolates share this policy, each retaining only their compact derived results.
 const sessionBranchCache = new Map<string, SessionBranchCacheEntry>();

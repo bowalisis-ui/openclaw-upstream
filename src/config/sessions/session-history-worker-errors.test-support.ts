@@ -3,8 +3,8 @@ import type {
   WorkerTaskOptions,
   WorkerTaskPoolOptions,
 } from "../../infra/worker-task-pool.types.js";
-import type { SessionTranscriptDisplayDeltaResult } from "./session-accessor.sqlite-history-query.js";
 import { SessionTranscriptColdError } from "./session-cold-storage-state.js";
+import type { SessionTranscriptDisplayDeltaResult } from "./session-history-types.js";
 import { SessionTranscriptProjectionUnavailableError } from "./session-transcript-projection-error.js";
 import { SessionTranscriptReadFenceError } from "./session-transcript-read-fence.js";
 
@@ -158,7 +158,7 @@ vi.mock("./disk-budget-runtime.js", () => ({
 vi.mock("./session-transcript-hydration.worker.js", () => ({
   streamSessionTranscriptHydration: observed.hydrate,
 }));
-vi.mock("./session-accessor.sqlite-entry.js", () => ({
+vi.mock("./session-accessor.sqlite-exact-read.js", () => ({
   loadSessionEntryReadOnlyInScope: () => observed.read(),
 }));
 vi.mock("./session-sharing-store.js", () => ({

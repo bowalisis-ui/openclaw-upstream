@@ -7,13 +7,13 @@ import {
   readLatestSessionTranscriptMessageEvent,
   readRecentSessionTranscriptActiveEvents,
 } from "./session-accessor.sqlite-active-events.js";
+import type { ResolvedTranscriptReadScope } from "./session-accessor.sqlite-contract.js";
 import { readSessionTranscriptCurrentTurnEntry } from "./session-accessor.sqlite-current-turn.js";
 import { loadTranscriptReadSnapshotSync } from "./session-accessor.sqlite-read.js";
 import {
   prepareSqliteTranscriptReadScope,
   resolveSqliteTranscriptReadScope,
   toDatabaseOptions,
-  type ResolvedTranscriptReadScope,
 } from "./session-accessor.sqlite-scope.js";
 import type { SessionTranscriptRuntimeTarget } from "./session-accessor.types.js";
 import {

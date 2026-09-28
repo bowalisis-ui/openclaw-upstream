@@ -58,7 +58,6 @@ import {
   type DoctorPluginMetadataSnapshotState,
 } from "./shared/plugin-metadata-snapshot-scope.js";
 import { removeStalePluginRuntimeSymlinks } from "./shared/plugin-runtime-symlinks.js";
-import { repairStaleAgentModelRefs } from "./shared/stale-agent-model-ref-repair.js";
 import { maybeRepairStaleConfiguredAuthOrders } from "./shared/stale-auth-order.js";
 import { repairStaleOAuthProfileShadows } from "./shared/stale-oauth-profile-shadows.js";
 import { maybeRepairStalePluginConfig } from "./shared/stale-plugin-config.js";
@@ -377,6 +376,7 @@ export async function runDoctorRepairSequence(params: {
   if (pluginInstallRepairConverged) {
     // Route retirement reads canonical credentials. Finish auth migration first,
     // and preserve model refs while configured plugin installation needs a retry.
+    const { repairStaleAgentModelRefs } = await import("./shared/stale-agent-model-ref-repair.js");
     const modelRepair = repairStaleAgentModelRefs(state.candidate, {
       env,
       pluginMetadataSnapshot: pluginMetadataSnapshotState.current,

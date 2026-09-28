@@ -1,4 +1,4 @@
-import { createBackupArchive, type BackupCreateOptions } from "../infra/backup-create.js";
+import type { BackupCreateOptions } from "../infra/backup-create.js";
 import { resolveBackupNamespace, type BackupRetentionOptions } from "../infra/backup-retention.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { beginLifecycleWriteCustody } from "../infra/lifecycle-write-custody.js";
@@ -32,6 +32,7 @@ export async function backupCreateCommand(
   ) {
     throw new Error("--namespace, --claim-namespace, and retention flags require --to <location>.");
   }
+  const { createBackupArchive } = await import("../infra/backup-create.js");
   let archivePath = opts.output ?? (opts.to === undefined ? process.cwd() : `storage://${opts.to}`);
   const releaseCustody = opts.dryRun ? undefined : beginLifecycleWriteCustody("backup");
   let failure: unknown;

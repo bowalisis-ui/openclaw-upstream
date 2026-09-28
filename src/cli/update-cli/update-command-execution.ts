@@ -58,6 +58,7 @@ import {
   preparePackageDoctorContext,
   type PackageInstallUpdateParams,
 } from "./update-command-package.js";
+import { preflightConfiguredNpmPluginTargets } from "./update-command-plugin-preflight.js";
 import {
   assertUpdateCommandRecovery,
   readOriginalUpdateRecovery,
@@ -148,8 +149,6 @@ export async function executeMutableUpdate(
     ) {
       return;
     }
-    const { preflightConfiguredNpmPluginTargets } =
-      await import("./update-command-plugin-preflight.js");
     const warnings = await preflightConfiguredNpmPluginTargets({
       config: context.configSnapshot.sourceConfig,
       env: context.env,

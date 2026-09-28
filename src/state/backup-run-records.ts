@@ -14,6 +14,7 @@ import {
 } from "./openclaw-state-db-readonly.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
 import { captureOpenClawStateWorkerContext } from "./openclaw-state-worker-context.js";
+import { runOpenClawStateWorkerOperation } from "./openclaw-state-worker-store.js";
 
 export type {
   BackupRunRecord,
@@ -55,7 +56,6 @@ export async function recordBackupRunOutcome(
     status: params.status,
     manifest_json: manifest,
   };
-  const { runOpenClawStateWorkerOperation } = await import("./openclaw-state-worker-store.js");
   await runOpenClawStateWorkerOperation(
     context,
     (scope) => scope.execute({ type: "backup.recordOutcome", input: row }),

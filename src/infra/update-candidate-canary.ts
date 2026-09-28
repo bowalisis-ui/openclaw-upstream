@@ -27,10 +27,7 @@ import {
   createCanaryReceiptObserver,
   type CanaryReceiptCallbacks,
 } from "./update-candidate-canary-receipts.js";
-import {
-  prepareUpdateCandidateRehearsal,
-  type UpdateCandidateRehearsal,
-} from "./update-candidate-rehearsal.js";
+import type { UpdateCandidateRehearsal } from "./update-candidate-rehearsal.js";
 import type { UpdateDoctorConfigChange } from "./update-doctor-config.js";
 import {
   applyUpdateDoctorLintReport,
@@ -173,6 +170,7 @@ export async function validateUpdateCandidateCanary(
     });
   };
   try {
+    const { prepareUpdateCandidateRehearsal } = await import("./update-candidate-rehearsal.js");
     const entry = await resolveGatewayInstallEntrypoint(params.root);
     if (!entry) {
       throw new Error("The update is missing its Gateway executable");

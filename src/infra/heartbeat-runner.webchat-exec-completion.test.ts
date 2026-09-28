@@ -13,8 +13,8 @@ import { readTranscriptEventMessage } from "../config/sessions/session-accessor.
 import { withOwnedSessionTranscriptWrites } from "../config/sessions/transcript-write-context.js";
 import { onSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { getLastHeartbeatEvent, resetHeartbeatEventsForTest } from "./heartbeat-events.js";
-import { runHeartbeatOnce } from "./heartbeat-runner.js";
-import type { HeartbeatDeps } from "./heartbeat-runner.js";
+import { runHeartbeatOnce } from "./heartbeat-runner-run.js";
+import type { HeartbeatDeps } from "./heartbeat-runner.test-utils.js";
 import {
   readSessionStoreForTest,
   seedSessionStore,

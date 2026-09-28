@@ -10,6 +10,7 @@ import {
 import { supportsOpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution.js";
 import { applySessionEntryLifecycleMutation } from "./session-accessor.lifecycle.js";
 import { publishSessionStateArchives } from "./session-accessor.sqlite-archive-store.js";
+import type { ResolvedSqliteScope } from "./session-accessor.sqlite-contract.js";
 import {
   readSessionCreationSnapshotInDatabase,
   assertSessionCreationLabelAvailable,
@@ -32,7 +33,6 @@ import {
   resolveSqliteTranscriptArchiveDirectory,
   resolveSqliteTranscriptScope,
   toDatabaseOptions,
-  type ResolvedSqliteScope,
 } from "./session-accessor.sqlite-scope.js";
 import { ensureTranscriptHeader } from "./session-accessor.sqlite-transcript-header.js";
 import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";

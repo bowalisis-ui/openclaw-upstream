@@ -14,13 +14,13 @@ import {
   readSessionTranscriptHistoryEventsFromProjection,
   readSessionTranscriptHistoryEventByIdFromProjection,
   readSessionTranscriptHistoryAnchorPageFromProjection,
-  type SessionTranscriptMessageByIdOptions,
 } from "./session-accessor.sqlite-history-query.js";
 import type {
   SessionTranscriptMessageEvent,
   SessionTranscriptMessageAnchorPage,
 } from "./session-accessor.sqlite-projection-read.js";
 import { readVisibleTranscriptStats } from "./session-accessor.sqlite-reset-window.js";
+import type { SessionTranscriptMessageByIdOptions } from "./session-history-types.js";
 
 export function readActiveTranscriptStats(scope: SessionTranscriptReadScope) {
   return withCurrentProjectionSnapshot(scope, readVisibleTranscriptStats);

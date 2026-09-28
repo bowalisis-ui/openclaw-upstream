@@ -51,9 +51,8 @@ import { buildSubagentTaskMessage } from "../subagents/spawn/subagent-system-pro
 import { resolveAgentTimeoutMs } from "../timeout.js";
 import { normalizeToolModelOverride, readToolStringParam, ToolInputError } from "./common.js";
 import { getGatewayToolCallerIdentity } from "./gateway-caller-context.js";
+import { callInProcessGatewayTool, callInProcessGatewayToolWithCreation } from "./gateway.js";
 import {
-  callInProcessGatewayTool,
-  callInProcessGatewayToolWithCreation,
   runWithGatewayToolCleanupContext,
   type InProcessGatewayCaller,
 } from "./in-process-gateway.js";

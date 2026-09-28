@@ -9,9 +9,11 @@ import {
   readTranscriptDisplayDeltaFromProjection,
   readRecentSessionTranscriptHistoryEventsFromProjection,
   readSessionTranscriptHistoryEventPageFromProjection,
-  type SessionTranscriptDisplayDeltaResult,
 } from "./session-accessor.sqlite-history-query.js";
-import type { SessionTranscriptMessageEventPage } from "./session-accessor.sqlite-projection-read.js";
+import type {
+  SessionTranscriptDisplayDeltaResult,
+  SessionTranscriptMessageEventPage,
+} from "./session-history-types.js";
 
 export function readTranscriptDisplayDelta(
   scope: SessionTranscriptReadScope,

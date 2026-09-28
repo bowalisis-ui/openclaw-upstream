@@ -299,7 +299,7 @@ describe("openai completions DSML", () => {
         ...createDeepSeekCompletionsModel(),
         baseUrl: `http://127.0.0.1:${address.port}/v1`,
       });
-      const stream = await createOpenAICompletionsTransportStreamFn()(
+      const stream = createOpenAICompletionsTransportStreamFn()(
         model,
         {
           systemPrompt: "system",

@@ -1,4 +1,5 @@
 import { getOwedHarnessCompletionTask } from "../../agents/agent-harness-completion-recovery.js";
+import { scheduleMainSessionRecoveryPendingTarget } from "../../agents/main-session-recovery/main-session-recovery-owner-release.js";
 import { resolveMessageReceiptPrimaryId } from "../../channels/message/receipt.js";
 import {
   ConversationDeliveryMissingError,
@@ -287,8 +288,6 @@ export async function settlePendingFinalDelivery(
     { skipMaintenance: true, takeCacheOwnership: true, preserveActivity: options.preserveActivity },
   );
   if (wakeRecovery) {
-    const { scheduleMainSessionRecoveryPendingTarget } =
-      await import("../../agents/main-session-recovery/main-session-recovery-owner-release.js");
     scheduleMainSessionRecoveryPendingTarget({
       ...(completion.agentId !== undefined ? { agentId: completion.agentId } : {}),
       sessionId: completion.sessionId,

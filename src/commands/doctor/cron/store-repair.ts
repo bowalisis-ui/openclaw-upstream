@@ -17,7 +17,6 @@ import {
 import { getCronStoreKysely } from "../../../cron/store/schema.js";
 import { executeSqliteQuerySync } from "../../../infra/kysely-sync.js";
 import { deferSqlitePostCommitPublication } from "../../../infra/sqlite-post-commit.js";
-import { createVerifiedSqliteSnapshot } from "../../../infra/sqlite-snapshot.js";
 import type { PluginDoctorRepairAuthority } from "../../../infra/state-migrations.types.js";
 import type {
   PluginDoctorCronChange,
@@ -203,6 +202,8 @@ export async function backupCronStoreForDoctor(
   repair.assertCurrent();
   const sourcePath = resolveOpenClawStateSqlitePath(scope.env);
   const backupPath = `${sourcePath}.doctor-cron-${Date.now()}-${randomUUID()}.bak`;
+  const { createVerifiedSqliteSnapshot } = await import("../../../infra/sqlite-snapshot.js");
+  repair.assertCurrent();
   await createVerifiedSqliteSnapshot({
     sourcePath,
     targetPath: backupPath,

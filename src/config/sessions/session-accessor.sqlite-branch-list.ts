@@ -7,14 +7,15 @@ import {
   cloneSessionBranchSummaries,
   readCachedSessionBranchSummaries,
   readSessionBranchSnapshot,
-  type SessionBranchSummaryReadResult,
 } from "./session-accessor.sqlite-branches.js";
+import type { SessionBranchSummaryReadResult } from "./session-accessor.sqlite-contract.js";
 import { readSessionEntryRow } from "./session-accessor.sqlite-entry-read.js";
 import { resolveSqliteScope, toDatabaseOptions } from "./session-accessor.sqlite-scope.js";
 import { readSessionTranscriptHotWatermark } from "./session-accessor.sqlite-transcript-watermark-read.js";
 import type { SessionBranchListParams, SessionBranchListResult } from "./session-accessor.types.js";
 import { readRestoredSessionTranscript } from "./session-cold-storage-read.js";
 import { SessionTranscriptColdError } from "./session-cold-storage-state.js";
+import { runSessionBranchSummaryWorkerRequest } from "./session-transcript-read-worker-runtime.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 
 const pendingBranchReads = new Map<string, Promise<SessionBranchSummaryReadResult>>();
@@ -78,8 +79,6 @@ export async function listSessionBranches(
           pendingBranchReads,
           key,
           async () => {
-            const { runSessionBranchSummaryWorkerRequest } =
-              await import("./session-transcript-read-worker-runtime.js");
             const read = () => {
               assertCurrent();
               return runSessionBranchSummaryWorkerRequest(request, controller.signal);

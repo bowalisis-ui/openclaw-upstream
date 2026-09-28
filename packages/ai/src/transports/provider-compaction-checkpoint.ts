@@ -21,3 +21,12 @@ export function stripCompactionReplayCheckpoint(message: AssistantMessage): Assi
   delete replaySafeMessage.providerReplay;
   return replaySafeMessage;
 }
+
+/** Strip prefix-bound checkpoint state from an in-place message rewrite. */
+export function stripCompactionReplayCheckpointInPlace(message: {
+  providerReplay?: unknown;
+}): void {
+  if (isCompactionReplayCheckpoint(message.providerReplay)) {
+    delete message.providerReplay;
+  }
+}

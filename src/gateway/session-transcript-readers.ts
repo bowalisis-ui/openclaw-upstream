@@ -13,16 +13,16 @@ import {
 import { readSessionTranscriptWatermark } from "../config/sessions/session-accessor.sqlite-transcript-watermark.js";
 import { bindSessionTranscriptStoreScope } from "../config/sessions/session-accessor.transcript-target.js";
 import { readRestoredSessionTranscript } from "../config/sessions/session-cold-storage-read.js";
+import type {
+  SessionArtifactReadQuery,
+  SessionArtifactReadResult,
+} from "../config/sessions/session-history-types.js";
 import { readSessionTranscriptAccountingFromProjection } from "../config/sessions/session-transcript-accounting.js";
 import type { SessionTranscriptAccountingOptions } from "../config/sessions/session-transcript-accounting.types.js";
 import { captureSessionTranscriptStorageEnvironment } from "../config/sessions/transcript-target-binding.js";
 import { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import { isIncognitoSessionKey } from "../shared/incognito-session-key.js";
 import { isIncognitoOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
-import type {
-  SessionArtifactReadQuery,
-  SessionArtifactReadResult,
-} from "./session-artifact-read.js";
 import { createSessionTranscriptReader } from "./session-transcript-read-kernel.js";
 import {
   resolveTranscriptReadTarget,

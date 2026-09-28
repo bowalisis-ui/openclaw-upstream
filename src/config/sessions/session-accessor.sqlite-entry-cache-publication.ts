@@ -53,12 +53,6 @@ import {
 } from "./session-accessor.sqlite-sharing-acquisition.js";
 import type { SessionEntry } from "./types.js";
 
-export type {
-  PreparedSessionEntryChanges,
-  SessionEntryPublicationSource,
-  SessionEntryReplacementPublication,
-} from "./session-accessor.sqlite-entry-cache.types.js";
-
 const preparedSharingChanges = resolveGlobalSingleton(
   Symbol.for("openclaw.preparedSessionSharingChanges"),
   () => ({

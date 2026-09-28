@@ -75,7 +75,6 @@ import {
 } from "../gateway/server-methods/chat-history-budget.js";
 import { enrichChatHistoryCompactionMarkers } from "../gateway/server-methods/chat-history-page-kernel.js";
 import { readChatHistoryPage } from "../gateway/server-methods/chat-history-pages.js";
-import { buildModelsListResult } from "../gateway/server-methods/models-list-result.js";
 import { createGatewaySession } from "../gateway/session-create-service.js";
 import { performGatewaySessionReset } from "../gateway/session-reset-service.js";
 import {
@@ -811,6 +810,8 @@ export class EmbeddedTuiBackend implements TuiBackend {
   async listModels(opts?: { agentId?: string }): Promise<TuiModelChoice[]> {
     await this.ready;
     await this.preparedModelRuntime.waitUntilReady();
+    const { buildModelsListResult } =
+      await import("../gateway/server-methods/models-list-result.js");
     const cfg = getRuntimeConfig();
     const agentId = opts?.agentId ?? resolveDefaultAgentId(cfg);
     return await withPreparedModelCatalogOwner(

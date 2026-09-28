@@ -9,7 +9,7 @@ import {
   createModelCatalogDecisions,
   type ModelCatalogDecisionParams,
 } from "./model-catalog-decisions.js";
-import { resolveSimpleCompletionSelectionForAgent } from "./simple-completion-runtime.js";
+import { resolveSimpleCompletionSelectionForAgent } from "./simple-completion-selection.js";
 import { resolveAutomaticUtilityRuntimeOverride } from "./utility-model.js";
 
 function resolveUtilityCompletionForAgent(

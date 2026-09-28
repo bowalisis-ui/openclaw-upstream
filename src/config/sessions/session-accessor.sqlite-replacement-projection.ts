@@ -13,6 +13,7 @@ import { resolveStateDir } from "../state-dir.js";
 import { isInternalSessionEffectsKey } from "./internal-session-key.js";
 import { withNativeSessionCommitContext } from "./session-accessor.sqlite-commit-context.js";
 import type {
+  ResolvedSqliteScope,
   SessionEntryReplacementSnapshot,
   SessionEntryReplacementUpdate,
   SessionEntryStatus,
@@ -41,7 +42,6 @@ import {
   resolveSqliteTranscriptArchiveDirectory,
   toDatabaseOptions,
   withSqliteSessionDatabase,
-  type ResolvedSqliteScope,
 } from "./session-accessor.sqlite-scope.js";
 import type {
   SessionEntryCommitContext,

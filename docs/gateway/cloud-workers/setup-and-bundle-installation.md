@@ -58,6 +58,10 @@ The Gateway reuses its prepared archive for subsequent enrollments with the same
 
 While a prepared worker is provisioning, cache cleanup retains the exact worker bundle recorded at admission, including before readiness produces a bootstrap receipt. After the environment reaches a terminal state, normal bundle cleanup can reclaim those bytes when no other environment or placement needs them.
 
+The sealed worker bundle includes its entrypoints and all generated runtime chunks. Each file participates in the bundle's content hash and installation validation; the worker child does not install npm dependencies. Runtime chunks keep optional Browser, image, model-provider, shell-parser, and highlighting code out of a text-only turn's import graph. Nodes prewarm both admission and normal turn chunks in their compile cache when installing the bundle. The child completes admission before loading its turn runtime; optional tools load their additional chunks on use. A Gateway update selects a new content-addressed bundle through the existing installer without changing worker admission or placement authority.
+
+Sealed artifacts omit native worktree-cloning accelerators; the shared checkout owner retains its guarded Git checkout fallback. Installed host runtimes retain native filesystem acceleration and its ACL checks.
+
 Worker bundles include their JavaScript dependencies, including the WebSocket transport. They target Node.js even when Bun runs the build; the destination still needs a supported Node.js installation.
 
 ### Reuse a node runtime archive after Gateway restart

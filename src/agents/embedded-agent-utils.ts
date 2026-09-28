@@ -1,9 +1,9 @@
-import { stripCompactionReplayCheckpointInPlace } from "@openclaw/ai/transports";
 /**
  * Embedded-agent message text utilities.
  * Extracts visible assistant text, reasoning summaries, thinking-tag blocks,
  * and compact tool metadata for channel delivery and transcript replay.
  */
+import { stripCompactionReplayCheckpointInPlace } from "../../packages/ai/src/transports/provider-compaction-checkpoint.js";
 import type { AssistantMessage } from "../llm/types.js";
 import { extractTextFromChatContent } from "../shared/chat-content.js";
 import {

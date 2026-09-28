@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
+import { activateSubagentRegistry as activateRegistry } from "../agents/subagents/registry/subagent-registry.js";
 import { loadGetReplyFromConfigRuntime } from "../auto-reply/reply/dispatch-from-config.runtime-loaders.js";
 import type { AmbientEnvTriggerPolicy } from "../channels/config-presence.js";
 import type { CliDeps } from "../cli/deps.types.js";
@@ -602,8 +603,7 @@ const defaultGatewayPostAttachRuntimeDeps: GatewayPostAttachRuntimeDeps = {
     (await import("../infra/update-startup.js")).createGatewayUpdateCheck(...args),
   startGatewaySidecars,
   warmSystemCa: beginMacOSSystemCaWarmupOnce,
-  loadSubagentRegistryActivation: async () =>
-    (await import("../agents/subagents/registry/subagent-registry.js")).activateSubagentRegistry,
+  loadSubagentRegistryActivation: async () => activateRegistry,
 };
 
 /** Start work that depends on the HTTP server being attached and visible. */

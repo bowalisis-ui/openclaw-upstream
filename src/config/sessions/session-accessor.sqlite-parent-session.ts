@@ -15,6 +15,7 @@ import type {
   ForkSessionFromParentTranscriptParams,
   ForkSessionFromParentTranscriptResult,
   SessionParentForkDecision,
+  ResolvedSqliteScope,
 } from "./session-accessor.sqlite-contract.js";
 import { sqliteSessionEntriesEqual } from "./session-accessor.sqlite-entry-equality.js";
 import {
@@ -39,9 +40,9 @@ import {
   resolveSqliteStoreScope,
   runExclusiveSqliteSessionWrite,
   toDatabaseOptions,
-  type ResolvedSqliteScope,
 } from "./session-accessor.sqlite-scope.js";
 import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";
+import { readRestoredSessionTranscript } from "./session-cold-storage-read.js";
 import { preserveSqliteSameKeySessionRolloverLineage } from "./session-entry-lineage.js";
 import { prepareSessionTranscriptHydration } from "./session-transcript-hydration.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
@@ -72,7 +73,6 @@ export async function prepareSessionForkTranscript(params: ForkSessionFromParent
     storePath: resolved.path ?? params.storePath,
   };
   const hydration = prepareSessionTranscriptHydration(sourceScope);
-  const { readRestoredSessionTranscript } = await import("./session-cold-storage-read.js");
   const snapshot = await readRestoredSessionTranscript(sourceScope, hydration.read, {
     assertCurrent: params.commitGuard,
   });
@@ -466,7 +466,6 @@ export async function resolveSessionParentForkDecision(params: {
     return planParentForkDecision(params.parentEntry);
   }
   const resolved = resolveSqliteStoreScope(params.storePath);
-  const { readRestoredSessionTranscript } = await import("./session-cold-storage-read.js");
   return readRestoredSessionTranscript(
     { agentId: resolved.agentId, storePath: params.storePath, sessionId: parentSessionId },
     () => {

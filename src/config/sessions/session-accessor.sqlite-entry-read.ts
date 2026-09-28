@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { toUSVString } from "node:util";
-import { sql, type Selectable } from "kysely";
+import { sql } from "kysely";
 import {
   getNodeSqliteKysely,
   executeSqliteQuerySync,
@@ -15,10 +15,11 @@ import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contra
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
 import { isInternalSessionEffectsKey } from "./internal-session-key.js";
 import type { ExactSessionEntry, SessionEntrySummary } from "./session-accessor.sqlite-contract.js";
-import {
-  hasSqliteSessionOwnerColumns,
-  type SqliteSessionOwnerRow,
-} from "./session-accessor.sqlite-owner-projection.js";
+import type {
+  ResolvedSessionEntryRow,
+  SessionEntryRow,
+} from "./session-accessor.sqlite-entry-cache.types.js";
+import { hasSqliteSessionOwnerColumns } from "./session-accessor.sqlite-owner-projection.js";
 import {
   prepareSqliteSessionParticipantProjection,
   projectSqliteSessionParticipants,
@@ -40,10 +41,7 @@ import {
   type CanonicalSessionValidationRow,
 } from "./session-canonical-row.js";
 import { parseSqliteSessionEntryRecord } from "./session-entry-json.js";
-import {
-  sessionEntrySnapshotColumns,
-  type SessionEntrySnapshotRow,
-} from "./session-entry-snapshots.js";
+import { sessionEntrySnapshotColumns } from "./session-entry-snapshots.js";
 import {
   collectSessionEntryLookupKeys,
   resolveDeliveryProvenCanonicalSessionKey,
@@ -51,8 +49,6 @@ import {
 import type { InternalSessionEntry as SessionEntry } from "./types.js";
 
 type OpenClawAgentDatabaseReader = Pick<OpenClawAgentDatabase, "agentId" | "db">;
-type SessionEntryRow = Selectable<OpenClawAgentKyselyDatabase["session_nodes"]> &
-  SessionEntrySnapshotRow;
 
 function prepareExactSessionEntryQueries(database: DatabaseSync) {
   const db = getNodeSqliteKysely<OpenClawAgentKyselyDatabase>(database);
@@ -139,15 +135,6 @@ function getExactSessionEntryQueries(database: DatabaseSync) {
   }
   return queries;
 }
-
-export type ResolvedSessionEntryRow = {
-  entry: SessionEntry;
-  row: Pick<SessionEntryRow, "current_session_id" | "entry_json" | "session_key" | "updated_at"> &
-    SqliteSessionOwnerRow &
-    SessionEntrySnapshotRow & { rowid?: string } & Partial<
-      Pick<SessionEntryRow, "legacy_acp_migration_json">
-    >;
-};
 
 function parseReadableSessionEntryData(
   database: Pick<OpenClawAgentDatabase, "db">,

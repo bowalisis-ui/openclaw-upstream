@@ -81,7 +81,7 @@ vi.mock("../../system-agent/chat-engine.js", () => {
     },
   };
 });
-vi.mock("../../system-agent/overview.js", () => ({
+vi.mock("../../system-agent/overview-format.js", () => ({
   formatSystemAgentStartupMessage: vi.fn(() => "welcome text"),
 }));
 

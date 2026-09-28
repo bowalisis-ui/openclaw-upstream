@@ -32,9 +32,9 @@ import { materializePreparedModelCatalogOwner } from "./prepared-model-catalog.j
 import { getPreparedModelFullCatalogAuth } from "./prepared-model-runtime-auth.js";
 import {
   getPreparedModelRuntimeSnapshot,
-  publishPreparedModelRuntimeSnapshot,
   refreshPreparedModelRuntimeCatalog,
 } from "./prepared-model-runtime.js";
+import { publishPreparedModelRuntimeSnapshot } from "./prepared-model-runtime.test-support.js";
 import { createStaticCatalogSnapshotFixture } from "./test-helpers/prepared-model-catalog-static-fixture.js";
 import {
   observeSyntheticAuth,

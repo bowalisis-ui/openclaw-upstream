@@ -9,7 +9,7 @@ import type {
   SessionStoreTargetInventoryResult,
   SessionStoreTargetReadRequest,
   SessionStoreTargetReadResult,
-} from "./session-store-target-inventory.js";
+} from "./session-store-target.types.js";
 import {
   withSessionHistoryWorkerReadCandidates,
   type SessionHistoryWorkerLane,

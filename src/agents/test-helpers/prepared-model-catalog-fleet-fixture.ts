@@ -14,9 +14,9 @@ import {
 } from "../prepared-model-catalog-worker.test-support.js";
 import {
   getPreparedModelRuntimeSnapshot,
-  publishPreparedModelRuntimeSnapshot,
   refreshPreparedModelRuntimeSnapshots,
 } from "../prepared-model-runtime.js";
+import { publishPreparedModelRuntimeSnapshot } from "../prepared-model-runtime.test-support.js";
 import type { PreparedModelRuntimeSnapshot } from "../prepared-model-runtime.types.js";
 
 export function createCatalogFleetFixture(

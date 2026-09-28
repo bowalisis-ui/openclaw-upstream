@@ -31,6 +31,11 @@ import { resolveStateDir } from "../paths.js";
 import { formatSqliteSessionFileMarker } from "./legacy-sqlite-marker.js";
 import { resolveSessionArtifactDirectory } from "./paths.js";
 import type {
+  ResolvedSqliteScope,
+  ResolvedSqliteReadScope,
+  ResolvedTranscriptScope,
+  ResolvedTranscriptReadScope,
+  ResolvedSqliteStoreTarget,
   SessionTranscriptReadScope,
   SessionTranscriptWriteScope,
   SqliteSessionArtifactPreparationDiagnostics,
@@ -41,17 +46,12 @@ import {
   resolveSqliteAgentId,
   resolveSqliteSessionKey,
   toDatabaseOptions,
-  type ResolvedSqliteReadScope,
-  type ResolvedSqliteScope,
-  type ResolvedTranscriptReadScope,
-  type ResolvedTranscriptScope,
 } from "./session-accessor.sqlite-scope-helpers.js";
 import type { SqliteSessionWriteOperation } from "./session-accessor.sqlite-write-operation.js";
 import { resolveUnsuffixedSqliteTargetFromSessionStorePath } from "./session-sqlite-target-paths.js";
 import {
   prepareSqliteTargetFromSessionStorePath,
   resolveSqliteTargetFromSessionStorePath,
-  type ResolvedSqliteStoreTarget,
 } from "./session-sqlite-target.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 import type { InternalSessionEntry } from "./types.js";
@@ -61,10 +61,6 @@ export {
   resolveSqliteAgentId,
   resolveSqliteSessionKey,
   toDatabaseOptions,
-  type ResolvedSqliteReadScope,
-  type ResolvedSqliteScope,
-  type ResolvedTranscriptReadScope,
-  type ResolvedTranscriptScope,
 } from "./session-accessor.sqlite-scope-helpers.js";
 
 export type SessionSqliteTargetResolutionCache = Map<
