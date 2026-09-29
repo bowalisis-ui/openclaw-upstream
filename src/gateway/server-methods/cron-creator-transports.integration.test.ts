@@ -87,7 +87,7 @@ describe("original caller through Cron creator transports", () => {
               ownerSessionKey: SESSION,
               ownerAccountId: "default",
             },
-            payload: { toolsAllow: ["*"], timeoutSeconds: 0 },
+            payload: { kind: "agentTurn", message: "Check status", timeoutSeconds: 0 },
           },
         ]);
       } finally {
@@ -212,7 +212,6 @@ describe("original caller through Cron creator transports", () => {
               payload: {
                 kind: "agentTurn",
                 timeoutSeconds: 0,
-                toolsAllow: ["*"],
               },
               owner: { agentId: "main", sessionKey: SESSION, accountId: "default" },
               scheduledToolPolicy: {
@@ -220,13 +219,9 @@ describe("original caller through Cron creator transports", () => {
                 ownerSessionKey: SESSION,
                 ownerAccountId: "default",
               },
-              toolsAllowProvenance: {
-                source: "final-executable-surface",
-                callerOrigin: { kind: origin === "local" ? "local" : "unknown" },
-              },
+              scheduledToolCallerOrigin: { kind: origin === "local" ? "local" : "unknown" },
             },
           ]);
-          expect(before[0]?.runtimeAuthority).toBeUndefined();
           hold = true;
           pending = invoke("Revoked creator");
           const rejected = expect(pending).rejects.toThrow(/authority.*no longer active/i);

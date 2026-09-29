@@ -105,15 +105,18 @@ return {
 
 describe("cron script MCP namespace", () => {
   it.each(["trigger", "payload"] as const)(
-    "calls an exactly named MCP tool, hides the rest, and retires the runtime (%s)",
+    "calls an MCP tool allowed by current agent policy and retires the runtime (%s)",
     async (mode) => {
-      const fixture = createMcpFixture();
+      const fixture = createMcpFixture({
+        extra: {
+          tools: { allow: ["sources__list_sources"], deny: ["team__sources__*", "broken__*"] },
+        },
+      });
       const runtime = createCronScriptRuntime({ config: fixture.config });
       const input = {
         jobId: `mcp-${mode}`,
         script: QUIET_HOUR_SCRIPT,
         state: { cursor: "c1" },
-        toolsAllow: ["sources__list_sources"],
       };
 
       const result =
@@ -136,18 +139,17 @@ describe("cron script MCP namespace", () => {
     },
   );
 
-  it("exposes a server-scoped glob within the owning agent's tool policy", async () => {
+  it("exposes configured servers within the owning agent's current tool policy", async () => {
     const fixture = createMcpFixture({
-      extra: { tools: { deny: ["team__sources__delete_source"] } },
+      extra: { tools: { deny: ["sources__*", "broken__*", "team__sources__delete_source"] } },
     });
     const runtime = createCronScriptRuntime({ config: fixture.config });
 
     await expect(
       runtime.evaluateTrigger({
-        jobId: "mcp-server-glob",
+        jobId: "mcp-current-policy",
         script: QUIET_HOUR_SCRIPT.replaceAll("MCP.sources", "MCP.teamSources"),
         state: null,
-        toolsAllow: ["team__sources__*"],
       }),
     ).resolves.toMatchObject({
       kind: "evaluated",
@@ -157,44 +159,36 @@ describe("cron script MCP namespace", () => {
     expect(fixture.starts()).toBe(1);
   });
 
-  it.each([
-    { caps: "a wildcard", toolsAllow: ["*"], script: "typeof MCP" },
-    { caps: "no toolsAllow", toolsAllow: undefined, script: "typeof MCP" },
-    { caps: "an unprefixed glob", toolsAllow: ["sour*"], script: "typeof MCP" },
-    { caps: "a script that never mentions it", toolsAllow: ["sources__*"], script: '"undefined"' },
-  ])("starts no MCP server for $caps", async ({ toolsAllow, script }) => {
+  it("starts no MCP server for a script that never mentions it", async () => {
     const fixture = createMcpFixture();
     const runtime = createCronScriptRuntime({ config: fixture.config });
 
     await expect(
       runtime.evaluateTrigger({
         jobId: "mcp-not-named",
-        script: `return { fire: false, state: ${script} };`,
+        script: 'return { fire: false, state: "undefined" };',
         state: null,
-        toolsAllow,
       }),
     ).resolves.toEqual({ kind: "evaluated", fire: false, state: "undefined" });
     expect(fixture.starts()).toBe(0);
     expect(getSessionMcpRuntimeManagerForTesting().listRuntimeKeys()).toEqual([]);
   });
 
-  it("runs past a failed named server and names it when the script fails", async () => {
-    const runtime = createCronScriptRuntime({ config: createMcpFixture().config });
-    const toolsAllow = ["sources__list_sources", "broken__*"];
+  it("runs past a failed configured server and names it when the script fails", async () => {
+    const fixture = createMcpFixture({ extra: { tools: { deny: ["team__sources__*"] } } });
+    const runtime = createCronScriptRuntime({ config: fixture.config });
 
     await expect(
       runtime.evaluateTrigger({
         jobId: "mcp-broken",
         script: QUIET_HOUR_SCRIPT,
         state: null,
-        toolsAllow,
       }),
     ).resolves.toMatchObject({ kind: "evaluated", fire: false });
     const result = await runtime.evaluateTrigger({
       jobId: "mcp-broken",
       script: "await MCP.broken.ping({}); return { fire: false };",
       state: null,
-      toolsAllow,
     });
 
     expect(result).toMatchObject({ kind: "error", code: "internal_error" });
@@ -217,6 +211,7 @@ describe("cron script MCP namespace", () => {
       try {
         const port = (listener.address() as AddressInfo).port;
         const fixture = createMcpFixture({
+          extra: { tools: { deny: ["team__sources__*", "broken__*"] } },
           serverArgs: [`${port}`, outcome === "aborted" ? "hang" : "reply"],
         });
         const runtime = createCronScriptRuntime({ config: fixture.config });
@@ -225,7 +220,6 @@ describe("cron script MCP namespace", () => {
           jobId: `mcp-stubborn-${outcome}`,
           script: "await MCP.sources.listSources({}); return { fire: false };",
           state: null,
-          toolsAllow: ["sources__*"],
           abortSignal: controller.signal,
         });
         // The server holds this socket until it is killed, so its close proves retirement.

@@ -713,7 +713,6 @@ describe("scheduled message actions", () => {
             message: nativeCreator
               ? `Set Discord channel ${channelId} to topic ${acceptedTopic}, then try topic ${deniedTopic}, using account ${creatorAccountId}.`
               : `Use message action ${action} for Discord channel ${channelId}${creator === "trusted" ? " with account default" : " without an accountId argument"}.`,
-            toolsAllow: ["message"],
           },
           delivery:
             creator === "account"
@@ -812,8 +811,6 @@ describe("scheduled message actions", () => {
             },
             createdActor: { id: originalCreatorId },
           });
-          expect(job.payload.toolsAllow).toEqual(["message"]);
-          expect(job.payload.toolsAllowIsDefault).toBeUndefined();
         } else if (creator === "trusted") {
           expect(job.scheduledToolPolicy).toEqual({ version: 1, mode: "trusted" });
         } else {
@@ -830,7 +827,7 @@ describe("scheduled message actions", () => {
           });
           expect(job.toolsAllowProvenance).toEqual({
             version: 1,
-            source: "final-executable-surface",
+            source: "authenticated-requester",
             callerOrigin: { kind: "local" },
           });
           expect(job.delivery).toMatchObject({
@@ -839,7 +836,6 @@ describe("scheduled message actions", () => {
             accountId: "other",
           });
         }
-        expect(job).toMatchObject({ payload: { toolsAllow: ["message"] } });
         expect(
           await gateway.client.request("cron.run", { id: job.id, mode: "force" }),
         ).toMatchObject({ ok: true, enqueued: true });
@@ -868,7 +864,6 @@ describe("scheduled message actions", () => {
               id: job.id,
               enabled: false,
               scheduledToolPolicy: { version: 1, mode: "trusted" },
-              payload: { toolsAllow: ["message"] },
             });
             if (disableBeforeResponse === 200) {
               const requestSignal = expectDefined(

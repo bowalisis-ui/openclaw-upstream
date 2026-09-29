@@ -55,7 +55,6 @@ import {
   releaseCodexSandboxExecServerEnvironment,
   type CodexSandboxExecEnvironment,
 } from "./sandbox-exec-server.js";
-import { buildScheduledCodexAppAuthorityInputFingerprint } from "./scheduled-app-authority.js";
 import type { CodexAppServerBindingStore } from "./session-binding.js";
 import {
   clearSharedCodexAppServerClientIfCurrent,
@@ -125,8 +124,6 @@ export async function startCodexAttemptThread(params: {
   bundleMcpThreadConfig: CodexBundleMcpThreadConfig;
   /** Static configured MCP is present on the dynamic surface, so native MCP stays absent. */
   configuredMcpDynamicSurface?: boolean;
-  /** OpenClaw owns configured MCP dynamically for this scheduled turn. */
-  configuredMcpOwnershipVersion?: 1;
   nativeToolSurfaceEnabled: boolean;
   nativeProviderWebSearchSupport: CodexNativeWebSearchSupport;
   sandboxExecServerEnabled: boolean;
@@ -174,7 +171,6 @@ export async function startCodexAttemptThread(params: {
           pluginConfig: params.pluginConfig,
           nativeToolSurfaceEnabled: params.nativeToolSurfaceEnabled,
           hostedAppsSupported: !isCodexResponsesOAuth(params.startupPreparedAuth),
-          scheduledRuntimeAuthority: params.buildAttemptParams().scheduledRuntimeAuthority,
         });
         const {
           pluginThreadConfigRequired,
@@ -186,7 +182,6 @@ export async function startCodexAttemptThread(params: {
           resolvedPluginPolicy?.enabled === true ||
           params.computerUseConfig.enabled ||
           (params.nativeToolSurfaceEnabled &&
-            params.configuredMcpOwnershipVersion !== 1 &&
             hasCodexMcpToolApprovalOverrides(
               params.config?.mcp?.servers,
               params.bundleMcpThreadConfig.userStaticServerNames,
@@ -327,17 +322,11 @@ export async function startCodexAttemptThread(params: {
               appServerVersion: activeStartupClient.getServerVersion(),
               runtimeIdentity: startupRuntimeIdentity,
             });
-            const basePluginThreadConfigInputFingerprint = pluginThreadConfigRequired
+            const pluginThreadConfigInputFingerprint = pluginThreadConfigRequired
               ? buildCodexPluginThreadConfigInputFingerprint({
                   pluginConfig: pluginThreadConfigPluginConfig,
                   appCacheKey: pluginAppCacheKey,
                 })
-              : undefined;
-            const pluginThreadConfigInputFingerprint = basePluginThreadConfigInputFingerprint
-              ? buildScheduledCodexAppAuthorityInputFingerprint(
-                  basePluginThreadConfigInputFingerprint,
-                  attemptParams.scheduledRuntimeAuthority,
-                )
               : undefined;
             embeddedAgentLog.debug(
               "codex plugin thread config eligibility",
@@ -479,7 +468,6 @@ export async function startCodexAttemptThread(params: {
                   : params.bundleMcpThreadConfig.fingerprint,
                 mcpServersFingerprintEvaluated:
                   params.configuredMcpDynamicSurface || params.bundleMcpThreadConfig.evaluated,
-                configuredMcpOwnershipVersion: params.configuredMcpOwnershipVersion,
                 environmentSelection: startupEnvironmentSelection,
                 appServerRuntimeFingerprint,
                 contextEngineProjection: params.contextEngineProjection,
@@ -495,7 +483,6 @@ export async function startCodexAttemptThread(params: {
                       client: activeStartupClient,
                       configCwd: startupExecutionCwd,
                       appCacheKey: pluginAppCacheKey,
-                      scheduledRuntimeAuthority: attemptParams.scheduledRuntimeAuthority,
                     })
                   : undefined,
               }) satisfies Parameters<typeof startOrResumeThread>[0];

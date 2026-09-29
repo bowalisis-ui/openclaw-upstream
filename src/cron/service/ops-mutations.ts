@@ -26,11 +26,7 @@ import {
   nextWakeAtMs,
   recomputeNextRunsForMaintenance,
 } from "./jobs-scheduling.js";
-import {
-  consumeRuntimeAuthorityMutationOptions,
-  reconcileCronChannelRequesterAuthority,
-  reconcileRuntimeAuthority,
-} from "./jobs-tool-policy.js";
+import { reconcileCronChannelRequesterAuthority } from "./jobs-tool-policy.js";
 import {
   cronPatchTouchesDeliveryResolution,
   resolveConfiguredChannelsForValidation,
@@ -143,8 +139,6 @@ export async function add(
         nowMs: now,
         cronConfig: state.deps.cronConfig,
         scheduledToolPolicy: opts?.scheduledToolPolicy,
-        toolsAllowProvenance: opts?.toolsAllowProvenance,
-        toolsAllowExecTarget: opts?.toolsAllowExecTarget,
         configuredChannels,
       });
       finalizeUpdatedJob({
@@ -155,12 +149,7 @@ export async function add(
         scheduleChanged: !isDeepStrictEqual(existing.schedule, nextJob.schedule),
         explicitTriggerState: normalizedInput.state,
       });
-      const runtimeAuthorityMutation = consumeRuntimeAuthorityMutationOptions(opts);
-      reconcileRuntimeAuthority({
-        job: nextJob,
-        ...runtimeAuthorityMutation,
-        explicitlyMutatesToolsAllow: normalizedInput.payload.toolsAllow !== undefined,
-      });
+      opts?.commitGuard?.();
       reconcileCronChannelRequesterAuthority({
         job: nextJob,
         previousJob: existing,
@@ -218,8 +207,6 @@ export async function add(
     const snapshot = snapshotStoreForRollback(state);
     const job = createJob(state, creationInput, {
       scheduledToolPolicy: opts?.scheduledToolPolicy,
-      toolsAllowProvenance: opts?.toolsAllowProvenance,
-      toolsAllowExecTarget: opts?.toolsAllowExecTarget,
       configuredChannels,
     });
     if (opts?.createdActor) {
@@ -228,12 +215,7 @@ export async function add(
     if (opts?.skillLibrarySelections) {
       job.skillLibrarySelections = structuredClone(opts.skillLibrarySelections);
     }
-    const runtimeAuthorityMutation = consumeRuntimeAuthorityMutationOptions(opts);
-    reconcileRuntimeAuthority({
-      job,
-      ...runtimeAuthorityMutation,
-      explicitlyMutatesToolsAllow: normalizedInput.payload.toolsAllow !== undefined,
-    });
+    opts?.commitGuard?.();
     reconcileCronChannelRequesterAuthority({
       job,
       toolsAllowProvenance: opts?.toolsAllowProvenance,
@@ -344,8 +326,6 @@ async function updateLoadedJob(params: {
     scheduleValidationNowMs: now,
     cronConfig: state.deps.cronConfig,
     scheduledToolPolicy: opts?.scheduledToolPolicy,
-    toolsAllowProvenance: opts?.toolsAllowProvenance,
-    toolsAllowExecTarget: opts?.toolsAllowExecTarget,
     configuredChannels,
   });
   finalizeUpdatedJob({
@@ -367,20 +347,11 @@ async function updateLoadedJob(params: {
   });
   const ownerMutation = ownerPreparation ? await ownerPreparation : undefined;
   source.assertCurrent();
-  const runtimeAuthorityMutation = consumeRuntimeAuthorityMutationOptions(opts);
-  reconcileRuntimeAuthority({
-    job: nextJob,
-    ...runtimeAuthorityMutation,
-    explicitlyMutatesToolsAllow:
-      patch.payload !== undefined && Object.hasOwn(patch.payload, "toolsAllow"),
-  });
+  opts?.commitGuard?.();
   reconcileCronChannelRequesterAuthority({
     job: nextJob,
     previousJob: job,
     toolsAllowProvenance: opts?.toolsAllowProvenance,
-    reauthorize: patch.payload !== undefined && Object.hasOwn(patch.payload, "toolsAllow"),
-    reauthorizeCallerOrigin:
-      patch.payload !== undefined && Object.hasOwn(patch.payload, "toolsAllow"),
   });
   const snapshot = snapshotStoreForRollback(state);
   return await persistUpdatedJob({
