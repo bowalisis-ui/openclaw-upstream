@@ -20,6 +20,7 @@ import type {
   ResolvedTranscriptScope,
   TranscriptEvent,
   TranscriptMessageAppendOptions,
+  ResolvedTranscriptScope,
 } from "./session-accessor.sqlite-contract.js";
 import {
   createTranscriptIdentityReader,
