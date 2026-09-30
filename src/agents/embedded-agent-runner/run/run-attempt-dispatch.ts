@@ -397,6 +397,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(input: EmbeddedRunAtt
     trigger: params.trigger,
     terminalReplyExpectation: resolveReplyExpectation(params),
     memoryFlushWritePath: params.memoryFlushWritePath,
+    memoryFlushTools: params.memoryFlushTools,
     messageChannel: params.messageChannel,
     messageProvider: params.messageProvider,
     clientCaps: params.clientCaps,

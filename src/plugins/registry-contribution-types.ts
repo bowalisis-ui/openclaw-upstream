@@ -197,15 +197,36 @@ export type MemoryPromptPreparationRegistration = {
   prepare: MemoryPromptSectionPreparer;
 };
 
-export type MemoryFlushPlan = {
-  softThresholdTokens: number;
-  forceFlushTranscriptBytes: number;
-  reserveTokensFloor: number;
+type MemoryFlushPlanCommon = {
+  /** Deliberate provider override; the host fills omissions from memory-flush config. */
+  softThresholdTokens?: number;
+  /** Deliberate provider override; the host fills omissions from memory-flush config. */
+  forceFlushTranscriptBytes?: number;
+  /** Deliberate provider override; the host fills omissions from the effective compaction reserve. */
+  reserveTokensFloor?: number;
+  /**
+   * Deliberate provider override. The host fills an omission from memory-flush config for
+   * tools-arm plans; a file plan without a model keeps the session's model.
+   */
   model?: string;
   prompt: string;
   systemPrompt: string;
-  relativePath: string;
 };
+
+/**
+ * Provider-owned flush content and persistence with optional timing overrides.
+ * The host resolves timing before invoking the provider and fills every omitted timing field.
+ */
+export type MemoryFlushPlan = MemoryFlushPlanCommon &
+  (
+    | { relativePath: string; persistenceToolNames?: never; lookupToolNames?: never }
+    | {
+        relativePath?: never;
+        persistenceToolNames: readonly string[];
+        /** Read-only helper tools the flush may use to inspect existing provider memory. */
+        lookupToolNames?: readonly string[];
+      }
+  );
 
 export type MemoryFlushPlanResolver = (params: {
   cfg?: OpenClawConfig;

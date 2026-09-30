@@ -44,14 +44,34 @@ export type {
   RegisteredMemorySearchManager,
 } from "./registry-contribution-types.js";
 
+type ResolvedMemoryCapabilityRegistration = MemoryPluginCapabilityRegistration & {
+  flushPlanResolverPluginId?: string;
+};
+
+// Merged capabilities retain the resolver's original supplier across later sidecars.
+function resolveFlushPlanResolverPluginId(
+  registration: MemoryPluginCapabilityRegistration | ResolvedMemoryCapabilityRegistration,
+): string | undefined {
+  return "flushPlanResolverPluginId" in registration
+    ? registration.flushPlanResolverPluginId
+    : registration.capability.flushPlanResolver
+      ? registration.pluginId
+      : undefined;
+}
+
 export function resolveMemoryCapabilityRegistration(
   registrations: readonly MemoryPluginCapabilityRegistration[],
-): MemoryPluginCapabilityRegistration | undefined {
-  let effective: MemoryPluginCapabilityRegistration | undefined;
+): ResolvedMemoryCapabilityRegistration | undefined {
+  let effective: ResolvedMemoryCapabilityRegistration | undefined;
   for (const registration of registrations) {
     const existing = effective;
     if (!existing) {
-      effective = registration;
+      effective = {
+        ...registration,
+        ...(registration.capability.flushPlanResolver
+          ? { flushPlanResolverPluginId: registration.pluginId }
+          : {}),
+      };
       continue;
     }
     const existingOwnsSlot = existing.memorySlotSelected === true;
@@ -68,6 +88,13 @@ export function resolveMemoryCapabilityRegistration(
           ...owner.capability,
         },
         memorySlotSelected: true,
+        ...(owner.capability.flushPlanResolver || contributor.capability.flushPlanResolver
+          ? {
+              flushPlanResolverPluginId: resolveFlushPlanResolverPluginId(
+                owner.capability.flushPlanResolver ? owner : contributor,
+              ),
+            }
+          : {}),
       };
       continue;
     }
@@ -84,6 +111,11 @@ export function resolveMemoryCapabilityRegistration(
         ...registration.capability,
       },
       memorySlotSelected: registration.memorySlotSelected,
+      ...(registration.capability.flushPlanResolver
+        ? { flushPlanResolverPluginId: registration.pluginId }
+        : preserveExisting && existing.flushPlanResolverPluginId
+          ? { flushPlanResolverPluginId: existing.flushPlanResolverPluginId }
+          : {}),
     };
   }
   return effective;
@@ -358,9 +390,45 @@ export function resolveMemoryFlushPlan(params: {
   cfg?: OpenClawConfig;
   nowMs?: number;
   contextWindowTokens?: number;
-}): MemoryFlushPlan | null {
-  return getMemoryCapability()?.capability.flushPlanResolver?.(params) ?? null;
+}): MemoryFlushPlanResolution | null {
+  const registration = getMemoryCapability();
+  const resolver = registration?.capability.flushPlanResolver;
+  if (!registration || !resolver) {
+    return null;
+  }
+  const plan = resolver(params);
+  if (!plan) {
+    return null;
+  }
+  const pluginId = registration.flushPlanResolverPluginId ?? registration.pluginId;
+  return {
+    plan,
+    pluginId,
+    selectedSlotOwner:
+      registration.memorySlotSelected === true && pluginId === registration.pluginId,
+  };
 }
+
+/**
+ * Whether the flush plan resolver belongs to a selected slot owner that registers the
+ * provider-neutral runtime. Such a provider may persist through its own tools, so its
+ * flush does not depend on a writable workspace; it is answered without calling the resolver.
+ */
+export function isMemoryFlushPlanNativeProviderOwned(): boolean {
+  const registration = getMemoryCapability();
+  return Boolean(
+    registration?.capability.flushPlanResolver &&
+    registration.capability.providerRuntime &&
+    registration.memorySlotSelected === true &&
+    (registration.flushPlanResolverPluginId ?? registration.pluginId) === registration.pluginId,
+  );
+}
+
+export type MemoryFlushPlanResolution = {
+  plan: MemoryFlushPlan;
+  pluginId: string;
+  selectedSlotOwner: boolean;
+};
 export function getMemoryRuntime(): MemoryPluginRuntime | undefined {
   return getMemoryCapability()?.capability.runtime;
 }
