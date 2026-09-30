@@ -5,11 +5,33 @@ import type {
 import { createNativeSessionBindingLifecycle } from "openclaw/plugin-sdk/agent-harness-session-runtime";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import { z } from "zod";
+import {
+  agentsApiExecutorBindingSchema,
+  type AgentsApiExecutorBinding,
+} from "./agentsapi-environment.js";
 
-export type AgentsApiBinding = { sessionId: string; configFingerprint: string };
+export type AgentsApiBinding = {
+  sessionId: string;
+  configFingerprint: string;
+  executor?: AgentsApiExecutorBinding;
+};
 
 /** Native identity is plugin-owned; shared runtime owns mutation and lease coordination. */
-export function createAgentsApiBindings(runtime: PluginRuntime) {
+export function createAgentsApiBindings(
+  runtime: PluginRuntime,
+  executorCleanup?: {
+    settle: (
+      localSessionId: string,
+      binding: AgentsApiBinding,
+      assertCurrent: () => void,
+    ) => Promise<void>;
+    retire: (
+      localSessionId: string,
+      binding: AgentsApiBinding,
+      assertCurrent: () => void,
+    ) => Promise<void>;
+  },
+) {
   const stateOptions = {
     namespace: "agentsapi-sessions",
     maxEntries: 100_000,
@@ -119,6 +141,21 @@ export function createAgentsApiBindings(runtime: PluginRuntime) {
         lifecycle.withLease(
           localSessionId,
           async () => {
+            const assertLeaseCurrent = lifecycle.captureLeaseAssertion(localSessionId);
+            const assertResetCurrent = () => {
+              assertCurrent();
+              assertLeaseCurrent();
+            };
+            const binding = nativeBinding(readRecord(state.lookup(localSessionId)));
+            if (binding?.executor) {
+              if (!executorCleanup) {
+                throw new Error("Agents API self-hosted executor cleanup is unavailable");
+              }
+              await executorCleanup.settle(localSessionId, binding, assertResetCurrent);
+              assertResetCurrent();
+              await executorCleanup.retire(localSessionId, binding, assertResetCurrent);
+              assertResetCurrent();
+            }
             await lifecycle.transact(
               localSessionId,
               (current) => ({
@@ -143,23 +180,47 @@ export function createAgentsApiBindings(runtime: PluginRuntime) {
           ...acquisition(params.assertCurrent),
           assertRecordCurrent: () => params.assertCurrent(),
         },
-        (_binding, mutation) => run(mutation),
+        async (stored, mutation) => {
+          const binding = nativeBinding(stored);
+          if (binding?.executor) {
+            const assertLeaseCurrent = lifecycle.captureLeaseAssertion(params.sessionId);
+            const assertDeletionCurrent = () => {
+              params.assertCurrent();
+              assertLeaseCurrent();
+            };
+            const cleanup = executorCleanup;
+            if (!cleanup) {
+              throw new Error("Agents API self-hosted executor cleanup is unavailable");
+            }
+            await cleanup.settle(params.sessionId, binding, assertDeletionCurrent);
+            assertDeletionCurrent();
+            // Retain the binding until retirement succeeds; rollback can reconnect it.
+            await cleanup.retire(params.sessionId, binding, assertDeletionCurrent);
+            assertDeletionCurrent();
+          }
+          return await run(mutation);
+        },
       );
     },
   };
 }
 
-const bindingSchema = z.object({
-  sessionId: z.string().min(1),
-  configFingerprint: z.string().min(1),
-});
+const bindingSchema = z
+  .object({
+    sessionId: z.string().min(1),
+    configFingerprint: z.string().min(1),
+    executor: agentsApiExecutorBindingSchema.optional(),
+  })
+  .refine((row) => !row.executor || row.executor.nativeSessionId === row.sessionId);
 const storedBindingSchema = z
   .object({
     sessionId: z.string().min(1).optional(),
     configFingerprint: z.string().min(1).optional(),
+    executor: agentsApiExecutorBindingSchema.optional(),
     lease: z.object({ token: z.string().min(1), expiresAt: z.number().finite() }).optional(),
   })
-  .refine((row) => (row.sessionId === undefined) === (row.configFingerprint === undefined));
+  .refine((row) => (row.sessionId === undefined) === (row.configFingerprint === undefined))
+  .refine((row) => !row.executor || row.executor.nativeSessionId === row.sessionId);
 type StoredBinding = z.infer<typeof storedBindingSchema>;
 
 function readRecord(raw: unknown): StoredBinding | undefined {
@@ -169,6 +230,10 @@ function readRecord(raw: unknown): StoredBinding | undefined {
 
 function nativeBinding(row: StoredBinding | undefined): AgentsApiBinding | undefined {
   return row?.sessionId && row.configFingerprint
-    ? { sessionId: row.sessionId, configFingerprint: row.configFingerprint }
+    ? {
+        sessionId: row.sessionId,
+        configFingerprint: row.configFingerprint,
+        executor: row.executor,
+      }
     : undefined;
 }
