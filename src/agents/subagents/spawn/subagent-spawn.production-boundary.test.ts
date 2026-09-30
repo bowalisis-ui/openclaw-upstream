@@ -477,10 +477,18 @@ describe("recursive spawn production boundary", () => {
     let childRunId: string | undefined;
     const failures: unknown[] = [];
     try {
-      const result = await createBoundSpawnInvocation(bound, undefined, {
-        provider: "custom",
-        model: "child-model",
-      })();
+      // Model-facing owner fields cannot clear the trusted host identity.
+      const request = {
+        context: "isolated" as const,
+        senderIsOwner: false,
+        spawnedBySenderIsOwner: false,
+      };
+      const result = await createBoundSpawnInvocation(
+        bound,
+        request,
+        { provider: "custom", model: "child-model" },
+        true,
+      )();
       expect(result.details, JSON.stringify(result)).toMatchObject({
         status: "accepted",
         childSessionKey: expect.any(String),
@@ -521,6 +529,8 @@ describe("recursive spawn production boundary", () => {
         loadSessionEntry({ storePath: bound.storePath, sessionKey: details.childSessionKey }),
       ).toMatchObject({
         spawnedBy: parentSessionKey,
+        parentSessionId: "parent-session",
+        spawnedBySenderIsOwner: true,
         spawnDepth: 2,
         providerOverride: "custom",
         modelOverride: "child-model",

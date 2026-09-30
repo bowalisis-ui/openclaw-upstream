@@ -45,6 +45,7 @@ type SessionPromptState = Awaited<ReturnType<typeof createEmbeddedRunSessionProm
 type CompactionResult = Awaited<ReturnType<ContextEngine["compact"]>>;
 
 export type EmbeddedRunCompactionRecoveryInput = {
+  runInput?: PreparedEmbeddedRunInput;
   runParams: RunEmbeddedAgentParams;
   state: EmbeddedRunContextRecoveryState;
   contextEngine: ContextEngine;

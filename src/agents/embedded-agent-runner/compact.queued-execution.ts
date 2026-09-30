@@ -517,6 +517,8 @@ export async function executeQueuedContextEngineCompaction(input: {
             sessionKey: params.sessionKey,
             sessionId: postCompactionSessionId,
             agentId: sessionAgentId,
+            memoryAudience: preparedParams.memoryAudience,
+            sandboxed: preparedParams.memorySandboxed,
             sessionFile: postCompactionSessionFile,
             assertActive,
           });

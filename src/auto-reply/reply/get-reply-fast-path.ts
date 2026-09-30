@@ -145,10 +145,12 @@ export function initFastReplySessionState(params: {
       ? {
           previousSessionId: existingEntry.sessionId,
           spawnedBy: existingEntry.spawnedBy,
+          spawnedBySenderIsOwner: existingEntry.spawnedBySenderIsOwner,
           spawnedWorkspaceDir: existingEntry.spawnedWorkspaceDir,
           spawnedCwd: existingEntry.spawnedCwd,
           parentSessionKey: existingEntry.parentSessionKey,
           parentSessionId: existingEntry.parentSessionId,
+          parentSessionLifecycleRevision: existingEntry.parentSessionLifecycleRevision,
           forkedFromParent: existingEntry.forkedFromParent,
           forkSource: existingEntry.forkSource,
           createdVia: existingEntry.createdVia,
