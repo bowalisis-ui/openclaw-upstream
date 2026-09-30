@@ -44,7 +44,10 @@ import {
 import type { UserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.types.js";
 import { useSessionStoreTempDirs } from "../../test-utils/session-state-cleanup.js";
 import { makeIsolatedAgentJobFixture, makeIsolatedAgentParamsFixture } from "./job-fixtures.js";
-import {
+
+// Persistent cron session tests cover lifecycle admission and mutation races.
+
+const {
   dispatchCronDeliveryMock,
   getCliSessionBindingMock,
   isCliProviderMock,
@@ -67,9 +70,7 @@ import {
   runWithModelFallbackMock,
   resolveConfiguredModelRefMock,
   resolveAgentModelFallbacksOverrideMock,
-} from "./run.test-harness.js";
-
-// Persistent cron session tests cover lifecycle admission and mutation races.
+} = await import("./run.test-harness.js");
 
 const runCronIsolatedAgentTurn = await loadRunCronIsolatedAgentTurn();
 const accessor = await vi.importActual<typeof import("../../config/sessions/session-accessor.js")>(
