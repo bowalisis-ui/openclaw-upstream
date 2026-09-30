@@ -75,7 +75,8 @@ export function resolveMemoryCapabilityRegistration(
       Boolean(registration.capability.publicArtifacts) &&
       !registration.capability.promptBuilder &&
       !registration.capability.flushPlanResolver &&
-      !registration.capability.runtime;
+      !registration.capability.runtime &&
+      !registration.capability.providerRuntime;
     effective = {
       pluginId: registration.pluginId,
       capability: {
@@ -364,6 +365,10 @@ export function getMemoryRuntime(): MemoryPluginRuntime | undefined {
   return getMemoryCapability()?.capability.runtime;
 }
 
+export function getMemoryProviderRuntime() {
+  return getMemoryCapability()?.capability.providerRuntime;
+}
+
 let standaloneMemoryManagerActive = false;
 
 // Standalone managers are intentionally absent from the active plugin registry.
@@ -372,7 +377,11 @@ export function setStandaloneMemoryManagerActive(active: boolean): void {
 }
 
 export function hasMemoryRuntime(): boolean {
-  return standaloneMemoryManagerActive || getMemoryRuntime() !== undefined;
+  return (
+    standaloneMemoryManagerActive ||
+    getMemoryRuntime() !== undefined ||
+    getMemoryProviderRuntime() !== undefined
+  );
 }
 
 function cloneMemoryPublicArtifact(

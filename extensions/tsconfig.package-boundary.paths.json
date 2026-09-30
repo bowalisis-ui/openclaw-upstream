@@ -440,9 +440,6 @@
       "openclaw/plugin-sdk/memory-host-markdown": [
         "../packages/plugin-sdk/dist/src/plugin-sdk/memory-host-markdown.d.ts"
       ],
-      "openclaw/plugin-sdk/memory-host-search": [
-        "../packages/plugin-sdk/dist/src/plugin-sdk/memory-host-search.d.ts"
-      ],
       "openclaw/plugin-sdk/message-tool-delivery-hints": [
         "../packages/plugin-sdk/dist/src/plugin-sdk/message-tool-delivery-hints.d.ts"
       ],
@@ -954,6 +951,9 @@
       ],
       "openclaw/plugin-sdk/agent-harness-completion": [
         "../packages/plugin-sdk/dist/src/plugin-sdk/agent-harness-completion.d.ts"
+      ],
+      "openclaw/plugin-sdk/memory-host-search": [
+        "../packages/plugin-sdk/dist/src/plugin-sdk/memory-host-search.d.ts"
       ]
     }
   }

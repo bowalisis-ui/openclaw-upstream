@@ -689,4 +689,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["backup.status", "backup", "operator.read", "2026.9"],
   ["storage.locations.list", "storage", "operator.read", "2026.9"],
   ["storage.locations.probe", "storage", "operator.read", "2026.9"],
+  // Provider-neutral reads append without changing legacy method indices or payloads.
+  ["memory.get", "memory-search", "operator.read", "2026.9"],
+  ["memory.status", "memory-search", "operator.read", "2026.9"],
 ] as const satisfies readonly CoreGatewayMethodSpecRow[];
