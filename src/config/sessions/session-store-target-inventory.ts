@@ -4,11 +4,7 @@ import { resolveAgentSessionDirsFromAgentsDirSync } from "../../agents/session-d
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { isIncognitoOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.paths.js";
 import { cloneEnvWithPlatformSemantics } from "../config-env-vars.js";
-import {
-  resolveSessionStoreCompatibilityAgentId,
-  retainLegacyDefaultAgentId,
-  tryGetLegacyDefaultAgentId,
-} from "../legacy.default-agent-owner.js";
+import { resolveSessionStoreCompatibilityAgentId } from "../legacy.default-agent-owner.js";
 import { resolveStateDir } from "../state-dir.js";
 import type { OpenClawConfig } from "../types.openclaw.js";
 import { resolveAgentsDirFromSessionStorePath, resolveSessionStorePathCore } from "./paths.js";
@@ -158,7 +154,6 @@ export function captureSessionStoreReadCandidates(storePath: string): SessionSto
 export type SessionStoreTargetInventoryRequest = {
   selection?: "configured";
   config: OpenClawConfig;
-  legacyDefaultAgentId?: string;
   agentIds: string[];
   env: NodeJS.ProcessEnv;
   paths: CapturedSessionStorePaths;
@@ -188,8 +183,6 @@ export function prepareSessionStoreTargetInventory(
   const stateDir = resolveStateDir(env);
   env.OPENCLAW_STATE_DIR = stateDir;
   const config = structuredClone(cfg);
-  const legacyDefaultAgentId = tryGetLegacyDefaultAgentId(cfg);
-  retainLegacyDefaultAgentId(config, legacyDefaultAgentId);
   const agentIds = [...new Set(inputAgentIds.map(normalizeAgentId))];
   const configured = listConfiguredSessionStoreAgentIds(config);
   const paths = new Map(
@@ -257,7 +250,6 @@ export function prepareSessionStoreTargetInventory(
   return {
     selection,
     config,
-    legacyDefaultAgentId,
     agentIds,
     env: { ...env, OPENCLAW_STATE_DIR: env.OPENCLAW_STATE_DIR },
     paths,
@@ -270,7 +262,7 @@ export function readSessionStoreTargetInventory(
   request: SessionStoreTargetInventoryRequest,
 ): SessionStoreTargetInventoryResult {
   const env = cloneEnvWithPlatformSemantics(request.env);
-  const config = retainLegacyDefaultAgentId(request.config, request.legacyDefaultAgentId);
+  const config = request.config;
   const cache: SessionStoreTargetsReadCache = new Map();
   let readFailed = false;
   try {
