@@ -26,9 +26,9 @@ import { cloneEnvWithPlatformSemantics } from "../config-env-vars.js";
 import { resolveStateDir } from "../state-dir.js";
 import { listSessionEntriesReadOnly } from "./session-accessor.sqlite-entry-list.read.js";
 import {
-  loadSessionEntry,
   loadSessionEntryReadOnlyResultInScope,
-} from "./session-accessor.sqlite-entry.js";
+  resolveSessionEntry,
+} from "./session-accessor.sqlite-exact-read.js";
 import { resolveSqliteAgentId, resolveSqliteSessionKey } from "./session-accessor.sqlite-scope.js";
 import type {
   SessionAccessScope,
@@ -205,7 +205,7 @@ export async function readSessionEntryInWorker(
   let storePath = scope.storePath ? path.resolve(scope.storePath) : undefined;
   // Incognito still belongs to its process-held native owner until that owner's complete cutover.
   if (isNativeSessionEntryRead(scope, agentId)) {
-    return loadSessionEntry(scope);
+    return resolveSessionEntry(scope).existing;
   }
   if (!storePath) {
     if (!agentId) {
