@@ -78,10 +78,6 @@ export function readUserProfileIdForEmail(db: DatabaseSync, email: string): stri
   return alias ? selectResolvedUserProfileMetadataById(db, alias.profile_id)?.id : undefined;
 }
 
-export function listUserProfilesSync(options: OpenClawStateDatabaseOptions = {}) {
-  return readUserProfileSnapshotSync(options).profiles;
-}
-
 export function readUserProfileSnapshotSync(
   options: OpenClawStateDatabaseOptions = {},
   githubAccountIds?: readonly number[],

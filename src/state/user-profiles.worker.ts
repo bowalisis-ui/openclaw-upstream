@@ -8,7 +8,7 @@ import {
   selectProfileAccessEntries,
   selectStoredGitHubIdentities,
 } from "./user-profile-github-identity.js";
-import { listUserProfilesSync, readUserProfileSnapshotSync } from "./user-profile-identity.read.js";
+import { readUserProfileSnapshotSync } from "./user-profile-identity.read.js";
 import {
   executeUserProfileWrite,
   linkEmail,
@@ -110,12 +110,8 @@ export const userProfileOperations = {
       },
       input.profileId,
     ),
-  "userProfiles.list": (input, { open, stateOptions }) => {
-    const options = { ...stateOptions(), database: open() };
-    return input?.githubAccountIds === undefined
-      ? { profiles: listUserProfilesSync(options) }
-      : readUserProfileSnapshotSync(options, input.githubAccountIds);
-  },
+  "userProfiles.list": (input, { open, stateOptions }) =>
+    readUserProfileSnapshotSync({ ...stateOptions(), database: open() }, input?.githubAccountIds),
   "userProfiles.directory": ({ limit }, { open, stateOptions }) => {
     const database = open();
     ensureUserProfilesSchema(stateOptions(), database);
