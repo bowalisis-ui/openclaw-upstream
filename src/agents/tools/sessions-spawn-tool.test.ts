@@ -565,7 +565,7 @@ describe("sessions_spawn tool", () => {
       name: "missing required agent ID",
       agentId: undefined,
       requireAgentId: true,
-      expected: "sessions_spawn requires agentId",
+      expected: "sessions_spawn requires explicit agentId",
     },
   ])("keeps visible $name recovery independent of filtered tools", async (testCase) => {
     const callGateway = mockGateway();

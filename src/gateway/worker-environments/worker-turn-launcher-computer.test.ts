@@ -48,7 +48,8 @@ import {
 } from "./worker-turn-launcher.test-support.js";
 
 const prepareGitHubBinding = vi.hoisted(() => vi.fn());
-vi.mock("./worker-github-binding.js", () => ({
+vi.mock("./worker-github-binding.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./worker-github-binding.js")>()),
   prepareWorkerGitHubBindingGrant: prepareGitHubBinding,
 }));
 
