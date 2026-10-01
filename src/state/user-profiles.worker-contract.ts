@@ -69,12 +69,12 @@ export type UserProfileWriteOperations = {
 export type UserProfileWorkerOperations = UserProfileWriteOperations &
   UserChannelIdentityWorkerOperations & {
     "userProfiles.list": {
-    input: { githubAccountIds: readonly number[] } | undefined;
-    output: {
-      profiles: UserProfileListItem[];
-      githubProfiles?: Array<{ accountId: number; profileId: string }>;
+      input: { githubAccountIds: readonly number[] } | undefined;
+      output: {
+        profiles: UserProfileListItem[];
+        githubProfiles?: Array<{ accountId: number; profileId: string }>;
+      };
     };
-  };
     "userProfiles.directory": {
       input: { limit: number };
       output: { profiles: Array<{ id: string; logins: string[] }>; truncated: boolean };
