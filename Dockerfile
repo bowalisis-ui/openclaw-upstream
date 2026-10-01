@@ -294,6 +294,7 @@ COPY --from=runtime-assets --chown=node:node /app/openclaw.mjs .
 COPY --from=runtime-assets --chown=node:node \
     /app/scripts/check-install-dependency-ownership.mjs \
     /app/scripts/freebsd-service-inspect.mjs \
+    /app/scripts/generate-kysely-types.mts \
     /app/scripts/install-cli.sh \
     /app/scripts/install.ps1 \
     /app/scripts/prepare-git-hooks.mjs \
@@ -302,6 +303,7 @@ COPY --from=runtime-assets --chown=node:node \
     /app/scripts/windows-cmd-helpers.mjs \
     ./scripts/
 COPY --from=runtime-assets --chown=node:node \
+    /app/scripts/lib/direct-run.mjs \
     /app/scripts/lib/freebsd-service-discovery.d.mts \
     /app/scripts/lib/freebsd-service-discovery.mjs \
     /app/scripts/lib/fs-safe-prebuild.mjs \
