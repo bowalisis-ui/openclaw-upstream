@@ -4,7 +4,7 @@ import path from "node:path";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { sortUniqueStrings } from "@openclaw/normalization-core/string-normalization";
-import { listAgentIds, resolveEffectiveAgentDir } from "../agents/agent-scope-config.js";
+import { listAgentIds } from "../agents/agent-scope-config.js";
 import { resolveSharedMainAuthAgentDir } from "../agents/auth-profiles/shared-main-dir.js";
 import { resolveInstallAgentDir } from "../agents/install-agent-dir.js";
 import {
@@ -15,11 +15,7 @@ import { resolveChannelDefaultAccountId } from "../channels/plugins/helpers.js";
 import { getChannelPlugin } from "../channels/plugins/registry.js";
 import type { ChannelId } from "../channels/plugins/types.public.js";
 import { readCurrentConfigForResolution } from "../config/io.runtime.js";
-import {
-  resolveSessionStoreCompatibilityAgentId,
-  tryGetLegacyDefaultAgentId,
-} from "../config/legacy.default-agent-owner.js";
-import { resolveLegacyAgentRosterOwner } from "../config/legacy.roster.js";
+import { resolveSessionStoreCompatibilityAgentId } from "../config/legacy.default-agent-owner.js";
 import { resolveConfigPath, resolveOAuthDir, resolveStateDir } from "../config/paths.js";
 import { migrateLegacyMainSessionKeys } from "../config/sessions/legacy-main-session-migration.js";
 import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
@@ -99,6 +95,8 @@ import {
 import { migrationFileExists, readSessionStoreJson5 } from "./state-migrations.fs.js";
 import {
   classifyLegacyOwnerFindings,
+  hasCustomAgentDirOverride,
+  resolveLegacyStateMigrationOwner,
   tryResolveDoctorSessionMigrationAgentId,
 } from "./state-migrations.legacy-owner.js";
 import {
@@ -230,10 +228,6 @@ import {
 
 const autoMigrateChecked = new Set<string>();
 
-function hasCustomAgentDirOverride(env: NodeJS.ProcessEnv): boolean {
-  return Boolean(env.OPENCLAW_AGENT_DIR?.trim() || env.PI_CODING_AGENT_DIR?.trim());
-}
-
 function resolveConcreteBindingAccountId(value: unknown): string | undefined {
   const accountId = normalizeOptionalString(value);
   return accountId && accountId !== "*" ? accountId : undefined;
@@ -262,30 +256,13 @@ export async function detectLegacyStateMigrations(params: {
   const stateDir = resolveStateDir(env, homedir);
   const oauthDir = resolveOAuthDir(env, stateDir);
   const detectSessionFiles = params.mode !== "automatic";
-  const locatorConfig = params.sourceConfigBeforeMigrations ?? params.cfg;
-  const installAgentDir = resolveInstallAgentDir(
-    (resolutionEnv) =>
-      readCurrentConfigForResolution({ config: locatorConfig, env: resolutionEnv }),
-    { env, homedir },
-  );
-  const installedTarget = installAgentDir.migrationTarget;
-  const preimageOwner =
-    tryGetLegacyDefaultAgentId(params.cfg) ?? resolveLegacyAgentRosterOwner(locatorConfig);
-  // Doctor's allocated source identity can differ from both the system agent and raw duplicate ids.
-  const migrationTarget =
-    preimageOwner && listAgentIds(params.cfg).includes(preimageOwner)
-      ? {
-          owner: preimageOwner,
-          dir: hasCustomAgentDirOverride(env)
-            ? installedTarget?.dir
-            : resolveEffectiveAgentDir(params.cfg, preimageOwner, { env, homedir }),
-        }
-      : installedTarget;
-  const migrationAgentId = migrationTarget?.owner;
-  const sessionMigrationAgentId = tryResolveDoctorSessionMigrationAgentId(
-    locatorConfig,
-    migrationAgentId,
-  );
+  const { installAgentDir, migrationTarget, migrationAgentId, sessionMigrationAgentId } =
+    resolveLegacyStateMigrationOwner({
+      cfg: params.cfg,
+      locatorConfig: params.sourceConfigBeforeMigrations ?? params.cfg,
+      env,
+      homedir,
+    });
   const targetAgentId = migrationAgentId ?? sessionMigrationAgentId ?? LEGACY_IMPLICIT_AGENT_ID;
   const targetMainKey = normalizeOptionalString(params.cfg.session?.mainKey) ?? DEFAULT_MAIN_KEY;
   const targetScope = params.cfg.session?.scope;
