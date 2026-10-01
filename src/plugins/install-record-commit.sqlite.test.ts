@@ -496,7 +496,9 @@ export const { legacyConfigRules, normalizeCompatibilityConfig } = createLegacyW
             }),
           );
           gatewayCall.mockImplementation(async (method: string) => {
-            if (method === "plugins.list") return {};
+            if (method === "plugins.list") {
+              return {};
+            }
             expect(method).toBe("plugins.refresh");
             const persisted = JSON.parse(await fs.promises.readFile(state.configPath, "utf8"));
             expect(persisted.channels.msteams.legacyWebhook).toEqual({ port: 3978 });
