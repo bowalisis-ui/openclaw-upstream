@@ -880,8 +880,8 @@ export const databaseWorkerCoreTestFiles = [
   "src/gateway/worker-environments/worker-turn-transcript-footprint.test.ts",
   "src/plugin-sdk/session-transcript-mirror-runtime.test.ts",
   "src/plugin-sdk/session-store-runtime.test.ts",
-  "src/plugin-sdk/session-store-runtime.maintenance.test.ts",
   "src/plugin-sdk/session-store-runtime.conversation.test.ts",
+  "src/plugin-sdk/session-store-runtime.maintenance.test.ts",
   "src/plugin-sdk/session-transcript-runtime-visible-delta.test.ts",
 ];
 
@@ -915,6 +915,7 @@ export const databaseWorkerCoreFormerFastKinds = new Map([
   ["src/commands/doctor/auth-alias-import-recovery.test.ts", "unitFast"],
   ["src/commands/doctor/auth-alias-preservation.test.ts", "unitFast"],
   ["src/plugin-sdk/memory-host-events.test.ts", "unitFastFakeTimers"],
+  ["src/plugin-sdk/session-store-runtime.maintenance.test.ts", "unitFastIsolated"],
   ["src/plugin-sdk/outbound-media.bulk.test.ts", "unitFast"],
   ["src/agents/provider-transport-fetch.capture.test.ts", "unitFast"],
   ["src/proxy-capture/proxy-server.test.ts", "unitFast"],
