@@ -1111,6 +1111,7 @@ describe("dispatchReplyFromConfig", () => {
         modelCatalog: { entries: [], routeVariants: [] },
         inboundPluginRegistry: createTestRegistry([]),
         pluginGeneration: {
+          remoteCatalog: null,
           pluginMetadataSnapshot: createPluginMetadataSnapshotFixture(),
           inlineProviderModels: [],
           configuredCatalogEntries: [],
