@@ -442,7 +442,9 @@ function openAgentDatabaseBackend(
       );
     }
     if (command.type === "session.transcript.initialize" && transcript) {
-      transcript.assertIdentity(command.input);
+      const assertIdentity: typeof import("../config/sessions/session-accessor.sqlite-scope.js").assertSqliteTranscriptWriteIdentity =
+        transcript.assertIdentity;
+      assertIdentity(command.input);
       const initialize = transcript.initialize;
       return writeTransaction(
         "session.entry.create-with-transcript",
@@ -484,7 +486,9 @@ function openAgentDatabaseBackend(
             if (!transcript) {
               throw new Error("Session transcript initialization was not prepared");
             }
-            transcript.assertIdentity(initialization);
+            const assertIdentity: typeof import("../config/sessions/session-accessor.sqlite-scope.js").assertSqliteTranscriptWriteIdentity =
+              transcript.assertIdentity;
+            assertIdentity(initialization);
             transcript.initialize(
               current,
               { agentId: input.agentId, path: input.databasePath, ...initialization },
