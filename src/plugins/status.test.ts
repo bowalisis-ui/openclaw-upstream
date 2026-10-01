@@ -1,11 +1,11 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearPluginMetadataLifecycleCaches } from "./plugin-metadata-lifecycle.js";
-import * as status from "./status.js";
 import {
   buildPluginCompatibilityNotices,
   buildPluginCompatibilityWarnings,
 } from "./status-compatibility.js";
+import * as status from "./status.js";
 import {
   createAutoEnabledStatusConfig,
   createCompatChainFixture,
