@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { Writable } from "node:stream";
 import {
   readWorkspaceSkillResources,
   resolveWorkspaceWorkerArgv,
@@ -16,6 +17,7 @@ import { asOptionalRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { evaluateFileReadPolicySnapshot } from "../shared/policy.js";
 import { readWorkspaceMemoryRequest } from "../shared/workspace-memory-request.js";
 import { readWorkspaceSkillsRequest } from "../shared/workspace-skills-request.js";
+import { prepareSkillSource, retireSkillSource } from "./workspace-skill-source.js";
 
 /** Run the same packaged file worker used by SSH adapters; never run arbitrary argv. */
 export function createWorkspaceCommand(
@@ -57,18 +59,43 @@ export function createWorkspaceCommand(
         }
       }
       io.signal.throwIfAborted();
+      const interactive =
+        kind === "skills" && ["applyRoot", "removeSkill"].includes(params.operation);
+      let childInput: Writable | undefined;
+      let hasStarted = false;
+      let source: Awaited<ReturnType<typeof prepareSkillSource>> | undefined;
       const started = createDeferred<void>();
       const unsubscribe = io.frames.onMessage((message) => {
-        if (Buffer.from(message).toString("utf8") !== "start") {
+        if (!hasStarted && Buffer.from(message).toString("utf8") === "start") {
+          hasStarted = true;
+          started.resolve();
+          return;
+        }
+        if (!interactive || !childInput || message.byteLength > 1024 * 1024) {
           throw new Error("Unexpected workspace worker input");
         }
-        started.resolve();
+        const decision = asOptionalRecord(JSON.parse(Buffer.from(message).toString("utf8")));
+        if (!decision || !("decision" in decision)) {
+          throw new Error("Expected a Gateway Skill policy decision");
+        }
+        childInput.write(`${JSON.stringify(decision)}\n`);
       });
       const abortStart = () => started.resolve();
       io.signal.addEventListener("abort", abortStart, { once: true });
       try {
         await started.promise;
         io.signal.throwIfAborted();
+        let workerRequest = request.request;
+        if (kind === "skills" && params.operation === "applyRoot") {
+          const input = JSON.parse(request.request);
+          source = await prepareSkillSource(request.workspaceDir, input.sourceArchive);
+          const { sourceArchive: _archive, ...files } = input;
+          workerRequest = JSON.stringify({
+            ...files,
+            extractedRoot: source.extractedRoot,
+            publicationCheckpoints: true,
+          });
+        }
         if (kind === "skills" && params.operation === "readResources") {
           const assertFileAccess = createSkillFileAccessAssertion(
             params.resourceReadPolicy,
@@ -122,10 +149,11 @@ export function createWorkspaceCommand(
         io.signal.addEventListener("abort", stop, { once: true });
         try {
           io.signal.throwIfAborted();
-          if (request.watch) {
-            child.stdin.write(`${request.request.trimEnd()}\n`);
+          childInput = child.stdin;
+          if (request.watch || interactive) {
+            child.stdin.write(`${workerRequest.trimEnd()}\n`);
           } else {
-            child.stdin.end(request.request);
+            child.stdin.end(workerRequest);
           }
           const discoveryChunks: Buffer[] | undefined =
             kind === "skills" && params.operation === "discovery" ? [] : undefined;
@@ -192,6 +220,16 @@ export function createWorkspaceCommand(
       } finally {
         io.signal.removeEventListener("abort", abortStart);
         unsubscribe();
+        try {
+          await source?.cleanup();
+        } finally {
+          if (kind === "skills" && params.operation === "applyRoot") {
+            await retireSkillSource(
+              request.workspaceDir,
+              JSON.parse(request.request).sourceArchive,
+            );
+          }
+        }
       }
     },
   };
