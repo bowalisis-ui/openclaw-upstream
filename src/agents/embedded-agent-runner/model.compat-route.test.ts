@@ -1,7 +1,7 @@
 import { configureAiTransportHost, getAiTransportHost } from "@openclaw/ai";
 import { clampThinkingLevel } from "@openclaw/ai/internal/runtime";
 import { describe, expect, it } from "vitest";
-import { createOpenAICompletionsTransportStreamFn } from "../../../packages/ai/src/transports/openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "../../../packages/ai/src/transports/openai-completions-transport-entry.js";
 import { materializeRuntimeConfig } from "../../config/materialize.js";
 import type {
   ModelCompatConfig,

@@ -324,7 +324,7 @@ async function runOpenAi(
   const [{ streamOpenAICompletions }, { createOpenAICompletionsTransportStreamFn }] =
     await Promise.all([
       import("./providers/openai-completions.js"),
-      import("./transports/openai-completions-transport.js"),
+      import("./transports/openai-completions-transport-entry.js"),
     ]);
   const stream =
     implementation === "provider"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport-entry.js";
 import type { Context, Model, SimpleStreamOptions } from "../types.js";
 import {
   streamOpenAICompletions,

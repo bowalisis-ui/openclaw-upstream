@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import { convertMessages } from "../openai-completions-messages.js";
 import { resolveOpenAICompletionsCompat } from "../transports/openai-completions-compat.js";
-import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport-entry.js";
 import type { AssistantMessageEventStreamLike, Context, Model } from "../types.js";
 import { streamOpenAICompletions } from "./openai-completions.js";
 

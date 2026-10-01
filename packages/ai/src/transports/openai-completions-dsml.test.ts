@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { ChatCompletionChunk } from "openai/resources/chat/completions.js";
 import { describe, expect, it } from "vitest";
 import { processCompletionsStream } from "./openai-completions-stream.js";
-import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport-entry.js";
 import {
   type CapturedStreamEvent,
   createAssistantOutput,

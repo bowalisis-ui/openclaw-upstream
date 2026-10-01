@@ -2,7 +2,7 @@ import { hash } from "node:crypto";
 import { Type } from "typebox";
 import { afterEach, expect, it, vi } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../../../packages/ai/src/host.js";
-import { createOpenAICompletionsTransportStreamFn } from "../../../packages/ai/src/transports/openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "../../../packages/ai/src/transports/openai-completions-transport-entry.js";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import {
   onInternalDiagnosticEvent,

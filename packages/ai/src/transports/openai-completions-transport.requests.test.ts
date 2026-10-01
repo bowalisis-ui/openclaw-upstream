@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import type { Model } from "../types.js";
-import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport-entry.js";
 import { makeCompletionsModel } from "./openai-completions.test-support.js";
 
 const COLD_RUNNER_HTTP_TEST_TIMEOUT_MS = 300_000;

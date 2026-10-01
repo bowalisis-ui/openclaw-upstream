@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import { createAnthropicMessagesTransportStreamFn } from "../transports/anthropic-transport-stream.js";
-import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport-entry.js";
 import type { Context, Model } from "../types.js";
 import { streamAnthropic } from "./anthropic.js";
 import { streamOpenAICompletions } from "./openai-completions.js";

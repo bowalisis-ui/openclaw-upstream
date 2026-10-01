@@ -1,7 +1,7 @@
 import type { Api, Model, StreamFn } from "@openclaw/llm-core";
 import { getAiTransportHost } from "../host.js";
 import { createAnthropicMessagesTransportStreamFn } from "./anthropic-transport-stream.js";
-import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport-entry.js";
 import { OPENAI_RESPONSES_APIS } from "./openai-responses-contracts.js";
 import {
   createAzureOpenAIResponsesTransportStreamFn,

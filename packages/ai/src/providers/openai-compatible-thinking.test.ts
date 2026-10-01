@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { configureAiTransportHost } from "../host.js";
-import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport-entry.js";
 import { createOpenAIResponsesTransportStreamFn } from "../transports/openai-responses-transport.js";
 import type { Context, Model, ModelThinkingLevel } from "../types.js";
 import { streamOpenAICompletions, streamSimpleOpenAICompletions } from "./openai-completions.js";

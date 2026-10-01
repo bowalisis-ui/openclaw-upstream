@@ -15,7 +15,7 @@ export * from "./transports/openai-completions-string-content.js";
 export {
   buildOpenAICompletionsParams,
   createOpenAICompletionsTransportStreamFn,
-} from "./transports/openai-completions-transport.js";
+} from "./transports/openai-completions-transport-entry.js";
 export * from "./transports/openai-reasoning-compat.js";
 export * from "./transports/openai-responses-payload-policy.js";
 export * from "./transports/openai-responses-replay.js";

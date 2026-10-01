@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import type { Model } from "../types.js";
 import { processCompletionsStream } from "./openai-completions-stream.js";
-import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport-entry.js";
 import {
   makeCompletionsChunk,
   createAssistantOutput,

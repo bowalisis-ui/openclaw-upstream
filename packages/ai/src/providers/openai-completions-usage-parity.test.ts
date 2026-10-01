@@ -1,7 +1,7 @@
 import type { ChatCompletionChunk } from "openai/resources/chat/completions.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
-import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport-entry.js";
 import type { AssistantMessageEventStreamLike, Context, Model } from "../types.js";
 import { streamOpenAICompletions } from "./openai-completions.js";
 

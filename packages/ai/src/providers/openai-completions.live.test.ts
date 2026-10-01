@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "../transports/openai-completions-transport-entry.js";
 import type { Context, Model } from "../types.js";
 import { streamOpenAICompletions, streamSimpleOpenAICompletions } from "./openai-completions.js";
 

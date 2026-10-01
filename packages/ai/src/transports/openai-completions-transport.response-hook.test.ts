@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } fr
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import { streamOpenAICompletions } from "../providers/openai-completions.js";
 import type { AssistantMessageEventStreamLike, Context, Model, StreamOptions } from "../types.js";
-import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport.js";
+import { createOpenAICompletionsTransportStreamFn } from "./openai-completions-transport-entry.js";
 import {
   withProviderAcceptanceObserver,
   type ProviderAcceptance,
