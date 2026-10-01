@@ -47,12 +47,10 @@ vi.mock("node:fs/promises", async () => {
 
 let detectBrowserOpenSupport: typeof import("./browser-open.js").detectBrowserOpenSupport;
 let openUrl: typeof import("./browser-open.js").openUrl;
-let resolveBrowserOpenCommand: typeof import("./browser-open.js").resolveBrowserOpenCommand;
 
 beforeEach(async () => {
   vi.resetModules();
-  ({ detectBrowserOpenSupport, openUrl, resolveBrowserOpenCommand } =
-    await import("./browser-open.js"));
+  ({ detectBrowserOpenSupport, openUrl } = await import("./browser-open.js"));
 });
 
 afterEach(() => {

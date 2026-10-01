@@ -179,9 +179,16 @@ describe("gateway startup import boundaries", () => {
     expect(serverImpl).not.toMatch(
       /import\s+\{[^}]*resolveSessionKeyForRun[^}]*\}\s+from "\.\/server-session-key\.js"/s,
     );
-    expect(readSource("src/gateway/server-runtime-subscriptions.ts")).toContain(
-      'import("./server-session-key.js")',
+    const sessionKeyGraph = collectStaticValueImportGraph("src/gateway/server-session-key.ts");
+    // Run keys now use the resident ID index; importing that resolver must not
+    // restore its former full-store lookup dependency.
+    for (const deferredPath of ["src/gateway/session-utils.ts", "src/config/sessions/store.ts"]) {
+      expect(sessionKeyGraph.has(path.join(repoRoot, deferredPath))).toBe(false);
+    }
+    const subscriptionGraph = collectStaticValueImportGraph(
+      "src/gateway/server-runtime-subscriptions.ts",
     );
+    expect(subscriptionGraph.has(path.join(repoRoot, "src/gateway/server-chat.ts"))).toBe(false);
     expect(readSource("src/gateway/server-shared-auth-generation.ts")).not.toContain(
       'from "./config-reload.js"',
     );
@@ -243,14 +250,27 @@ describe("gateway startup import boundaries", () => {
     );
     const serverStart = serverImpl.indexOf("export async function startGatewayServerCore");
     const postReadyStart = serverImpl.indexOf("scheduleGatewayPostReadyMaintenance({", serverStart);
+    const cleanupTaskStart = serverImpl.indexOf(
+      'id: "maintenance:retained-plugin-generations"',
+      postReadyStart,
+    );
+    const cleanupLoad = serverImpl.indexOf(
+      'import("./server-retained-plugin-cleanup.js")',
+      cleanupTaskStart,
+    );
     const cleanupCall = serverImpl.lastIndexOf("cleanupRetainedPluginInstallGenerations(");
+    const startupGraph = collectStaticValueImportGraph("src/gateway/server-startup-finish.ts");
 
     expect(staticImports).not.toContain("../plugins/managed-npm-retention.js");
     expect(staticImports).not.toContain("../plugins/installed-plugin-index-records.js");
+    expect(
+      startupGraph.has(path.join(repoRoot, "src/gateway/server-retained-plugin-cleanup.ts")),
+    ).toBe(false);
     expect(cleanup).toContain('import("../plugins/managed-npm-retention.js")');
-    expect(cleanup).toContain('import("../plugins/installed-plugin-index-records.js")');
     expect(postReadyStart).toBeGreaterThan(serverStart);
-    expect(cleanupCall).toBeGreaterThan(postReadyStart);
+    expect(cleanupTaskStart).toBeGreaterThan(postReadyStart);
+    expect(cleanupLoad).toBeGreaterThan(cleanupTaskStart);
+    expect(cleanupCall).toBeGreaterThan(cleanupLoad);
     expect(cleanup).toContain("loadInstalledPluginIndexInstallRecordsSync()");
   });
 

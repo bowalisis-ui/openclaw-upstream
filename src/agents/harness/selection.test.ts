@@ -187,7 +187,12 @@ vi.mock("./context-engine-turn-attempt.js", () => ({
   drainPendingContextEngineTurnsBeforeRun:
     contextEngineTurnAttemptMocks.drainPendingContextEngineTurnsBeforeRun,
 }));
-vi.mock("../tools/gateway.js", () => ({ callGatewayTool: vi.fn() }));
+vi.mock("../tools/gateway.js", () => ({
+  callGatewayTool: vi.fn(),
+  callInProcessGatewayTool: vi.fn(() => {
+    throw new Error("Harness tool registration must not dispatch a Gateway request");
+  }),
+}));
 
 const mockCallGatewayTool = vi.mocked(callGatewayTool);
 
