@@ -7,7 +7,7 @@ import path from "node:path";
 import { extractApplyPatchTargets } from "./apply-patch-targets.js";
 import { preserveAtPrefixedRelativePath, resolvePathFromInput } from "./path-policy.js";
 import { normalizeFileReferencePrefix, resolveSandboxInputPath } from "./sandbox-paths.js";
-import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
+import type { SandboxFsBridge } from "./sandbox/fs-bridge.types.js";
 
 function relativePathEscapesRoot(relativePath: string): boolean {
   return (

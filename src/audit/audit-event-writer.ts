@@ -11,8 +11,11 @@ import {
   formatAuditWriterError,
   formatAuditWriterRequestError,
 } from "./audit-event-writer.errors.js";
-import type { AuditWriterRequest, AuditWriterResult } from "./audit-event-writer.types.js";
-import type { AuditWriterOperations } from "./audit-event-writer.worker.js";
+import type {
+  AuditWriterOperations,
+  AuditWriterRequest,
+  AuditWriterResult,
+} from "./audit-event-writer.types.js";
 import { parseExecutionDecisionWork } from "./execution-decision-work.js";
 import type { ExecutionDecisionWork } from "./execution-decision-work.types.js";
 import type { ExecutionIdentityAdmissionWork } from "./execution-identity-admission.js";

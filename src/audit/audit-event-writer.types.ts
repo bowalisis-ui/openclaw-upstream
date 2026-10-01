@@ -1,5 +1,9 @@
 import type { DecisionReceiptV1 } from "../../packages/gateway-protocol/src/index.js";
-import type { AuditEventInput } from "./audit-event-types.js";
+import type {
+  AuditEventInput,
+  AuditEventListPage,
+  AuditEventListQuery,
+} from "./audit-event-types.js";
 import type { ExecutionDecisionWork } from "./execution-decision-work.types.js";
 import type { ExecutionIdentityAdmissionWork } from "./execution-identity-admission.js";
 
@@ -15,3 +19,11 @@ export type AuditMaintenanceFamily = "events" | "identity" | "decisions" | "prog
 export type AuditWriterResult =
   | { status: "settled"; deleted?: number; error?: string }
   | { status: "retry" };
+
+export type AuditWriterOperations = {
+  "audit.writer.process": { input: AuditWriterRequest; output: AuditWriterResult };
+  "audit.writer.prune": { input: AuditMaintenanceFamily; output: AuditWriterResult };
+};
+export type AuditWorkerOperations = AuditWriterOperations & {
+  "audit.events.list": { input: AuditEventListQuery; output: AuditEventListPage };
+};

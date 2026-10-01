@@ -9,11 +9,11 @@ import { captureChannelReadAuthority } from "../shared/channel-read-authority.js
 import { createKeyedFifoLeaseRegistry } from "../shared/keyed-fifo-lease.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.types.js";
-import type { ManagedImageRecordMutation } from "./managed-image-record-store.kernel.js";
 import {
   executeOpenClawStateWorker,
   runOpenClawStateWorkerOperation,
 } from "../state/openclaw-state-worker-store.js";
+import type { ManagedImageRecordMutation } from "./managed-image-record-store.kernel.js";
 import type {
   ManagedImageRecord,
   ManagedImageRecordAttachment,

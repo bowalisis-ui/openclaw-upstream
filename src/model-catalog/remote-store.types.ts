@@ -8,3 +8,10 @@ export type RemoteModelCatalogStoreRow = {
   last_modified: string | null;
   checked_at: number;
 };
+
+export type ModelCatalogWorkerOperations = {
+  "modelCatalog.remote.read": {
+    input: { artifactPreservingReadOnly: boolean };
+    output: RemoteModelCatalogStoreRow | undefined;
+  };
+};

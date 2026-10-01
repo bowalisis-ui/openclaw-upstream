@@ -6,25 +6,19 @@ import {
 import { isOpenClawStateWriteContentionError } from "../state/openclaw-state-ownership.js";
 import type {
   WorkerOperationContext,
-  WorkerOperationHandlers,
-  WorkerOperations,
+  WorkerOperationHandlersFor,
 } from "../state/worker-operation-registry.js";
 import { listAuditEventsInDatabase } from "./audit-event-read.kernel.js";
 import {
   pruneExpiredAuditEventsInDatabase,
   recordAuditEventInDatabase,
 } from "./audit-event-store.js";
-import type { AuditEventListQuery } from "./audit-event-types.js";
 import { isOutboundMessageProgressInput } from "./audit-event-types.js";
 import {
   formatAuditWriterError,
   formatAuditWriterRequestError,
 } from "./audit-event-writer.errors.js";
-import type {
-  AuditMaintenanceFamily,
-  AuditWriterRequest,
-  AuditWriterResult,
-} from "./audit-event-writer.types.js";
+import type { AuditWorkerOperations, AuditWriterResult } from "./audit-event-writer.types.js";
 import {
   pruneExpiredExecutionDecisionFactsInDatabase,
   recordExecutionDecisionFactInDatabase,
@@ -63,9 +57,8 @@ function executeAuditAttempt(
 }
 
 export const auditOperations = {
-  "audit.events.list": (input: AuditEventListQuery, { open }) =>
-    listAuditEventsInDatabase(open().db, input),
-  "audit.writer.prune": (input: AuditMaintenanceFamily, context) =>
+  "audit.events.list": (input, { open }) => listAuditEventsInDatabase(open().db, input),
+  "audit.writer.prune": (input, context) =>
     executeAuditAttempt(
       context,
       (database) => {
@@ -79,7 +72,7 @@ export const auditOperations = {
       },
       formatAuditWriterError,
     ),
-  "audit.writer.process": (request: AuditWriterRequest, context) =>
+  "audit.writer.process": (request, context) =>
     executeAuditAttempt(
       context,
       (database) => {
@@ -100,10 +93,4 @@ export const auditOperations = {
       },
       (error) => formatAuditWriterRequestError(request, error),
     ),
-} satisfies WorkerOperationHandlers;
-
-export type AuditWorkerOperations = WorkerOperations<typeof auditOperations>;
-export type AuditWriterOperations = Pick<
-  AuditWorkerOperations,
-  "audit.writer.process" | "audit.writer.prune"
->;
+} satisfies WorkerOperationHandlersFor<AuditWorkerOperations>;
