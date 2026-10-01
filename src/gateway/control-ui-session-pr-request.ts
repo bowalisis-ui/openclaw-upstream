@@ -5,7 +5,9 @@ export function prepareSessionPullRequestGitHubRead(
   host: string,
   fetchImpl: typeof fetch,
   assertAccess: () => void,
+  options: { optionalAuth?: boolean } = {},
 ) {
+  const optionalAuth = options.optionalAuth !== false;
   const selected = gitHubPublicApi.resolveGitHubApiCredentialScope(undefined, host);
   const assertCurrent = () => {
     assertAccess();
@@ -32,7 +34,7 @@ export function prepareSessionPullRequestGitHubRead(
       beforeRedirect?: (url: URL) => Promise<void>,
     ) {
       assertCurrent();
-      const value = await gitHubPublicApi.withOptionalGitHubAuth(selected.token, async (token) =>
+      const readJson = async (token: string | undefined) =>
         gitHubPublicApi.readGitHubJsonResponse(
           await gitHubPublicApi.fetchGitHubApi(
             url,
@@ -46,8 +48,10 @@ export function prepareSessionPullRequestGitHubRead(
             selected.apiBaseUrl,
           ),
           maxBytes,
-        ),
-      );
+        );
+      const value = optionalAuth
+        ? await gitHubPublicApi.withOptionalGitHubAuth(selected.token, readJson)
+        : await readJson(selected.token);
       assertCurrent();
       return value;
     },

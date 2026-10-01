@@ -30,6 +30,18 @@ export type GitCheckoutDiffInput = { cwd: string; baseCommit?: string } & (
 );
 
 export type GitReadOperations = {
+  "repository.identities": {
+    input: { roots: string[] };
+    output: Array<
+      | {
+          checkoutRoot: string;
+          repoRoot: string;
+          originUrl: string;
+          fingerprint: string;
+        }
+      | undefined
+    >;
+  };
   "checkout.revision": { input: { root: string; includeIndex: boolean }; output: string | null };
   "checkout.context": {
     input: { root: string; githubHost?: string };
