@@ -233,6 +233,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/auto-reply/reply/abort.test.ts",
   "src/auto-reply/reply/dispatch-from-config.pending-restart.test.ts",
   "src/auto-reply/reply/session.acp-reset-routing.test.ts",
+  "src/auto-reply/reply/session-fork.test.ts",
   "src/auto-reply/reply/dispatch-acp.test.ts",
   "src/auto-reply/reply/session.test.ts",
   "src/agents/worktrees/empty-source.test.ts",
