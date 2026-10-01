@@ -108,23 +108,47 @@ describe("registered session GitHub publication access", () => {
       const index = await fs.readFile(path.join(workspace.cwd, ".git/index"));
       const before = await workspace.git("diff", "HEAD");
       const respond = vi.fn();
-      const params = {
+      const params: {
+        sessionKey: string;
+        idempotencyKey: string;
+        review?: { reviewId: string; digest: string };
+      } = {
         sessionKey: target === "missing" ? "agent:main:dashboard:missing" : SESSION_KEY,
         idempotencyKey: `${target}-${policy}-${actor}`,
       };
+      const context = {
+        ...f.guestSource.context,
+        githubPublicationService: f.coordinator,
+      } as GatewayRequestContext;
+      const client =
+        actor === "system"
+          ? createSyntheticPluginRuntimeClient({
+              operatorRoleActor: { kind: "system" },
+              scopes: ["operator.write"],
+            })
+          : person;
+      if (outcome === "published") {
+        const prepared = vi.fn();
+        await handleGatewayRequest({
+          req: {
+            type: "req",
+            id: `prepare:${params.idempotencyKey}`,
+            method: "sessions.github.review",
+            params: { ...params, action: "prepare" },
+          },
+          context,
+          client,
+          isWebchatConnect: () => false,
+          respond: prepared,
+        });
+        expect(prepared).toHaveBeenCalledWith(true, expect.objectContaining({ status: "ready" }));
+        const candidate = prepared.mock.calls[0]![1];
+        params.review = { reviewId: candidate.reviewId, digest: candidate.digest };
+      }
       await handleGatewayRequest({
         req: { type: "req", id: params.idempotencyKey, method: "sessions.github.publish", params },
-        context: {
-          ...f.guestSource.context,
-          githubPublicationService: f.coordinator,
-        } as GatewayRequestContext,
-        client:
-          actor === "system"
-            ? createSyntheticPluginRuntimeClient({
-                operatorRoleActor: { kind: "system" },
-                scopes: ["operator.write"],
-              })
-            : person,
+        context,
+        client,
         isWebchatConnect: () => false,
         respond,
       });
@@ -148,4 +172,56 @@ describe("registered session GitHub publication access", () => {
       }
     },
   );
+  it("lets an own-session guest request review without preparing credentials or publication", async () => {
+    const f = await createRequesterPublicationFixture(vi.fn(), "local", {
+      sessionId: SESSION_ID,
+      sessionKey: SESSION_KEY,
+    });
+    const respond = vi.fn();
+    mocks.prepareIdentity.mockClear();
+    mocks.runCommand.mockClear();
+    const context = {
+      ...f.guestSource.context,
+      githubPublicationService: f.coordinator,
+    } as GatewayRequestContext;
+    await handleGatewayRequest({
+      req: {
+        type: "req",
+        id: "request-review",
+        method: "sessions.github.requestReview",
+        params: { sessionKey: SESSION_KEY, idempotencyKey: "guest-review" },
+      },
+      context,
+      client: f.guestSource.client,
+      isWebchatConnect: () => false,
+      respond,
+    });
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ status: "requested", digest: null, diffLength: 0 }),
+    );
+    expect(mocks.prepareIdentity).not.toHaveBeenCalled();
+    expect(
+      mocks.runCommand.mock.calls.every(([argv]) => argv[0] !== "gh" && !argv.includes("diff")),
+    ).toBe(true);
+    expect(f.externalWrites).toEqual([]);
+    respond.mockClear();
+    await handleGatewayRequest({
+      req: {
+        type: "req",
+        id: "prepare-review",
+        method: "sessions.github.review",
+        params: { sessionKey: SESSION_KEY, idempotencyKey: "guest-prepare", action: "prepare" },
+      },
+      context,
+      client: f.guestSource.client,
+      isWebchatConnect: () => false,
+      respond,
+    });
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({ code: "FORBIDDEN", message: "missing scope: operator.write" }),
+    );
+  });
 });
