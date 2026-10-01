@@ -20,7 +20,7 @@ function hasAuthenticatedControlUiIdentity(clients: GatewayClientRegistry): bool
 }
 
 /** Projects the live authenticated Control UI identity set independently of TTL presence rows. */
-export function createAuthenticatedControlUiPresenceProjection(
+function createAuthenticatedControlUiPresenceProjection(
   clients: GatewayClientRegistry,
   onChanged: (present: boolean) => void,
 ) {
