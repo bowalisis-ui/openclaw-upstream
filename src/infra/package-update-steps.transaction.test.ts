@@ -9,15 +9,13 @@ import {
   hasCommandProcessCleanupError,
 } from "../process/exec-result.js";
 import { withTestDir } from "../test-helpers/temp-dir.js";
-import {
-  runGlobalPackageUpdateSteps,
-  type PackageUpdateTransaction,
-} from "./package-update-steps.js";
+import { runGlobalPackageUpdateSteps } from "./package-update-steps.js";
 import {
   createNpmTarget,
   createRootRunner,
   writePackageRoot,
 } from "./package-update-steps.test-support.js";
+import type { PackageUpdateTransaction } from "./package-update-swap-contract.js";
 import type { UpdateStepResult } from "./update-step-result.js";
 
 describe("retained package update transactions", () => {
