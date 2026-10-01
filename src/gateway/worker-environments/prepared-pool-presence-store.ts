@@ -15,10 +15,7 @@ const PREPARED_POOL_PRESENCE_STATE_KEY = "cloudWorkers.preparedPool.humanPresenc
 
 type StateDatabase = Pick<DB, "config_machine_state">;
 
-function parsePresenceDemand(
-  value: unknown,
-  allowPreviousHost = false,
-): PreparedPoolPresenceDemand {
+function parsePresenceDemand(value: unknown): PreparedPoolPresenceDemand {
   if (!isRecord(value)) {
     throw new Error("Prepared-pool presence demand is invalid");
   }
@@ -31,14 +28,7 @@ function parsePresenceDemand(
   const retireAtMs = candidate.retireAtMs;
   let project: RepositoryWorkerProjectSnapshot | undefined;
   try {
-    const rawProject = candidate.project;
-    const rawSource = isRecord(rawProject) ? rawProject.source : undefined;
-    const rawUrl = isRecord(rawSource) ? rawSource.url : undefined;
-    const host =
-      allowPreviousHost && typeof rawUrl === "string"
-        ? new URL(rawUrl).hostname.toLowerCase()
-        : resolveGitHubHost();
-    project = readRepositoryWorkerProjectSnapshot(rawProject, host);
+    project = readRepositoryWorkerProjectSnapshot(candidate.project);
   } catch {
     throw new Error("Prepared-pool presence demand is invalid");
   }
@@ -90,7 +80,7 @@ export function readPreparedPoolPresenceDemandInDatabase(
   if (row.value_json.length > 32_768) {
     throw new Error("Prepared-pool presence demand exceeds its record budget");
   }
-  return parsePresenceDemand(JSON.parse(row.value_json), true);
+  return parsePresenceDemand(JSON.parse(row.value_json));
 }
 
 export function writePreparedPoolPresenceDemandInDatabase(
@@ -108,6 +98,9 @@ export function writePreparedPoolPresenceDemandInDatabase(
     return undefined;
   }
   const prepared = parsePresenceDemand(value);
+  if (new URL(prepared.project.source.url).hostname !== resolveGitHubHost()) {
+    throw new Error("Prepared-pool presence demand is invalid");
+  }
   const valueJson = JSON.stringify(prepared);
   executeSqliteQuerySync(
     database,

@@ -1,5 +1,4 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { resolveGitHubHost } from "../../agents/github-host-runtime.js";
 import { parseProjectGitUrl } from "../../projects/project-git-url.js";
 import {
   RepositoryWorkerProjectSchema,
@@ -9,17 +8,20 @@ import {
 /** Repository facts persist; current visibility and access remain admission checks. */
 export function readRepositoryWorkerProjectSnapshot(
   value: unknown,
-  githubHost = resolveGitHubHost(),
 ): RepositoryWorkerProjectSnapshot | undefined {
   if (!isRecord(value) || value.source === undefined) {
     return undefined;
   }
   const parsed = RepositoryWorkerProjectSchema.safeParse(value);
+  const source = parsed.success ? parsed.data.source : undefined;
+  const githubHost =
+    source && URL.canParse(source.url) ? new URL(source.url).hostname.toLowerCase() : undefined;
   if (
     Object.keys(value).some(
       (key) => !["key", "baseCommit", "source", "preparation"].includes(key),
     ) ||
     !parsed.success ||
+    !githubHost ||
     parseProjectGitUrl(parsed.data.source.url, githubHost)?.url !== parsed.data.source.url
   ) {
     throw new Error("Worker environment has an invalid repository preparation snapshot");

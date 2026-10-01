@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../../config/runtime-snapshot.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import type { PreparedPoolPresenceDemand } from "./prepared-pool-presence.types.js";
 import {
@@ -11,6 +15,7 @@ import type { RepositoryWorkerProjectSnapshot } from "./repository-project-sourc
 
 describe("authenticated human prepared-pool demand", () => {
   const fixture = usePreparedPoolFixture();
+  afterEach(clearRuntimeConfigSnapshot);
   const repository: RepositoryWorkerProjectSnapshot = {
     key: PROJECT_KEY,
     baseCommit: "d".repeat(40),
@@ -148,6 +153,8 @@ describe("authenticated human prepared-pool demand", () => {
       ...repository,
       source: { ...repository.source, url },
     });
+    fixture.config.gateway = { github: { host: new URL(url).hostname } };
+    setRuntimeConfigSnapshot(fixture.config);
 
     await presence.owner.setHumanPresence(false);
 
