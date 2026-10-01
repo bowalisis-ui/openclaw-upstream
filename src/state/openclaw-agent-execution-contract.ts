@@ -1,37 +1,4 @@
 import type {
-  AcpSessionEntryMutationInput,
-  AcpSessionEntryMutationResult,
-} from "../acp/runtime/session-meta-entry.types.js";
-import type { SessionProviderReviewComparison } from "../config/sessions/provider-review.types.js";
-import type {
-  TranscriptArchivePublishPlan,
-  TranscriptArchivePublishResult,
-} from "../config/sessions/session-accessor.sqlite-archive-types.js";
-import type {
-  SessionEntryReplacementPublication,
-  SessionTranscriptInitializationPublication,
-} from "../config/sessions/session-accessor.sqlite-entry-cache.types.js";
-import type {
-  SessionEntryMaintenanceInput,
-  SessionMaintenanceLiveProtection,
-  SessionMaintenanceMetadataResult,
-} from "../config/sessions/session-accessor.sqlite-lifecycle-types.js";
-import type {
-  SessionEntryReplacementCommit,
-  SessionEntryReplacementCommitted,
-} from "../config/sessions/session-accessor.sqlite-replacement-types.js";
-import type {
-  PublishedSessionTranscriptArchive,
-  SessionLegacyArchiveRemovalResult,
-} from "../config/sessions/session-history-archive-pruning.types.js";
-import type { SessionPendingInputWithdrawal } from "../config/sessions/session-pending-input-withdrawal.worker.js";
-import type {
-  SessionReactionWrite,
-  SetSessionReactionParams,
-} from "../config/sessions/session-reaction-store.types.js";
-import type { InternalSessionEntry, SessionEntry } from "../config/sessions/types.js";
-import type { SqliteWalReclamationResult } from "../infra/sqlite-wal-reclamation.js";
-import type {
   SqliteWalPeriodicRequest,
   SqliteWalPeriodicResult,
 } from "../infra/sqlite-wal-write-admission.js";
@@ -41,9 +8,9 @@ import type {
   SqliteWorkerAdmissionRequest,
 } from "../infra/sqlite-worker-operation-admission.js";
 import type { SqliteWorkerStateContext } from "../infra/sqlite-worker-state-context.js";
-import type { SqliteTrajectoryRuntimeAppend } from "../trajectory/runtime-store.sqlite.js";
 import type { AgentDatabaseRegistryChange } from "./openclaw-agent-db-registry-listing.js";
 import type { AgentDatabaseDomainOperations } from "./openclaw-agent-execution-domain.js";
+import type { RegisteredAgentWorkerOperations } from "./openclaw-agent-execution-operations.js";
 
 /** Recorded by the native owner; a descriptor never grants access to that owner. */
 export type AgentDatabaseExecutionIdentity = {
@@ -77,93 +44,11 @@ export type AgentDatabaseExecutionOpen = {
   creatingIdentity?: DatabasePathIdentity;
 };
 
-export type AgentDatabaseOperations = AgentDatabaseDomainOperations & {
-  "database.walMaintenance": { input: SqliteWalPeriodicRequest; output: SqliteWalPeriodicResult };
-  "trajectory.events.append": { input: SqliteTrajectoryRuntimeAppend; output: void };
-  "session.archives.preparePublication": {
-    input: {
-      archiveDirectory: string;
-      requested: readonly Pick<TranscriptArchivePublishPlan, "sessionId" | "generation">[];
-    };
-    output: TranscriptArchivePublishPlan[];
+export type AgentDatabaseOperations = AgentDatabaseDomainOperations &
+  RegisteredAgentWorkerOperations & {
+    "database.walMaintenance": { input: SqliteWalPeriodicRequest; output: SqliteWalPeriodicResult };
+    "database.prepareWrite": { input: undefined; output: void };
   };
-  "session.archives.recordPublication": {
-    input: { results: readonly TranscriptArchivePublishResult[]; nowMs: number };
-    output: void;
-  };
-  "session.transcript.initialize": {
-    input: { sessionKey: string; sessionId: string; cwd?: string };
-    output: SessionTranscriptInitializationPublication;
-  };
-  "database.prepareWrite": { input: undefined; output: void };
-  "session.entry.read": { input: { sessionKey: string }; output: InternalSessionEntry | undefined };
-  "session.entry.acp": {
-    input: AcpSessionEntryMutationInput;
-    output: AcpSessionEntryMutationResult;
-  };
-  "session.entries.replace": {
-    input: SessionEntryReplacementCommit & {
-      initializeTranscript?: { sessionKey: string; sessionId: string; cwd?: string };
-    };
-    output: SessionEntryReplacementCommitted;
-  };
-  "session.maintenance.prepare": {
-    input: { id: string; input: SessionEntryMaintenanceInput };
-    output: void;
-  };
-  "session.maintenance.release": { input: { id: string }; output: void };
-  "session.maintenance.metadata": {
-    input:
-      | { kind: "maintenance-statistics" }
-      | {
-          kind: "maintenance-plan";
-          preparationId: string;
-          protection: SessionMaintenanceLiveProtection;
-        };
-    output:
-      | {
-          kind: "committed";
-          workerThreadId: number;
-          value: Exclude<
-            SessionMaintenanceMetadataResult,
-            { kind: "maintenance-preservation-required" | "maintenance-plan-stale" }
-          >;
-          publication: SessionEntryReplacementPublication;
-        }
-      | {
-          kind: "not-committed";
-          workerThreadId: number;
-          value: Extract<
-            SessionMaintenanceMetadataResult,
-            { kind: "maintenance-preservation-required" | "maintenance-plan-stale" }
-          >;
-        };
-  };
-  "session.providerReview.compare": {
-    input: SessionProviderReviewComparison;
-    output: SessionEntry;
-  };
-  "session.reaction.set": {
-    input: { sessionKey: string; params: SetSessionReactionParams };
-    output: SessionReactionWrite;
-  };
-  "session.pendingInputs.withdraw": {
-    input: SessionPendingInputWithdrawal;
-    output: boolean;
-  };
-  "session.archivePruning.deletePublished": {
-    input: PublishedSessionTranscriptArchive;
-    output: void;
-  };
-  "session.archivePruning.removeLegacy": {
-    input: { filePath: string };
-    output: SessionLegacyArchiveRemovalResult;
-  };
-  "session.archivePruning.reclaimPages": {
-    input: { maxPages?: number };
-    output: SqliteWalReclamationResult;
-  };
-};
 
 /** A request owner composes its retained admission with the native owner's validation. */
 export type AgentDatabaseRequestExecutionSource = {
