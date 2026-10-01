@@ -95,7 +95,7 @@ export function registerPluginSubagentPersistenceFailureTest() {
         expectRespondError(respond, {
           code: ErrorCodes.UNAVAILABLE,
           message:
-            "plugin subagent registry persistence failed; run was not started | Queued subagent registry persistence failed | disk full | SQLITE_FULL",
+            "plugin subagent registry persistence failed; run was not started | Queued subagent registry persistence failed: disk full | SQLITE_FULL",
         });
         expect(context.logGateway.warn).toHaveBeenCalledWith(
           expect.stringContaining("rejecting untracked dispatch"),

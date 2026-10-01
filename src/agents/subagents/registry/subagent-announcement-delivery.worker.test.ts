@@ -561,6 +561,7 @@ it.for(["current", "successor", "revoked", "source switched"] as const)(
     const mutationReady = createDeferred();
     const stampWaiting = createDeferred();
     const release = createDeferred();
+    const releaseStamp = createDeferred();
     fixture.wake.mockImplementation(async (params) => {
       await pluginEntered.promise;
       return nativeWake.maybeWakeRequesterAfterAllChildrenSettled(params);
@@ -573,6 +574,7 @@ it.for(["current", "successor", "revoked", "source switched"] as const)(
       pluginEntered.resolve();
       mutationReady.resolve();
       release.resolve();
+      releaseStamp.resolve();
       stampWaiting.reject(signal.reason);
     };
     signal.addEventListener("abort", releaseCancelledTest, { once: true });
@@ -582,13 +584,25 @@ it.for(["current", "successor", "revoked", "source switched"] as const)(
     vi.mocked(loadAgentRuntimePluginRegistryHandle).mockReturnValue(registry);
     vi.spyOn(hookRuntime, "getGlobalHookRunner").mockReturnValue(runner);
     const waitForPending = registryPersistence.waitForPendingSubagentRegistryWrites;
+    let stampCaptured = false;
+    let startingSuccessor = false;
+    let successorPending: Promise<void> | undefined;
+    let successorRegistration: ReturnType<typeof registerSubagentRun> | undefined;
     const waiting = vi
       .spyOn(registryPersistence, "waitForPendingSubagentRegistryWrites")
       .mockImplementation((...args) => {
         const pending = waitForPending(...args);
-        if (ended.mock.calls.length > 0 && args[0].includes(run.runId)) {
+        if (startingSuccessor) {
+          successorPending = pending;
+        }
+        if (!stampCaptured && ended.mock.calls.length > 0 && args[0].includes(run.runId)) {
+          stampCaptured = true;
           if (pending) {
             stampWaiting.resolve();
+            if (change === "successor") {
+              // Keep only the old stamp paused after ACK while the successor commits.
+              return pending.then(() => releaseStamp.promise);
+            }
           } else {
             stampWaiting.reject(new Error("Stamp found no pending wake at held acknowledgement"));
           }
@@ -631,7 +645,8 @@ it.for(["current", "successor", "revoked", "source switched"] as const)(
       expect(committed?.requesterSettleWake).toBeUndefined();
       let successor: SubagentRunRecord | undefined;
       if (change === "successor") {
-        await registerSubagentRun({
+        startingSuccessor = true;
+        successorRegistration = registerSubagentRun({
           ...run,
           requesterSessionKey: "agent:main:main",
           requesterAgentId: "main",
@@ -640,6 +655,12 @@ it.for(["current", "successor", "revoked", "source switched"] as const)(
           cleanup: "keep",
           expectsCompletionMessage: false,
         });
+        startingSuccessor = false;
+        expect(successorPending).toBeDefined();
+        expect(subagentRuns.get(run.runId)).toBe(original);
+        expect(original.endedHookEmittedAt).toBeUndefined();
+        release.resolve();
+        await successorRegistration;
         successor = subagentRuns.get(run.runId)!;
         expect(successor).not.toBe(original);
       } else if (change === "revoked") {
@@ -649,6 +670,7 @@ it.for(["current", "successor", "revoked", "source switched"] as const)(
         setTestEnvValue("OPENCLAW_STATE_DIR", replacementDir);
       }
       release.resolve();
+      releaseStamp.resolve();
       await fixture.settle();
       const stored = loadSubagentRegistryFromSqlite(originalDatabase).get(run.runId);
       expect(ended).toHaveBeenCalledOnce();
@@ -674,6 +696,8 @@ it.for(["current", "successor", "revoked", "source switched"] as const)(
       }
     } finally {
       release.resolve();
+      releaseStamp.resolve();
+      await Promise.allSettled([successorRegistration]);
       await fixture.settle();
       setTestEnvValue("OPENCLAW_STATE_DIR", fixture.stateDir);
       worker.mockRestore();
