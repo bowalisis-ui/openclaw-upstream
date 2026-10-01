@@ -15,13 +15,15 @@ import {
   publishSubagentRunPostimages,
   waitForPendingSubagentKillClaim,
 } from "./subagent-registry-persistence.js";
-import { getSubagentRegistryPublicationRevision } from "./subagent-registry-publication.js";
+import {
+  getSubagentRegistryPublicationRevision,
+  subscribeSubagentRunChanges,
+} from "./subagent-registry-publication.js";
 import {
   clearSubagentRunsReadCacheForTest,
   getSubagentMaintenanceRunsSnapshotForRead,
   getSubagentRunsSnapshotForRead,
   getSubagentSessionListRunsSnapshotForRead,
-  onSubagentRegistryPersisted,
   persistSubagentRunsToDiskAsyncOrThrow,
   persistSubagentRunsToDiskOrThrow,
   publishSubagentRunsAfterAtomicStore,
@@ -55,7 +57,6 @@ vi.mock("./subagent-registry.store.sqlite.js", () => ({
   loadSubagentRegistryFromSqlite: () => new Map(),
   loadSubagentMaintenanceRunsFromSqlite: () => new Map(),
   saveSubagentRegistryChangesToSqlite: mocks.save,
-  saveSubagentRegistryToSqlite: mocks.save,
 }));
 
 function run(): SubagentRunRecord {
@@ -159,10 +160,11 @@ describe("queued registry worker publication", () => {
       maxConcurrent: 1,
     };
     const removed = { ...run(), runId: "removed" };
-    persistSubagentRunsToDiskOrThrow(new Map([[removed.runId, removed]]));
+    await restoreSubagentRunsFromDisk({ runs: new Map() });
+    persistSubagentRunsToDiskOrThrow(new Map([[removed.runId, removed]]), [removed.runId]);
     const entries = new Map([[entry.runId, entry]]);
     const wake = vi.fn();
-    const stop = onSubagentRegistryPersisted(wake);
+    const stop = subscribeSubagentRunChanges("persistence", wake);
     try {
       const pending = persistSubagentRunsToDiskAsyncOrThrow(entries, [entry.runId, removed.runId], {
         context: original,
@@ -219,7 +221,7 @@ describe("queued registry worker publication", () => {
         status: entry.execution.status,
       });
     });
-    const stop = onSubagentRegistryPersisted(() => {
+    const stop = subscribeSubagentRunChanges("persistence", () => {
       observed.push(entry.execution.status);
       observed.push(
         expectDefined(getSubagentRunsSnapshotForRead(entries).get(entry.runId), "live row")
@@ -314,7 +316,8 @@ describe("queued registry worker publication", () => {
 
   it("keeps a publication failure after acknowledgement known committed without undo or replay", async () => {
     const entry = run();
-    persistSubagentRunsToDiskOrThrow(new Map([[entry.runId, entry]]));
+    await restoreSubagentRunsFromDisk({ runs: new Map() });
+    persistSubagentRunsToDiskOrThrow(new Map([[entry.runId, entry]]), [entry.runId]);
     mocks.save.mockClear();
     const readStates = () =>
       [
@@ -336,7 +339,7 @@ describe("queued registry worker publication", () => {
     });
     const revision = getSubagentRegistryPublicationRevision();
     const wake = vi.fn(readStates);
-    const stop = onSubagentRegistryPersisted(wake);
+    const stop = subscribeSubagentRunChanges("persistence", wake);
     try {
       const pending = persistSubagentRunsToDiskAsyncOrThrow(entries, [entry.runId], {
         context: original,
@@ -466,7 +469,7 @@ describe("queued registry worker publication", () => {
     async (granted) => {
       const entry = run();
       const wake = vi.fn();
-      const stop = onSubagentRegistryPersisted(wake);
+      const stop = subscribeSubagentRunChanges("persistence", wake);
       try {
         const pending = persistSubagentRunsToDiskAsyncOrThrow(
           new Map([[entry.runId, entry]]),
@@ -558,7 +561,7 @@ describe("queued registry worker publication", () => {
       let current = true;
       const events: string[] = [];
       const failure = new Error("Memory handoff failed after committed install");
-      const stop = onSubagentRegistryPersisted(() => events.push("observer"));
+      const stop = subscribeSubagentRunChanges("persistence", () => events.push("observer"));
       const attempts = mocks.runWorker.mock.calls.length;
       const pending = publishSubagentRunPostimages({
         runs: entries,

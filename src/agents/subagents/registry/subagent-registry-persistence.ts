@@ -592,7 +592,10 @@ export async function publishSubagentRunPostimages(params: {
   pendingKillClaim?: SubagentRunRecord;
   persist: (
     context: OpenClawStateWorkerContext,
-    callbacks: Omit<SubagentRegistryWriteOptions, "context"> & { assertCurrent: () => void },
+    callbacks: Omit<SubagentRegistryWriteOptions, "context"> & {
+      assertCurrent: () => void;
+      snapshot?: Map<string, SubagentRunRecord>;
+    },
     ...runIds: string[]
   ) => Promise<void>;
   context: OpenClawStateWorkerContext;

@@ -109,7 +109,7 @@ describe("registered completion source custody", () => {
       const release = createDeferredCore();
       let current = true;
       let observedOwnershipPublication = false;
-      const stopObserving = subscribeSubagentRunChanges((runIds) => {
+      const stopObserving = subscribeSubagentRunChanges("projection", ({ runIds }) => {
         if (
           transition === "caller after ownership publication" &&
           runIds?.includes(runId) &&

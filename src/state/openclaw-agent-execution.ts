@@ -2,7 +2,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { addAbortListener } from "node:events";
 import path from "node:path";
 import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
+import { sleepWithAbort } from "../infra/backoff.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { isSqliteLockError } from "../infra/sqlite-error-diagnostics.js";
 import { SQLITE_IDLE_HANDLE_TTL_MS } from "../infra/sqlite-handle-lifecycle.js";
 import { retainSqliteWorkerErrorCode } from "../infra/sqlite-worker-contract.js";
 import {
@@ -16,15 +18,10 @@ import { normalizeAgentId } from "../routing/session-key.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { captureAgentDatabaseAdmission } from "./agent-database-admission.js";
-import { getAgentDeletionDatabaseCleanup } from "./agent-deletion-cleanup.js";
 import type { OpenClawAgentDatabaseOptions } from "./openclaw-agent-db-contract.js";
-import { hasAgentDatabaseMaintenanceAuthority } from "./openclaw-agent-db-lease.js";
 import { agentDatabaseLifecycle } from "./openclaw-agent-db-lifecycle.js";
 import { registerOpenClawAgentDatabaseAsyncResource } from "./openclaw-agent-db-resources.js";
-import {
-  isIncognitoOpenClawAgentSqlitePath,
-  resolveOpenClawAgentSqlitePath,
-} from "./openclaw-agent-db.paths.js";
+import { resolveOpenClawAgentSqlitePath } from "./openclaw-agent-db.paths.js";
 import type {
   AgentDatabaseExecutionFileIdentity,
   AgentDatabaseGenerationClaim,
@@ -32,16 +29,21 @@ import type {
 } from "./openclaw-agent-execution-contract.js";
 import {
   createAgentDatabaseNativeGeneration,
+  supportsAgentDatabaseExecutionScope,
+  supportsOpenClawAgentDatabaseExecution,
   type AgentDatabaseExecutionScope,
   type AgentDatabaseNativeGeneration,
 } from "./openclaw-agent-execution-native.js";
 import {
-  getOpenClawDatabaseMaintenanceScope,
   observeOpenClawDatabaseMaintenanceResource,
   runOutsideOpenClawDatabaseMaintenanceScope,
 } from "./openclaw-state-db-async-lifecycle.js";
 import { registerOpenClawStateDatabaseAsyncResource } from "./openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
+import {
+  LEASE_CONTENTION_RETRY_MS,
+  LEASE_CONTENTION_RETRY_TIMEOUT_MS,
+} from "./openclaw-state-lease-heartbeat-shared.js";
 import {
   captureOpenClawStateReadContext,
   captureOpenClawStateWorkerContext,
@@ -69,6 +71,8 @@ export type OpenClawAgentDatabaseExecution = {
   release(): Promise<void>;
 };
 
+export { supportsOpenClawAgentDatabaseExecution } from "./openclaw-agent-execution-native.js";
+
 type ExecutionOwner = {
   readonly agentId: string;
   readonly sharedDatabaseKey: string;
@@ -91,24 +95,6 @@ const executionState = resolveGlobalSingleton<{
 }>(Symbol.for("openclaw.agentDatabaseExecutionOwners"), () => ({ owners: new Map() }));
 const executions = executionState.owners;
 const runInExecutionOwnerContext = AsyncLocalStorage.snapshot();
-
-function supportsAgentDatabaseExecutionScope(options: OpenClawAgentDatabaseOptions): boolean {
-  return (
-    getOpenClawDatabaseMaintenanceScope()?.ownsSchemaMaintenance !== true &&
-    !hasAgentDatabaseMaintenanceAuthority() &&
-    !getAgentDeletionDatabaseCleanup(options)
-  );
-}
-
-/** These native-only scopes still need their complete owning caller cutover. */
-export function supportsOpenClawAgentDatabaseExecution(
-  options: OpenClawAgentDatabaseOptions,
-): boolean {
-  return (
-    !isIncognitoOpenClawAgentSqlitePath(resolveOpenClawAgentSqlitePath(options), options) &&
-    supportsAgentDatabaseExecutionScope(options)
-  );
-}
 
 /** Borrow before callers yield; native opening stays lazy and release joins owned work. */
 export function captureOpenClawAgentDatabaseExecution(
@@ -293,6 +279,7 @@ function createAgentDatabaseExecution(
     createIfMissing = false,
     creatingTarget?: DatabasePathIdentity,
     signal?: AbortSignal,
+    contentionDeadline?: number,
   ): Promise<T | undefined> {
     const pending = agentDatabaseLifecycle.pending.get(pathname);
     if (pending) {
@@ -353,10 +340,14 @@ function createAgentDatabaseExecution(
       }
     }
     const current = generation;
+    let entered = false;
     try {
       const result = await current.run(
         source,
-        operation,
+        (scope) => {
+          entered = true;
+          return operation(scope);
+        },
         assertCallerCurrent,
         createIfMissing,
         signal,
@@ -371,9 +362,10 @@ function createAgentDatabaseExecution(
       return result;
     } catch (error) {
       const nativeFailure = current.failure();
+      const contended = !entered && isSqliteLockError(error);
       if (generation === current && (nativeFailure || retireNativeOnFailure)) {
         try {
-          if (nativeFailure === "native") {
+          if (nativeFailure === "native" && !contended) {
             await owner.close();
           } else {
             // The rejected broker scope has settled; only its captured native owner is retired.
@@ -385,6 +377,36 @@ function createAgentDatabaseExecution(
               cause: error,
             }),
             error,
+          );
+        }
+      }
+      if (contended) {
+        const deadline =
+          contentionDeadline ?? performance.now() + LEASE_CONTENTION_RETRY_TIMEOUT_MS;
+        if (contentionDeadline === undefined) {
+          log.warn(
+            "Agent database execution admission delayed by SQLite lock contention; retrying before execution.",
+          );
+        }
+        const remaining = deadline - performance.now();
+        if (remaining > 0) {
+          await sleepWithAbort(Math.min(LEASE_CONTENTION_RETRY_MS, remaining), signal);
+          assertCurrent();
+          source.assertCurrent();
+          assertCallerCurrent();
+          if (performance.now() >= deadline) {
+            throw error;
+          }
+          return run(
+            source,
+            operation,
+            assertCallerCurrent,
+            expectedIdentity,
+            retireNativeOnFailure,
+            createIfMissing,
+            creatingTarget,
+            signal,
+            deadline,
           );
         }
       }

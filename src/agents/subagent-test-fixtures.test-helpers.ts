@@ -2,10 +2,10 @@ import { expect, vi } from "vitest";
 import type { InternalSessionEntry } from "../config/sessions.js";
 import type { SessionOrigin } from "../config/sessions/types.js";
 import { normalizeLegacySessionEntryDelivery } from "../infra/state-migrations.legacy-session-store.js";
-import { notifyListeners, registerListener } from "../shared/listeners.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import type { AgentInternalEvent } from "./internal-events.js";
 import { SubagentRegistryWriteError } from "./subagents/registry/subagent-registry-persistence.js";
+import { publishSubagentRunChanges } from "./subagents/registry/subagent-registry-publication.js";
 import type { RegisterSubagentRunParams } from "./subagents/registry/subagent-registry-run-launch-record.js";
 import type * as RegistryPersistence from "./subagents/registry/subagent-registry-state.js";
 import type { SubagentRunRecord } from "./subagents/registry/subagent-registry.types.js";
@@ -53,17 +53,20 @@ export function createSubagentPersistenceMock(
     typeof RegistryPersistence,
     "persistSubagentRunsToDisk" | "persistSubagentRunsToDiskOrThrow" | "restoreSubagentRunsFromDisk"
   >,
+  onPublished?: () => void,
 ) {
-  const listeners = new Set<() => void>();
+  const publish = () => {
+    publishSubagentRunChanges(undefined, undefined, "persistence");
+    onPublished?.();
+  };
   const publishAfter =
     <Args extends unknown[], Result>(operation: (...args: Args) => Result) =>
     (...args: Args): Result => {
       const result = operation(...args);
-      notifyListeners(listeners, undefined);
+      publish();
       return result;
     };
   return {
-    onSubagentRegistryPersisted: (listener: () => void) => registerListener(listeners, listener),
     // Policy fixtures supply retained rows in memory; worker custody uses the real state owner.
     withSubagentRunReadSnapshot: (async (runs, select, consume) => {
       await Promise.resolve();
@@ -90,7 +93,7 @@ export function createSubagentPersistenceMock(
       ...args: Parameters<typeof methods.restoreSubagentRunsFromDisk>
     ) => {
       const result = await methods.restoreSubagentRunsFromDisk(...args);
-      notifyListeners(listeners, undefined);
+      publish();
       return result;
     },
     persistSubagentRunsToDiskAsyncOrThrow: (async (runs, ids, options) => {
@@ -105,7 +108,7 @@ export function createSubagentPersistenceMock(
         methods.persistSubagentRunsToDiskOrThrow(snapshot, ids);
         committed = true;
         options.onCommitted?.(ids);
-        notifyListeners(listeners, undefined);
+        publish();
       } catch (error) {
         throw new SubagentRegistryWriteError(committed ? "committed" : "not-committed", error);
       }

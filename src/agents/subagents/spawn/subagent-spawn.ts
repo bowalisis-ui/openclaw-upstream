@@ -49,7 +49,10 @@ import {
 } from "./subagent-spawn-execution-identity.js";
 import { callNativeSubagentGateway, readGatewayRunId } from "./subagent-spawn-gateway.js";
 import { buildSubagentLaunchRequest } from "./subagent-spawn-launch-request.js";
-import { createSubagentSpawnLifecycleEmitter } from "./subagent-spawn-lifecycle.js";
+import {
+  createSubagentSpawnLifecycleEmitter,
+  emitSubagentSpawnFailedHook,
+} from "./subagent-spawn-lifecycle.js";
 import { resolveSubagentSpawnRequest } from "./subagent-spawn-request.js";
 import { createInitialSubagentSession } from "./subagent-spawn-session-patch.js";
 import { bindThreadForSubagentSpawn } from "./subagent-spawn-thread-binding.js";
@@ -519,32 +522,13 @@ export async function spawnSubagentDirect(
         }
         let emitLifecycleHooks = threadBindingReady;
         if (phase === "dispatch" && threadBindingReady) {
-          let endedHookEmitted = false;
-          if (hookRunner?.hasHooks("subagent_ended")) {
-            try {
-              await hookRunner.runSubagentEnded(
-                {
-                  targetSessionKey: childSessionKey,
-                  targetKind: "subagent",
-                  reason: "spawn-failed",
-                  sendFarewell: true,
-                  accountId: childSessionOrigin?.accountId,
-                  runId: childIdem,
-                  outcome: "error",
-                  error: "Session failed to start",
-                },
-                {
-                  runId: childIdem,
-                  childSessionKey,
-                  requesterSessionKey: requesterInternalKey,
-                },
-              );
-              endedHookEmitted = true;
-            } catch {
-              // Spawn cleanup continues even when presentation hooks fail.
-            }
-          }
-          emitLifecycleHooks = !endedHookEmitted;
+          emitLifecycleHooks = !(await emitSubagentSpawnFailedHook({
+            hookRunner,
+            childSessionKey,
+            requesterInternalKey,
+            runId: childIdem,
+            accountId: childSessionOrigin?.accountId,
+          }));
         }
         await cleanupCreatedSession(emitLifecycleHooks);
       },

@@ -2,6 +2,41 @@ import type { SubagentLifecycleHookRunner } from "../../../plugins/hooks.js";
 import type { DeliveryContext } from "../../../utils/delivery-context.types.js";
 import type { SpawnSubagentMode } from "./subagent-spawn.types.js";
 
+export async function emitSubagentSpawnFailedHook(params: {
+  hookRunner: SubagentLifecycleHookRunner | null;
+  childSessionKey: string;
+  requesterInternalKey: string;
+  runId: string;
+  accountId?: string;
+}): Promise<boolean> {
+  if (!params.hookRunner?.hasHooks("subagent_ended")) {
+    return false;
+  }
+  try {
+    await params.hookRunner.runSubagentEnded(
+      {
+        targetSessionKey: params.childSessionKey,
+        targetKind: "subagent",
+        reason: "spawn-failed",
+        sendFarewell: true,
+        accountId: params.accountId,
+        runId: params.runId,
+        outcome: "error",
+        error: "Session failed to start",
+      },
+      {
+        runId: params.runId,
+        childSessionKey: params.childSessionKey,
+        requesterSessionKey: params.requesterInternalKey,
+      },
+    );
+    return true;
+  } catch {
+    // Deletion remains responsible for the ended hook if presentation fails.
+    return false;
+  }
+}
+
 export function createSubagentSpawnLifecycleEmitter(params: {
   hookRunner: SubagentLifecycleHookRunner | null;
   childSessionKey: string;

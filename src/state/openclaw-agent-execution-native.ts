@@ -29,12 +29,21 @@ import {
   type SqliteWorkerStore,
 } from "../infra/sqlite-worker-store.js";
 import { captureAgentDatabasePreparationJournal } from "./agent-database-admission.js";
-import type { OpenClawAgentDatabaseWorkerLeaseReceipt } from "./openclaw-agent-db-lease.js";
+import { getAgentDeletionDatabaseCleanup } from "./agent-deletion-cleanup.js";
+import type { OpenClawAgentDatabaseOptions } from "./openclaw-agent-db-contract.js";
+import {
+  hasAgentDatabaseMaintenanceAuthority,
+  type OpenClawAgentDatabaseWorkerLeaseReceipt,
+} from "./openclaw-agent-db-lease.js";
 import { captureOpenClawAgentDatabaseRegistration } from "./openclaw-agent-db-registry-listing.js";
 import {
   captureOpenClawAgentDatabaseValidationTransfer,
   getOpenClawAgentDatabaseValidationForTransfer,
 } from "./openclaw-agent-db-validation-cache.js";
+import {
+  isIncognitoOpenClawAgentSqlitePath,
+  resolveOpenClawAgentSqlitePath,
+} from "./openclaw-agent-db.paths.js";
 import { cleanupRetiredAgentDatabaseLease } from "./openclaw-agent-execution-cleanup.js";
 import type {
   AgentDatabaseExecutionIdentity,
@@ -45,11 +54,32 @@ import type {
   AgentDatabaseOperations,
 } from "./openclaw-agent-execution-contract.js";
 import { requestOpenClawAgentDatabaseQuickCheck } from "./openclaw-database-verify.js";
+import { getOpenClawDatabaseMaintenanceScope } from "./openclaw-state-db-async-lifecycle.js";
 import { publishOpenClawStateDatabaseWorkerAdmission } from "./openclaw-state-db-cache.js";
 import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
 
 type Store = SqliteWorkerStore<AgentDatabaseOperations>;
 type Registration = ReturnType<typeof captureOpenClawAgentDatabaseRegistration>;
+
+export function supportsAgentDatabaseExecutionScope(
+  options: OpenClawAgentDatabaseOptions,
+): boolean {
+  return (
+    getOpenClawDatabaseMaintenanceScope()?.ownsSchemaMaintenance !== true &&
+    !hasAgentDatabaseMaintenanceAuthority() &&
+    !getAgentDeletionDatabaseCleanup(options)
+  );
+}
+
+/** These native-only scopes still need their complete owning caller cutover. */
+export function supportsOpenClawAgentDatabaseExecution(
+  options: OpenClawAgentDatabaseOptions,
+): boolean {
+  return (
+    !isIncognitoOpenClawAgentSqlitePath(resolveOpenClawAgentSqlitePath(options), options) &&
+    supportsAgentDatabaseExecutionScope(options)
+  );
+}
 
 async function settleAgentRegistration<T>(
   registration: Registration,

@@ -1,12 +1,12 @@
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { afterAll, describe, expect, it } from "vitest";
 import { replaceSessionEntrySync } from "../config/sessions/session-accessor.js";
 import { observeSessionMaintenanceCompletion } from "../config/sessions/session-accessor.sqlite-maintenance.test-support.js";
 import { prepareSessionEntryReplacementDatabase } from "../config/sessions/session-accessor.sqlite-replacement-worker.js";
 import { captureOpenClawAgentDatabaseExecution } from "../state/openclaw-agent-execution.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { useSessionStoreTempDirs } from "../test-utils/session-state-cleanup.js";
 import {
   cleanupSessionLifecycleArtifacts,
   getSessionEntry,
@@ -14,7 +14,7 @@ import {
 } from "./session-store-runtime.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const sessionDirs = useSessionStoreTempDirs(afterAll, "openclaw-sdk-maintenance-");
 
 describe("plugin session store maintenance", () => {
   it("keeps lifecycle cleanup in the explicit environment while its executor is live", async () => {
@@ -72,7 +72,7 @@ describe("plugin session store maintenance", () => {
   ])(
     "applies model-run retention $modelRunPruneAfterMs through entry patches",
     async ({ modelRunPruneAfterMs, modelRunSessionPresent }) => {
-      const storePath = path.join(tempDirs.make("openclaw-sdk-maintenance-"), "sessions.json");
+      const storePath = path.join(sessionDirs.make(), "sessions.json");
       const modelRunSessionKey =
         "agent:main:explicit:model-run-123e4567-e89b-12d3-a456-426614174000";
       const oldSessionKey = "agent:main:old";
