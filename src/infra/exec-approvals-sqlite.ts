@@ -7,12 +7,17 @@ import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-
 import { sha256Hex } from "./crypto-digest.js";
 import { formatErrorMessage } from "./errors.js";
 import {
+  LEGACY_EXEC_APPROVALS_DIAGNOSTIC,
   normalizeExecApprovalsInternal,
+  parsePersistedExecApprovals,
   resolveExecApprovalsDisplayPath,
   tryParsePersistedExecApprovals,
 } from "./exec-approvals-config.js";
 import type { ExecApprovalsFile, ExecApprovalsSnapshot } from "./exec-approvals-core.js";
-import { resetExecApprovalsMigrationGateForTest } from "./exec-approvals-migration-gate.js";
+import {
+  ExecApprovalsMigrationRequiredError,
+  resetExecApprovalsMigrationGateForTest,
+} from "./exec-approvals-migration-gate.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -137,7 +142,11 @@ export function snapshotFromExecApprovalsRow(params: {
       hash: hashExecApprovalsRaw(null),
     };
   }
-  const parsed = tryParsePersistedExecApprovals(raw);
+  const result = parsePersistedExecApprovals(raw);
+  if (!result.ok && result.error === LEGACY_EXEC_APPROVALS_DIAGNOSTIC) {
+    throw new ExecApprovalsMigrationRequiredError(params.path, undefined, result.error);
+  }
+  const parsed = result.ok ? result.value : null;
   if (!parsed) {
     params.onMalformed?.();
   }
@@ -187,11 +196,15 @@ export function writeExecApprovalsConfigRow(params: {
   raw?: string;
   now?: number;
 }): void {
-  const raw = params.raw ?? serializeExecApprovals(params.file);
+  const normalized = normalizeExecApprovalsInternal(params.file);
+  const authored = params.raw ?? serializeExecApprovals(params.file);
+  const raw =
+    params.raw ??
+    (parsePersistedExecApprovals(authored).ok ? authored : serializeExecApprovals(normalized));
   const values = {
     config_key: EXEC_APPROVALS_CONFIG_KEY,
     raw_json: raw,
-    ...projectionValues(params.file),
+    ...projectionValues(normalized),
     updated_at_ms: params.now ?? Date.now(),
   };
   executeSqliteQuerySync(
