@@ -1,4 +1,4 @@
-// Tlon monitor tests cover authentication, inbound context, and shutdown lifecycle.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -421,17 +421,58 @@ it("continues startup after an initial group invite write fails", async () => {
   }
 });
 
+// Keep detached worker cleanup on its native clock while dispatch maintenance is held.
+function createPrefixImmediateClock() {
+  const dispatch = new AsyncLocalStorage<boolean>();
+  const realSetImmediate = globalThis.setImmediate;
+  const realClearImmediate = globalThis.clearImmediate;
+  vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] });
+  const fakeSetImmediate = globalThis.setImmediate;
+  const fakeClearImmediate = globalThis.clearImmediate;
+  const fakeHandles = new Set<ReturnType<typeof globalThis.setImmediate>>();
+  globalThis.setImmediate = new Proxy(fakeSetImmediate, {
+    apply(target, receiver, args) {
+      if (!dispatch.getStore()) {
+        return Reflect.apply(realSetImmediate, receiver, args);
+      }
+      const handle = Reflect.apply(target, receiver, args);
+      fakeHandles.add(handle);
+      return handle;
+    },
+  });
+  globalThis.clearImmediate = new Proxy(fakeClearImmediate, {
+    apply(target, receiver, args) {
+      return Reflect.apply(fakeHandles.has(args[0]) ? target : realClearImmediate, receiver, args);
+    },
+  });
+  return {
+    run<T>(operation: () => T): T {
+      return dispatch.run(true, operation);
+    },
+    restore() {
+      globalThis.setImmediate = fakeSetImmediate;
+      globalThis.clearImmediate = fakeClearImmediate;
+      vi.useRealTimers();
+      dispatch.disable();
+    },
+  };
+}
+
 describe("monitorTlonProvider reply prefixes", () => {
+  let prefixClock: ReturnType<typeof createPrefixImmediateClock> | undefined;
   const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
     afterEach(async () => {
-      // Retire background maintenance before removing its database or changing clocks.
-      for (const dir of tempDirs.dirs) {
-        await closeOpenClawAgentDatabasesAsync(dir);
-      }
-      cleanup();
-      // A case that failed before holding maintenance has no fake clock to inspect.
-      if (vi.isFakeTimers()) {
-        expect.soft(vi.getTimerCount()).toBe(0);
+      try {
+        for (const dir of tempDirs.dirs) {
+          await closeOpenClawAgentDatabasesAsync(dir);
+        }
+        cleanup();
+        if (vi.isFakeTimers()) {
+          expect.soft(vi.getTimerCount()).toBe(0);
+        }
+      } finally {
+        prefixClock?.restore();
+        prefixClock = undefined;
       }
     }),
   );
@@ -505,14 +546,17 @@ describe("monitorTlonProvider reply prefixes", () => {
         .find((value) => value.app === "chat");
       expect(subscription).toBeDefined();
       // Hold automatic session maintenance queued so teardown must retire it.
-      vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] });
-      await subscription.event({
-        whom: "~nec",
-        id: `dm-prefix-${name}`,
-        response: {
-          add: { essay: { author: "~nec", content: [{ inline: ["hello"] }], sent: Date.now() } },
-        },
-      });
+      prefixClock = createPrefixImmediateClock();
+      await prefixClock.run(() =>
+        subscription.event({
+          whom: "~nec",
+          id: `dm-prefix-${name}`,
+          response: {
+            add: { essay: { author: "~nec", content: [{ inline: ["hello"] }], sent: Date.now() } },
+          },
+        }),
+      );
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
       const sends = sseClientMock.poke.mock.calls
         .map(([value]) => value)
         .filter((value) => value.mark === "chat-dm-action");
