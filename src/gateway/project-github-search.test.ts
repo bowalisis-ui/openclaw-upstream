@@ -3,6 +3,7 @@ import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
 } from "../config/runtime-snapshot.js";
+import { createDeferredCore } from "../shared/deferred.js";
 import { searchRemoteProjects } from "./project-github-search.js";
 
 function repository(fullName: string, updatedAt: string, description?: string) {
@@ -36,6 +37,46 @@ describe("project GitHub search", () => {
     vi.unstubAllEnvs();
     clearRuntimeConfigSnapshot();
   });
+
+  it.each([true, false])(
+    "keeps coalesced search independent of a retired first reader (remaining=%s)",
+    async (remaining) => {
+      const gate = createDeferredCore<Response>();
+      const started = createDeferredCore();
+      const firstAbort = new AbortController();
+      const secondAbort = new AbortController();
+      const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
+        started.resolve();
+        return await new Promise<Response>((resolve, reject) => {
+          void gate.promise.then(resolve, reject);
+          const signal = init?.signal;
+          signal?.addEventListener(
+            "abort",
+            () => reject(new Error("Fixture request aborted", { cause: signal.reason })),
+            {
+              once: true,
+            },
+          );
+        });
+      });
+      const options = { env: {}, fetchImpl, now: 1000 };
+      const query = `coalesced-retirement-${remaining}`;
+      const first = searchRemoteProjects(query, { ...options, signal: firstAbort.signal });
+      const rejected = expect(first).rejects.toThrow("First reader retired");
+      await started.promise;
+      const second = searchRemoteProjects(query, { ...options, signal: secondAbort.signal });
+      const secondOutcome = remaining
+        ? expect(second).resolves.toMatchObject({ projects: [{ fullName: "acme/shared-result" }] })
+        : expect(second).rejects.toThrow("Second reader retired");
+      firstAbort.abort(new Error("First reader retired"));
+      if (!remaining) {
+        secondAbort.abort(new Error("Second reader retired"));
+      }
+      gate.resolve(json({ items: [repository("acme/shared-result", "2026-09-01")] }));
+      await Promise.all([rejected, secondOutcome]);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+    },
+  );
 
   it("separates native search results when the selected Enterprise host changes", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => json({ items: [] }));

@@ -4,7 +4,10 @@ import type {
   ControlUiSessionPullRequest,
   ControlUiSessionPullRequests,
 } from "./control-ui-contract.js";
-import { prepareSessionPullRequestGitHubRead } from "./control-ui-session-pr-request.js";
+import {
+  createGitHubReadGroup,
+  prepareSessionPullRequestGitHubRead,
+} from "./control-ui-session-pr-request.js";
 import {
   fetchSessionPullRequestCheckDetails,
   sessionPullRequestRepositoryApiUrl,
@@ -20,7 +23,7 @@ const checkDetailsCache = createRetainedCache<{
   expiresAt: number;
   promise: Promise<ControlUiSessionPullRequestCheckDetails>;
   lastGood?: ControlUiSessionPullRequestCheckDetails;
-  readers: Set<() => void>;
+  access: ReturnType<typeof createGitHubReadGroup>;
 }>();
 let activeCheckDetails = 0;
 const CHECK_DETAILS_CACHE_MS = 30_000;
@@ -94,7 +97,8 @@ export async function loadControlUiSessionPullRequestChecks(
     read.cacheScope,
   ]);
   let entry = checkDetailsCache.get(key);
-  if (!entry || entry.expiresAt <= Date.now()) {
+  let releaseReader: (() => void) | undefined;
+  if (!entry || entry.expiresAt <= Date.now() || entry.access.signal.aborted) {
     if (activeCheckDetails >= MAX_CHECK_DETAIL_REQUESTS) {
       return { ...unavailable("CI details are busy; retry shortly"), retryAfterMs: 5_000 };
     }
@@ -103,23 +107,15 @@ export async function loadControlUiSessionPullRequestChecks(
       expiresAt: Infinity,
       promise: Promise.resolve(unavailable("CI details are loading")),
       lastGood: previous,
-      readers: new Set([deps.assertCurrent]),
+      access: createGitHubReadGroup(),
     };
-    // Coalesced I/O needs a live reader, rather than the first reader's connection.
-    const transportRead = prepareSessionPullRequestGitHubRead(host, deps.fetchImpl ?? fetch, () => {
-      for (const assertReader of pending.readers) {
-        try {
-          assertReader();
-          return;
-        } catch {
-          // Other admitted readers can still own this request.
-        }
-      }
-      throw new gitHubPublicApi.ControlUiGitHubError(
-        409,
-        "Session access changed; reopen CI details",
-      );
-    });
+    releaseReader = pending.access.add(deps.assertCurrent);
+    const transportRead = prepareSessionPullRequestGitHubRead(
+      host,
+      deps.fetchImpl ?? fetch,
+      pending.access.assertCurrent,
+      { signal: pending.access.signal },
+    );
     activeCheckDetails += 1;
     const load = async (): Promise<ControlUiSessionPullRequestCheckDetails> => {
       const deadline = Date.now() + 25_000;
@@ -230,7 +226,7 @@ export async function loadControlUiSessionPullRequestChecks(
     checkDetailsCache.set(key, pending);
     entry = pending;
   }
-  entry.readers.add(deps.assertCurrent);
+  const release = releaseReader ?? entry.access.add(deps.assertCurrent);
   try {
     const result = await entry.promise;
     assertCurrent();
@@ -257,6 +253,6 @@ export async function loadControlUiSessionPullRequestChecks(
         : { retryAfterMs: Math.max(0, entry.expiresAt - Date.now()) }),
     });
   } finally {
-    entry.readers.delete(deps.assertCurrent);
+    release();
   }
 }

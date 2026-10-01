@@ -7,7 +7,7 @@ import {
   upsertPresence,
 } from "../../infra/system-presence.js";
 import { buildAuthenticatedPresenceUser } from "../authenticated-presence-user.js";
-import { createAuthenticatedControlUiPresenceProjection } from "./client-human-presence.js";
+import { startWorkerHumanPresence } from "./client-human-presence.js";
 import {
   recordClientPresenceActivity,
   refreshClientPresence,
@@ -131,8 +131,17 @@ describe("live person presence timing", () => {
   }
 
   it("projects only authenticated Control UI connections as human pool demand", async () => {
-    const changes = vi.fn<(present: boolean) => void>();
-    const projection = createAuthenticatedControlUiPresenceProjection(clients, changes);
+    const changes = vi.fn<(present: boolean) => Promise<void>>(async () => {});
+    const sidecars: Array<{ stop: () => void }> = [];
+    await startWorkerHumanPresence({
+      clients,
+      service: { setHumanPresence: changes },
+      log: { warn: vi.fn() },
+      registerSidecar: (sidecar) => sidecars.push(sidecar),
+    });
+    expect(changes).toHaveBeenCalledExactlyOnceWith(false);
+    expect(sidecars).toHaveLength(1);
+    changes.mockClear();
     const browser = await connect("person@presence.test", "presence-person");
     expect(browser.handler.setClient(browser.client)).toBe(true);
     expect(changes).not.toHaveBeenCalled();
@@ -155,7 +164,7 @@ describe("live person presence timing", () => {
     verified.socket.readyState = 3;
     verified.socket.emit("close", 1000, Buffer.alloc(0));
     expect(changes).toHaveBeenLastCalledWith(false);
-    projection.stop();
+    sidecars[0]!.stop();
   });
 
   it("shares the owner's online interval and activity across tabs without an email", async () => {

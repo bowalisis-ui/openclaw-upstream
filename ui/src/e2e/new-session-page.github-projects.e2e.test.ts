@@ -4,6 +4,7 @@ import path from "node:path";
 import { gatewayOriginScope } from "@openclaw/gateway-client/browser";
 import { expect, it } from "vitest";
 import { takeControlUiViewportScreenshot } from "../test-helpers/control-ui-e2e-screenshot.ts";
+import { controlUiE2eBuiltModuleRequest } from "./control-ui-built-module.test-support.ts";
 import {
   WORKSPACE,
   ONE_PIXEL_PNG_B64,
@@ -243,11 +244,14 @@ suite.define(() => {
     const chatModuleBlocked = new Promise<void>((resolve) => {
       releaseChatModule = resolve;
     });
-    await page.route("**/assets/route-entry-*.js*", async (route) => {
-      chatModuleRequested = true;
-      await chatModuleBlocked;
-      await route.continue();
-    });
+    await page.route(
+      controlUiE2eBuiltModuleRequest("ui/src/pages/chat/route-entry.ts"),
+      async (route) => {
+        chatModuleRequested = true;
+        await chatModuleBlocked;
+        await route.continue();
+      },
+    );
     let releaseMedia!: () => void;
     const mediaBlocked = new Promise<void>((resolve) => {
       releaseMedia = resolve;

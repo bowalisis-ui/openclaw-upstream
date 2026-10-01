@@ -12,8 +12,10 @@ import {
   resolveConfiguredGitHubHost,
 } from "../agents/github-host.js";
 import { getRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
+import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { parseConfiguredProjectGitUrl } from "../projects/project-git-url.runtime.js";
+import { createGitHubReadGroup } from "./control-ui-session-pr-request.js";
 import { gitHubPublicApi } from "./github-public-api.js";
 
 const SEARCH_CACHE_MS = 60_000;
@@ -26,6 +28,7 @@ const EXACT_REPO_QUERY = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9.
 
 type SearchCacheEntry = {
   expiresAt: number;
+  access: ReturnType<typeof createGitHubReadGroup>;
   promise: Promise<ProjectsSearchRemoteResult>;
 };
 
@@ -160,7 +163,7 @@ async function searchProjectsUncached(params: {
 }
 
 /** Searches affiliated and public GitHub repositories for the project picker. */
-export function searchRemoteProjects(
+export async function searchRemoteProjects(
   query: string,
   options: {
     env?: NodeJS.ProcessEnv;
@@ -204,40 +207,42 @@ export function searchRemoteProjects(
   const cacheKey = `${normalizedQuery}\0${host}\0${apiBaseUrl}\0${cacheScope}`;
   const now = options.now ?? Date.now();
   const cached = searchCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    searchCache.delete(cacheKey);
-    searchCache.set(cacheKey, cached);
-    return cached.promise.then((result) => {
-      assertSelected();
-      return result;
-    });
+  const reusable = cached && cached.expiresAt > now && !cached.access.signal.aborted;
+  const entry: SearchCacheEntry = reusable
+    ? cached
+    : {
+        expiresAt: now + SEARCH_CACHE_MS,
+        access: createGitHubReadGroup(),
+        promise: Promise.resolve({ credential: "missing", projects: [] }),
+      };
+  const release = entry.access.add(assertSelected, options.signal);
+  if (!reusable) {
+    const networkFetch = options.fetchImpl ?? fetch;
+    const fetchImpl: typeof fetch = (input, init) => {
+      entry.access.assertCurrent();
+      return networkFetch(input, {
+        ...init,
+        signal: init?.signal
+          ? AbortSignal.any([init.signal, entry.access.signal])
+          : entry.access.signal,
+      });
+    };
+    entry.promise = searchProjectsUncached({ query: query.trim(), fetchImpl, token }).catch(
+      (error: unknown) => {
+        if (searchCache.get(cacheKey) === entry) {
+          searchCache.delete(cacheKey);
+        }
+        throw error;
+      },
+    );
   }
-  const networkFetch = options.fetchImpl ?? fetch;
-  const fetchImpl: typeof fetch = (input, init) => {
-    assertSelected();
-    return networkFetch(input, {
-      ...init,
-      ...(options.signal
-        ? { signal: init?.signal ? AbortSignal.any([init.signal, options.signal]) : options.signal }
-        : {}),
-    });
-  };
-  const promise = searchProjectsUncached({
-    query: query.trim(),
-    fetchImpl,
-    token,
-  })
-    .then((result) => {
-      assertSelected();
-      return result;
-    })
-    .catch((error: unknown) => {
-      if (searchCache.get(cacheKey)?.promise === promise) {
-        searchCache.delete(cacheKey);
-      }
-      throw error;
-    });
-  searchCache.set(cacheKey, { expiresAt: now + SEARCH_CACHE_MS, promise });
+  searchCache.delete(cacheKey);
+  searchCache.set(cacheKey, entry);
   pruneMapToMaxSize(searchCache, SEARCH_CACHE_LIMIT);
-  return promise;
+  try {
+    return await racePromiseWithAbortSignal(entry.promise, options.signal);
+  } finally {
+    release();
+    assertSelected();
+  }
 }

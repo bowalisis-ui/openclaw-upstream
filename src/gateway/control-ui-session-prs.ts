@@ -1,6 +1,7 @@
 import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { readNonBlankString } from "@openclaw/normalization-core/string-coerce";
+import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { releaseGitReadCache, runGitReadOperation } from "../infra/git-read-cache.js";
 import type {
   GitCheckoutContext,
@@ -13,7 +14,10 @@ import type {
   ControlUiSessionPullRequests,
 } from "./control-ui-contract.js";
 import type { ControlUiSessionPrReadContext } from "./control-ui-session-pr-read.js";
-import { prepareSessionPullRequestGitHubRead } from "./control-ui-session-pr-request.js";
+import {
+  createGitHubReadGroup,
+  prepareSessionPullRequestGitHubRead,
+} from "./control-ui-session-pr-request.js";
 import {
   fetchSessionPullRequestCheckRollup,
   sessionPullRequestRepositoryApiUrl,
@@ -62,6 +66,7 @@ type BranchPullRequestsSnapshot = ControlUiSessionPullRequests & {
 };
 
 type CacheEntry = {
+  access: ReturnType<typeof createGitHubReadGroup>;
   expiresAt: number;
   promise: Promise<BranchPullRequestsSnapshot>;
   refreshMode: "normal" | "forced" | null;
@@ -569,32 +574,8 @@ async function cachedBranchPullRequests(
     cacheScope,
   ]);
   const cached = branchCache.get(key, deps.cacheSignal);
-  if (cached && cached.expiresAt > Date.now()) {
-    branchCache.set(key, cached, deps.cacheSignal);
-    if (!refresh || cached.refreshMode === "forced") {
-      return cached.promise.then((snapshot) => {
-        read.assertCurrent();
-        return snapshot;
-      });
-    }
-    const pendingSnapshot = cached.promise;
-    const pendingRefreshMode = cached.refreshMode;
-    const pendingExpiresAt = cached.expiresAt;
-    return trackBranchRefresh(cached, "forced", async () => {
-      const snapshot = await pendingSnapshot;
-      read.assertCurrent();
-      // GitHub quota backoff stays authoritative even when a forced refresh
-      // queues behind an older normal or settled request.
-      if (snapshot.rateLimited) {
-        if (pendingRefreshMode === null) {
-          cached.expiresAt = pendingExpiresAt;
-        }
-        return snapshot;
-      }
-      return refreshBranchPullRequests(context, read, cached);
-    });
-  }
   const entry: CacheEntry = cached ?? {
+    access: createGitHubReadGroup(),
     expiresAt: 0,
     promise: Promise.resolve({
       pullRequests: [],
@@ -605,9 +586,49 @@ async function cachedBranchPullRequests(
     }),
     refreshMode: null,
   };
-  const promise = trackBranchRefresh(entry, refresh ? "forced" : "normal", () =>
-    refreshBranchPullRequests(context, read, entry),
+  const reusable = entry.expiresAt > Date.now() && !entry.access.signal.aborted;
+  if (entry.access.signal.aborted) {
+    entry.access = createGitHubReadGroup();
+  }
+  const release = entry.access.add(read.assertCurrent, deps.cacheSignal);
+  const transportRead = prepareSessionPullRequestGitHubRead(
+    read.host,
+    deps.fetchImpl ?? fetch,
+    entry.access.assertCurrent,
+    { signal: entry.access.signal },
   );
-  branchCache.set(key, entry, deps.cacheSignal);
-  return promise;
+  try {
+    if (reusable) {
+      branchCache.set(key, entry, deps.cacheSignal);
+      if (!refresh || entry.refreshMode === "forced") {
+        return await racePromiseWithAbortSignal(entry.promise, deps.cacheSignal);
+      }
+      const pendingSnapshot = entry.promise;
+      const pendingRefreshMode = entry.refreshMode;
+      const pendingExpiresAt = entry.expiresAt;
+      return await racePromiseWithAbortSignal(
+        trackBranchRefresh(entry, "forced", async () => {
+          const snapshot = await pendingSnapshot;
+          transportRead.assertCurrent();
+          // Forced refreshes retain quota backoff from the shared preceding request.
+          if (snapshot.rateLimited) {
+            if (pendingRefreshMode === null) {
+              entry.expiresAt = pendingExpiresAt;
+            }
+            return snapshot;
+          }
+          return refreshBranchPullRequests(context, transportRead, entry);
+        }),
+        deps.cacheSignal,
+      );
+    }
+    const promise = trackBranchRefresh(entry, refresh ? "forced" : "normal", () =>
+      refreshBranchPullRequests(context, transportRead, entry),
+    );
+    branchCache.set(key, entry, deps.cacheSignal);
+    return await racePromiseWithAbortSignal(promise, deps.cacheSignal);
+  } finally {
+    release();
+    read.assertCurrent();
+  }
 }

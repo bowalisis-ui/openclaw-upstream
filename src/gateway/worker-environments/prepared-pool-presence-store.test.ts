@@ -13,7 +13,10 @@ import {
   readPreparedPoolPresenceDemandInDatabase,
   writePreparedPoolPresenceDemandInDatabase,
 } from "./prepared-pool-presence-store.js";
-import { readPreparedPoolPresenceDemand } from "./prepared-pool-presence-worker.js";
+import {
+  readPreparedPoolPresenceDemand,
+  writePreparedPoolPresenceDemand,
+} from "./prepared-pool-presence-worker.js";
 import type { PreparedPoolPresenceDemand } from "./prepared-pool-presence.types.js";
 
 const PRESENCE_KEY = "cloudWorkers.preparedPool.humanPresenceDemand";
@@ -59,7 +62,7 @@ describe("prepared-pool human-presence demand storage", () => {
   });
 
   it("persists one validated demand record and deletes only its owned key", async () => {
-    expect(writePreparedPoolPresenceDemandInDatabase(database.db, demand())).toEqual(demand());
+    expect(await writePreparedPoolPresenceDemand(demand(), () => {})).toEqual(demand());
     expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toEqual(demand());
     expect(await readPreparedPoolPresenceDemand()).toEqual(demand());
 
@@ -72,7 +75,7 @@ describe("prepared-pool human-presence demand storage", () => {
         "INSERT INTO config_machine_state(state_key, value_json, updated_at_ms) VALUES (?, ?, ?)",
       )
       .run("unrelated", "{}", 1);
-    expect(writePreparedPoolPresenceDemandInDatabase(database.db, null)).toBeUndefined();
+    expect(await writePreparedPoolPresenceDemand(null, () => {})).toBeUndefined();
     expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toBeUndefined();
     expect(await readPreparedPoolPresenceDemand()).toBeUndefined();
     expect(

@@ -9,10 +9,3 @@ export type PreparedPoolPresenceDemand = {
   lastPresentAtMs: number;
   retireAtMs: number | null;
 };
-
-export type PreparedPoolPresenceWorkerOperations = {
-  "preparedPoolPresence.write": {
-    input: PreparedPoolPresenceDemand | null;
-    output: PreparedPoolPresenceDemand | undefined;
-  };
-};
