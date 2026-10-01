@@ -62,7 +62,7 @@ describe("personal session involvement", () => {
       expect((await list()).sessions).toEqual([]);
       await f.clock.advanceBy(8 * 24 * 60 * 60_000);
       expect(readMentionStoreSnapshot(-1)?.sources).toHaveLength(0);
-      f.inbox.dispose();
+      await f.inbox.dispose();
       const restarted = f.openInbox("after-retention");
       f.post("source-one", {}, restarted);
       expect((await list()).sessions).toEqual([]);
