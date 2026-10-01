@@ -3,6 +3,12 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../config/runtime-snapshot.js";
+import { resolveCommandEnv } from "../process/exec-spawn.js";
+import { createDeferredCore } from "../shared/deferred.js";
 import { clearGitHubCredentialVerificationCache } from "./github-oauth-client.js";
 
 const commands = vi.hoisted(() => ({ run: vi.fn() }));
@@ -44,9 +50,63 @@ describe("managed credential isolation", () => {
     );
   });
   afterEach(() => {
+    clearRuntimeConfigSnapshot();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
+
+  it.each(["unchanged", "host", "API"])(
+    "pins personal publication endpoints during verification (%s)",
+    async (change) => {
+      vi.stubEnv("OPENCLAW_STATE_DIR", dirs.make("personal-host-admission-"));
+      const profileId = "ghp_55555555555555555555555555555555";
+      const config = {
+        gateway: {
+          github: { host: "a.ghe.example.test", apiBaseUrl: "https://a.ghe.example.test/api/v3" },
+        },
+      };
+      setRuntimeConfigSnapshot(config);
+      await installManagedGitHubProfile({
+        profileDir: resolveManagedGitHubProfileDir({ agentId: "", scope: "personal", profileId }),
+        token: "synthetic-personal-host-token",
+        commitConfig: async () => {},
+      });
+      clearGitHubCredentialVerificationCache();
+      const started = createDeferredCore();
+      const release = createDeferredCore<Response>();
+      vi.mocked(fetch).mockImplementation(async (url) => {
+        const requestUrl = url instanceof Request ? url.url : url;
+        expect(requestUrl).toBe("https://a.ghe.example.test/api/v3/user");
+        started.resolve();
+        return await release.promise;
+      });
+      const prepared = preparePersonalGitHubPublicationIdentity({
+        profileId,
+        accountId: 202,
+        assertCurrent: () => {},
+      }).then((identity) => ({ host: identity.host, accountId: identity.account.accountId }));
+      const outcome =
+        change === "unchanged"
+          ? expect(prepared).resolves.toMatchObject({
+              host: "a.ghe.example.test",
+              accountId: 202,
+            })
+          : expect(prepared).rejects.toThrow("GitHub identity changed");
+      await started.promise;
+      if (change !== "unchanged") {
+        setRuntimeConfigSnapshot({
+          gateway: {
+            github: {
+              host: change === "host" ? "b.ghe.example.test" : config.gateway.github.host,
+              apiBaseUrl: "https://b.ghe.example.test/api/v3",
+            },
+          },
+        });
+      }
+      release.resolve(new Response(JSON.stringify(account)));
+      await outcome;
+    },
+  );
 
   it.each(["system", "agent", "personal", "native"] as const)(
     "pins the verified %s credential for broker children across profile retirement and host changes",
@@ -97,7 +157,6 @@ describe("managed credential isolation", () => {
       nativeToken = "synthetic-native-after";
       // Exercise the actual overlay composition used by subprocesses, including
       // a different ambient token and an absent selected credential file.
-      const { resolveCommandEnv } = await import("../process/exec-spawn.js");
       const child = resolveCommandEnv({
         argv: ["gh", "api", "user"],
         baseEnv: { GH_TOKEN: nativeToken },

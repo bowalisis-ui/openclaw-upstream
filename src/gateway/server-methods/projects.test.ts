@@ -110,6 +110,12 @@ test("projects.searchRemote sends only the selected host's service credential", 
 
 test("projects.searchRemote binds native tokens to the host through final fetch", async () => {
   const cfg = {
+    tools: { github: { profileId: "ghp_11111111111111111111111111111111" } },
+    agents: {
+      entries: {
+        main: { tools: { github: { profileId: "ghp_22222222222222222222222222222222" } } },
+      },
+    },
     gateway: {
       github: { host: "a.ghe.example.test", apiBaseUrl: "https://a.ghe.example.test/api/v3" },
       projects: { nativeGitHubSearch: true },

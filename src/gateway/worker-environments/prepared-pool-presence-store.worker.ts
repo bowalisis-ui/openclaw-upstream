@@ -1,6 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { resolveGitHubHost } from "../../agents/github-host-runtime.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -98,9 +97,6 @@ export function writePreparedPoolPresenceDemandInDatabase(
     return undefined;
   }
   const prepared = parsePresenceDemand(value);
-  if (new URL(prepared.project.source.url).hostname !== resolveGitHubHost()) {
-    throw new Error("Prepared-pool presence demand is invalid");
-  }
   const valueJson = JSON.stringify(prepared);
   executeSqliteQuerySync(
     database,

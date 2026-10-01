@@ -4,6 +4,7 @@ import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
 } from "../../config/runtime-snapshot.js";
+import * as workerAdmission from "../../infra/sqlite-worker-operation-admission.js";
 import {
   closeOpenClawStateDatabaseAsync,
   openOpenClawStateDatabase,
@@ -56,34 +57,57 @@ describe("prepared-pool human-presence demand storage", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     clearRuntimeConfigSnapshot();
     await closeOpenClawStateDatabaseAsync();
     vi.unstubAllEnvs();
   });
 
-  it("persists one validated demand record and deletes only its owned key", async () => {
-    expect(await writePreparedPoolPresenceDemand(demand(), () => {})).toEqual(demand());
-    expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toEqual(demand());
-    expect(await readPreparedPoolPresenceDemand()).toEqual(demand());
-
-    await closeOpenClawStateDatabaseAsync();
-    database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
-    expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toEqual(demand());
-
-    database.db
-      .prepare(
-        "INSERT INTO config_machine_state(state_key, value_json, updated_at_ms) VALUES (?, ?, ?)",
-      )
-      .run("unrelated", "{}", 1);
-    expect(await writePreparedPoolPresenceDemand(null, () => {})).toBeUndefined();
+  it("rolls back demand when the Gateway host changes before commit admission", async () => {
+    const createAdmission = workerAdmission.createSqliteWorkerOperationAdmission;
+    vi.spyOn(workerAdmission, "createSqliteWorkerOperationAdmission").mockImplementation((admit) =>
+      createAdmission((request, grant) => {
+        if (request.stage === "commit") {
+          setRuntimeConfigSnapshot({ gateway: { github: { host: "ghe.example.test" } } });
+        }
+        admit(request, grant);
+      }),
+    );
+    await expect(writePreparedPoolPresenceDemand(demand(), () => {})).rejects.toThrow(
+      "Prepared-pool presence demand is invalid",
+    );
     expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toBeUndefined();
-    expect(await readPreparedPoolPresenceDemand()).toBeUndefined();
-    expect(
-      database.db
-        .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
-        .get("unrelated"),
-    ).toEqual({ value_json: "{}" });
   });
+
+  it.each(["github.com", "ghe.example.test"])(
+    "persists validated %s demand and deletes only its owned key",
+    async (host) => {
+      setRuntimeConfigSnapshot({ gateway: { github: { host } } });
+      const selected = demand();
+      selected.project.source.url = `https://${host}/acme/private-repo.git`;
+      expect(await writePreparedPoolPresenceDemand(selected, () => {})).toEqual(selected);
+      expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toEqual(selected);
+      expect(await readPreparedPoolPresenceDemand()).toEqual(selected);
+
+      await closeOpenClawStateDatabaseAsync();
+      database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: root } });
+      expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toEqual(selected);
+
+      database.db
+        .prepare(
+          "INSERT INTO config_machine_state(state_key, value_json, updated_at_ms) VALUES (?, ?, ?)",
+        )
+        .run("unrelated", "{}", 1);
+      expect(await writePreparedPoolPresenceDemand(null, () => {})).toBeUndefined();
+      expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toBeUndefined();
+      expect(await readPreparedPoolPresenceDemand()).toBeUndefined();
+      expect(
+        database.db
+          .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
+          .get("unrelated"),
+      ).toEqual({ value_json: "{}" });
+    },
+  );
 
   it("refuses malformed retained timing instead of resetting it", () => {
     database.db
@@ -96,7 +120,7 @@ describe("prepared-pool human-presence demand storage", () => {
     );
   });
 
-  it("reads an existing demand after the configured GitHub host changes", () => {
+  it("reads an existing demand after the configured GitHub host changes", async () => {
     writePreparedPoolPresenceDemandInDatabase(database.db, demand());
     setRuntimeConfigSnapshot({
       gateway: {
@@ -105,7 +129,7 @@ describe("prepared-pool human-presence demand storage", () => {
     });
 
     expect(readPreparedPoolPresenceDemandInDatabase(database.db)).toEqual(demand());
-    expect(() => writePreparedPoolPresenceDemandInDatabase(database.db, demand())).toThrow(
+    await expect(writePreparedPoolPresenceDemand(demand(), () => {})).rejects.toThrow(
       "Prepared-pool presence demand is invalid",
     );
   });

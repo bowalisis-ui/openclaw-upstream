@@ -298,8 +298,10 @@ COPY --from=runtime-assets --chown=node:node \
     /app/scripts/install-cli.sh \
     /app/scripts/install.ps1 \
     /app/scripts/prepare-git-hooks.mjs \
+    /app/scripts/prepare-native-protocol.mjs \
     /app/scripts/preinstall-package-manager-warning.mjs \
     /app/scripts/postinstall-bundled-plugins.mjs \
+    /app/scripts/runtime-postbuild-shared.mjs \
     /app/scripts/windows-cmd-helpers.mjs \
     ./scripts/
 COPY --from=runtime-assets --chown=node:node \

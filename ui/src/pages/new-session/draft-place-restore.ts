@@ -135,13 +135,28 @@ export function restoreDraftPlacePreferences(params: {
   const preferredWhere = state.whereSelectedByUser ? null : state.preferredWhereRestore;
   const preferredProject = state.projectSelectedByUser ? "" : state.preferredProjectRestore;
   const savedRemote = state.preferredRemoteProjectRestore;
-  if (savedRemote && browser.projectsReady && browser.githubHost) {
-    const url = URL.canParse(savedRemote.cloneUrl) ? new URL(savedRemote.cloneUrl) : undefined;
-    if (url?.hostname !== browser.githubHost) {
-      state.preferredRemoteProjectRestore = null;
+  const activeRemote = browser.remoteProject;
+  if ((savedRemote || activeRemote) && browser.projectsReady && browser.githubHost) {
+    const matchesHost = (project: DraftRemoteProject) =>
+      URL.canParse(project.cloneUrl) && new URL(project.cloneUrl).hostname === browser.githubHost;
+    const staleSaved = savedRemote && !matchesHost(savedRemote);
+    const staleActive = activeRemote && !matchesHost(activeRemote);
+    if (staleSaved || staleActive) {
+      if (staleSaved) {
+        state.preferredRemoteProjectRestore = null;
+      }
+      if (staleActive) {
+        browser.clearProjectSelection();
+        state.projectSelectedByUser = false;
+      }
+      if (staleActive || (staleSaved && !activeRemote && !browser.projectId)) {
+        repositoryState.clearDetails(true);
+      }
       state.configuredDefaultRepositoryPending =
         !state.configuredDefaultRepositoryOptOut && !preferredProject;
-      persistPreference({ remoteProject: null });
+      persistPreference({
+        remoteProject: state.preferredRemoteProjectRestore ?? browser.remoteProject ?? null,
+      });
       changed = true;
     }
   }

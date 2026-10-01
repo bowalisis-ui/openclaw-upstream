@@ -36,6 +36,71 @@ const remoteSearchResult = {
 };
 
 suite.define(() => {
+  it("retires a selected remote repository after a live GitHub host change", async () => {
+    await suite.withPage(
+      { locale: "en-US", serviceWorkers: "block", viewport: { height: 900, width: 1280 } },
+      async ({ page }) => {
+        const gateway = await installMockGateway(page, {
+          workspace: WORKSPACE,
+          workspaceGit: false,
+          agentModel: "openai/gpt-4.1",
+          models: [{ id: "gpt-4.1", provider: "openai", name: "GPT-4.1" }],
+          featureMethods: [
+            "projects.list",
+            "projects.searchRemote",
+            "projects.add",
+            "sessions.create",
+          ],
+          methodResponses: {
+            "projects.list": { projects: [], githubHost: "a.ghe.example.test" },
+            "projects.searchRemote": {
+              credential: "configured",
+              projects: [
+                {
+                  name: "private-repo",
+                  fullName: "acme/private-repo",
+                  private: true,
+                  cloneUrl: "https://a.ghe.example.test/acme/private-repo.git",
+                  webUrl: "https://a.ghe.example.test/acme/private-repo",
+                  defaultBranch: "main",
+                },
+              ],
+            },
+            "sessions.create": { key: "agent:main:host-change-proof" },
+          },
+        });
+        await page.goto(`${suite.server.baseUrl}new`);
+        await gateway.waitForRequest("projects.list");
+        await page.locator("#new-session-project-trigger").click();
+        const projects = page.locator("wa-popover.new-session-page__project-popover");
+        await projects
+          .getByRole("searchbox", { name: "Search projects or paste a Git URL" })
+          .fill("acme");
+        await projects.getByRole("button", { name: /acme\/private-repo/u }).click();
+        const selected = page.locator("#new-session-project-trigger");
+        await pollLocatorText(selected).toContain("acme/private-repo");
+        await page.locator(".new-session-page__message").fill("keep the draft message");
+        await captureProjectUiProof(suite, page, "host-switch-before.png");
+        const requests = (await gateway.getRequests("projects.list")).length;
+        await gateway.setMethodResponse("projects.list", {
+          projects: [],
+          githubHost: "b.ghe.example.test",
+        });
+        await gateway.emitGatewayEvent("config.changed", {});
+        await gateway.waitForRequest("projects.list", { after: requests });
+        await pollLocatorText(selected).not.toContain("acme/private-repo");
+        await captureProjectUiProof(suite, page, "host-switch-after.png");
+        expect(await page.locator(".new-session-page__message").inputValue()).toBe(
+          "keep the draft message",
+        );
+        await page.getByRole("button", { name: "Start session" }).click();
+        const created = await gateway.waitForRequest("sessions.create");
+        expect(created.params).not.toHaveProperty("projectGitUrl");
+        expect(created.params).not.toHaveProperty("repository");
+      },
+    );
+  });
+
   it("uses the configured repository ref instead of an unrelated saved Gateway branch", async () => {
     await suite.withPage(
       { locale: "en-US", serviceWorkers: "block", viewport: { height: 900, width: 1280 } },

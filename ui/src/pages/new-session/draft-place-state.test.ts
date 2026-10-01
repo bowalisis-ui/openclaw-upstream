@@ -18,6 +18,41 @@ const REMOTE_PROJECT = {
 };
 
 describe("DraftPlaceState repository selection", () => {
+  it.each(["restored", "selected"])(
+    "retires an active %s remote repository after the catalog host changes",
+    (selection) => {
+      const f = createRepositoryFixture();
+      let host = "a.ghe.example.test";
+      vi.spyOn(f.browser, "projectsReady", "get").mockReturnValue(true);
+      vi.spyOn(f.browser, "githubHost", "get").mockImplementation(() => host);
+      const remote = { ...REMOTE_PROJECT, cloneUrl: "https://a.ghe.example.test/acme/private.git" };
+      f.readPreference.mockReturnValue(selection === "restored" ? { remoteProject: remote } : {});
+      f.state.adoptAgentDefaults();
+      if (selection === "selected") {
+        f.state.selectRemoteProject(remote);
+      }
+      f.state.restorePreferenceSelections();
+      expect(f.browser.remoteProject).toEqual(remote);
+      f.state.setBaseRef("retired-host-branch");
+      f.state.setWorktreeName("retired-host-task");
+      host = "b.ghe.example.test";
+      f.state.restorePreferenceSelections();
+      expect(f.browser.remoteProject).toBeNull();
+      expect(f.state.remoteRepository).toBeUndefined();
+      expect(f.state.baseRef).toBe("");
+      expect(f.state.worktreeName).toBe("");
+      expect(f.persistPreference).toHaveBeenCalledWith("main", "/workspace", {
+        baseRef: "",
+        worktreeName: "",
+      });
+      expect(f.persistPreference).toHaveBeenCalledWith(
+        "main",
+        "/workspace",
+        expect.objectContaining({ remoteProject: null }),
+      );
+    },
+  );
+
   it("remembers a remote project and restores its default branch", () => {
     const selected = createRepositoryFixture();
     selected.state.selectRemoteProject(REMOTE_PROJECT);

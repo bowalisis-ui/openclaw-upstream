@@ -155,7 +155,9 @@ function normalizePreference(value: unknown): NewSessionPreference | null {
   if (typeof value.defaultRepositoryOptOut === "boolean") {
     preference.defaultRepositoryOptOut = value.defaultRepositoryOptOut;
   }
-  if (isRecord(value.remoteProject)) {
+  if (value.remoteProject === null) {
+    preference.remoteProject = null;
+  } else if (isRecord(value.remoteProject)) {
     const identity = normalizeOptionalString(value.remoteProject.identity)?.slice(0, 200);
     const cloneUrl = normalizeOptionalString(value.remoteProject.cloneUrl)?.slice(0, 2048);
     const defaultBranch = normalizeOptionalString(value.remoteProject.defaultBranch)?.slice(0, 255);

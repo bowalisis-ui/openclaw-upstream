@@ -456,6 +456,14 @@ export async function preparePersonalGitHubPublicationIdentity(params: {
   assertCurrent: () => void;
 }): Promise<PreparedGitHubPublicationIdentity> {
   params.assertCurrent();
+  const host = resolveGitHubHost();
+  const apiBaseUrl = resolveGitHubApiBaseUrl();
+  const assertSelected = () => {
+    params.assertCurrent();
+    if (resolveGitHubHost() !== host || resolveGitHubApiBaseUrl() !== apiBaseUrl) {
+      throw new GitHubIdentityError("changed");
+    }
+  };
   const profileDir = resolveManagedGitHubProfileDir({
     agentId: "",
     scope: "personal",
@@ -465,16 +473,14 @@ export async function preparePersonalGitHubPublicationIdentity(params: {
   if (!token) {
     throw new Error("My GitHub profile is unavailable; reconnect My GitHub.");
   }
-  params.assertCurrent();
+  assertSelected();
   const env = {
     ...withGitHubToken(process.env, token),
     GH_CONFIG_DIR: profileDir,
     GH_PROMPT_DISABLED: "1",
   };
-  const probe = await verifyGitHubCredential(token, {
-    apiBaseUrl: resolveGitHubApiBaseUrl(),
-  });
-  params.assertCurrent();
+  const probe = await verifyGitHubCredential(token, { apiBaseUrl });
+  assertSelected();
   if (probe.status !== "available") {
     throw new Error("My GitHub credential could not be verified; reconnect My GitHub.");
   }
@@ -484,7 +490,7 @@ export async function preparePersonalGitHubPublicationIdentity(params: {
   return Object.freeze({
     source: "personal",
     profileId: params.profileId,
-    host: resolveGitHubHost(),
+    host,
     account: probe.account,
     env: Object.freeze(env),
   });

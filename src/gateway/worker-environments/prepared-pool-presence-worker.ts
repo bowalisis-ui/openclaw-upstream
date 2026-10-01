@@ -1,3 +1,4 @@
+import { resolveGitHubHost } from "../../agents/github-host-runtime.js";
 import { createSqliteWorkerOperationAdmission } from "../../infra/sqlite-worker-operation-admission.js";
 import { executeExistingOpenClawStateRead } from "../../state/openclaw-state-db-readonly.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
@@ -21,6 +22,16 @@ export function writePreparedPoolPresenceDemand(
   value: PreparedPoolPresenceDemand | null,
   assertCurrent: () => void,
 ): Promise<PreparedPoolPresenceDemand | undefined> {
+  const host = value ? resolveGitHubHost() : undefined;
+  const assertSelected = () => {
+    assertCurrent();
+    if (
+      value &&
+      (resolveGitHubHost() !== host || new URL(value.project.source.url).hostname !== host)
+    ) {
+      throw new Error("Prepared-pool presence demand is invalid");
+    }
+  };
   const context = captureOpenClawStateWorkerContext();
   return runOpenClawStateWorkerOperation(
     context,
@@ -30,7 +41,7 @@ export function writePreparedPoolPresenceDemand(
         input: value,
       }),
     {
-      assertCurrent,
+      assertCurrent: assertSelected,
       createAdmission: () => ({
         nativeLocations: [context.admission.databasePath],
         admission: createSqliteWorkerOperationAdmission((request, grant) => {
@@ -38,7 +49,7 @@ export function writePreparedPoolPresenceDemand(
             throw new Error("Prepared-pool presence demand requires transaction admission");
           }
           context.admission.assertCurrent();
-          assertCurrent();
+          assertSelected();
           grant();
         }),
       }),
