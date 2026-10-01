@@ -1,7 +1,9 @@
 import { resolveGitHubHost } from "../agents/github-host-runtime.js";
 import type { PreparedGitHubPublicationIdentity } from "../agents/github-tool-identity.js";
-import { managedWorktrees } from "../agents/worktrees/service.js";
-import type { resolveGitHubPublicationWorktreeOwner } from "./github-publication-availability.js";
+import {
+  prepareGitHubPublicationRepositoryIdentity,
+  type resolveGitHubPublicationWorktreeOwner,
+} from "./github-publication-availability.js";
 import { parseGitHubPublicationBaseBranch } from "./github-publication-base.js";
 import { GitHubPublicationWorkspaceChangedError } from "./github-publication-failure.js";
 import { requirePublicationCommand } from "./github-publication-git-transport.js";
@@ -16,18 +18,7 @@ export async function prepareGitHubPublicationTarget(params: {
 }) {
   const { worktree, assertCurrent } = params;
   const githubHost = params.identity.host ?? resolveGitHubHost();
-  assertCurrent();
-  const repositoryIdentity = await managedWorktrees.resolveRepositoryIdentity(worktree.path);
-  assertCurrent();
-  if (
-    repositoryIdentity.checkoutRoot !== worktree.path ||
-    repositoryIdentity.repoRoot !== worktree.repoRoot ||
-    repositoryIdentity.fingerprint !== worktree.repoFingerprint
-  ) {
-    throw new GitHubPublicationWorkspaceChangedError(
-      "GitHub publication workspace repository changed.",
-    );
-  }
+  const repositoryIdentity = await prepareGitHubPublicationRepositoryIdentity(params);
   const remote = parseGitHubRemoteUrl(repositoryIdentity.originUrl, githubHost);
   if (
     !remote ||

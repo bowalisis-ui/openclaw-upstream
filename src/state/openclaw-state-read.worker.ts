@@ -48,7 +48,7 @@ import {
 } from "../gateway/worker-environments/placement-read-projection.js";
 import { readWorkerPlacementChangeSnapshotInDatabase } from "../gateway/worker-environments/placement-row-codec.js";
 import { readWorkspaceJournalInDatabase } from "../gateway/worker-environments/placement-workspace-journal.js";
-import { isWorkspaceJournalReadCommand } from "../gateway/worker-environments/placement-workspace-journal.worker-contract.js";
+import { isWorkspaceJournalReadCommand } from "../gateway/worker-environments/placement-workspace-journal.types.js";
 import { getSqliteRuntimeCapabilities } from "../infra/bun-sqlite-library.js";
 import { executeDevicePairingRead } from "../infra/device-pairing-read.kernel.js";
 import { readExecApprovalsConfigRow } from "../infra/exec-approvals-sqlite.js";

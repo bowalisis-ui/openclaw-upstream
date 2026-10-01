@@ -10,6 +10,7 @@ import { createGatewayMethodRegistry } from "./methods/registry.js";
 import { invalidateOperatorRolePolicy } from "./operator-role-policy.js";
 import { createRequest } from "./server-http.test-harness.js";
 import { dispatchGatewayRequestInProcessRaw } from "./server-in-process-dispatch.js";
+import type { GatewayRequestHandler } from "./server-methods/types.js";
 import { createGatewayRequestContext } from "./server-request-context.js";
 import { makeContextParams } from "./server-request-context.test-support.js";
 import { createOperatorWsClient } from "./server/ws-connection/authenticated-request-dispatch.test-support.js";
@@ -60,15 +61,16 @@ it("keeps public sign-in, durable roles and privileged dispatch independent of c
       );
     });
     let effects = 0;
+    const handler: GatewayRequestHandler = ({ respond }) => {
+      effects += 1;
+      respond(true, { completed: true });
+    };
     const methodRegistry = createGatewayMethodRegistry([
       {
         name: "test.issuer-effect",
         owner: { kind: "aux", area: "issuer-proof" },
         scope: "operator.admin",
-        handler: ({ respond }) => {
-          effects += 1;
-          respond(true, { completed: true });
-        },
+        handler,
       },
     ]);
     try {
@@ -81,6 +83,7 @@ it("keeps public sign-in, durable roles and privileged dispatch independent of c
             ["ada", false],
           ] as const) {
             const req = createRequest({
+              path: "/",
               remoteAddress: "127.0.0.1",
               headers: {
                 host: "gateway.local",

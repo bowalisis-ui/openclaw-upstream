@@ -6,9 +6,13 @@ import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import path from "node:path";
-import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  openFixtureReceiptChannel,
+  type FixtureReceiptChannel,
+  withinTest,
+} from "openclaw/plugin-sdk/test-fixtures";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { crabboxState } from "./crabbox-state.test-support.js";
 import {
   createCrabboxNodeEnrollmentSetup,
@@ -18,7 +22,9 @@ import {
 import {
   createNodeBootstrapFixture,
   createNodePackageFixture,
+  expectSetupPhases,
   readLaunch,
+  type DesktopFixture,
 } from "./crabbox-worker-node-enrollment.test-support.js";
 import { resolveCrabboxProvisionProfile } from "./crabbox-worker-profile.js";
 import { commandResult } from "./crabbox-worker-provider.test-support.js";
@@ -26,6 +32,12 @@ import { SCRUB_WORKER_STATE } from "./crabbox-worker-warm-image-scrub.js";
 import { openCrabboxWarmImageStore } from "./crabbox-worker-warm-image-store.js";
 import { createCrabboxWarmImageManager } from "./crabbox-worker-warm-image.js";
 import { PROFILE, checkpointResult } from "./crabbox-worker-warm-image.test-support.js";
+
+let receipts: FixtureReceiptChannel;
+beforeAll(async () => {
+  receipts = await openFixtureReceiptChannel();
+});
+afterAll(() => receipts.close());
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const tempDirs = useAutoCleanupTempDirTracker((cleanupDirectories) => {
@@ -43,7 +55,7 @@ const leaseId = "cbx_bootstrap_test";
 const setupCode = "synthetic-enrollment-credential";
 
 const packageFixture = (build: string, postinstall = "") =>
-  createNodePackageFixture((prefix) => tempDirs.make(prefix), build, postinstall);
+  createNodePackageFixture((prefix) => tempDirs.make(prefix), build, receipts, postinstall);
 
 function testHome() {
   const home = fs.realpathSync(tempDirs.make("crabbox-bootstrap-home-"));
@@ -106,8 +118,8 @@ async function serveArtifact(
     tls = { cert: fs.readFileSync(cert), key: fs.readFileSync(key) };
   }
   const authorizations: Array<string | undefined> = [];
-  const requested = createDeferred<void>();
-  const closed = createDeferred<void>();
+  const requested = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<void>();
   const handle: http.RequestListener = (request, response) => {
     authorizations.push(request.headers.authorization);
     requested.resolve();
@@ -124,9 +136,9 @@ async function serveArtifact(
     }
     response.writeHead(200, { "content-length": archive.length });
     if (options.truncate) {
-      // Establish the response boundary before injecting a mid-body disconnect.
-      response.flushHeaders();
-      response.write(archive.subarray(0, 1), () => setImmediate(() => response.destroy()));
+      // Truncate after headers without retained bytes: one persisted byte resets the
+      // three-consecutive-failure budget and makes the request count scheduler-dependent.
+      response.end();
       return;
     }
     if (options.hold) {
@@ -171,21 +183,13 @@ async function serveArtifact(
   return { nodeBootstrap, authorizations, requested: requested.promise, closed: closed.promise };
 }
 
-type DesktopFixture = {
-  enabled: boolean;
-  setup?: string;
-  display?: string;
-  dbus?: string;
-  runtimeDir?: string;
-};
-
 async function enroll(
   home: string,
   nodeBootstrap: CrabboxWorkerNodeEnrollment["nodeBootstrap"],
   desktop?: DesktopFixture,
   runtimeOnly = false,
   workerBundle?: CrabboxWorkerNodeEnrollment["nodeBootstrap"] & { packageRelativePath: string },
-  options?: { credentials?: string; timeoutMs?: number },
+  options?: { credentials?: string; timeoutMs?: number; signal?: AbortSignal },
 ) {
   const bin = path.join(home, "bin");
   const proc = path.join(home, "proc");
@@ -271,18 +275,19 @@ echo 123
       .replaceAll("/var/lib/crabbox/desktop.env", path.join(home, "desktop.env"))
       .replaceAll("/proc/$process_pid/environ", `${proc}/$process_pid/environ`),
   );
-  const [code] = await once(child, "close");
-  clearTimeout(timeout);
-  return { code, output: Buffer.concat(output).toString("utf8") };
-}
-
-async function expectSetupPhases(result: ReturnType<typeof enroll>) {
-  const completed = await result;
-  expect(completed.code).toBe(0);
-  const lines = completed.output.trim().split("\n");
-  // Crabbox consumes these stream markers; successful bootstrap emits no other data.
-  expect(lines.every((line) => /^CRABBOX_PHASE:[a-z.-]{1,80}$/.test(line))).toBe(true);
-  return lines.map((line) => line.slice("CRABBOX_PHASE:".length));
+  const closed = once(child, "close");
+  try {
+    const [code] = await (options?.signal ? withinTest(closed, options.signal) : closed);
+    return { code, output: Buffer.concat(output).toString("utf8") };
+  } finally {
+    clearTimeout(timeout);
+    const active = child.exitCode === null && child.signalCode === null;
+    if (options?.signal?.aborted && child.pid && active) {
+      // The enrollment shell owns desktop setup; stop its group before releasing the FIFO.
+      process.kill(-child.pid, "SIGKILL");
+    }
+    await closed;
+  }
 }
 
 describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
@@ -508,7 +513,9 @@ describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
     expect(worker.authorizations).toHaveLength(1);
   }, 30_000);
 
-  it("prepares an exact runtime without node identity, then enrolls and reuses its warm artifact", async () => {
+  it("prepares an exact runtime without node identity, then enrolls and reuses its warm artifact", async ({
+    signal,
+  }) => {
     const { home, stateDir, stop } = testHome();
     const installed = await serveArtifact(Buffer.from("installed"));
     const { nodeBootstrap, authorizations } = await serveArtifact(
@@ -518,7 +525,7 @@ describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
       ),
     );
     const workerBytes = Buffer.from("synthetic standalone worker archive");
-    const workerResponse = createDeferred<void>();
+    const workerResponse = Promise.withResolvers<void>();
     const worker = await serveArtifact(workerBytes, { hold: workerResponse.promise });
     const workerBundle = {
       ...worker.nodeBootstrap,
@@ -606,7 +613,7 @@ describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
       "openclaw-bootstrap-node-launch",
       "openclaw-bootstrap-complete",
     ]);
-    const launch = await readLaunch(stateDir);
+    const launch = await readLaunch(stateDir, receipts, signal);
     expect(launch).toMatchObject({
       build: "first",
       args: [
@@ -639,7 +646,7 @@ describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
     await stop();
     fs.rmSync(path.join(stateDir, "launch.json"));
     await expectSetupPhases(enroll(home, nodeBootstrap));
-    expect((await readLaunch(stateDir)).cli).toBe(launch.cli);
+    expect((await readLaunch(stateDir, receipts, signal)).cli).toBe(launch.cli);
     expect(authorizations).toHaveLength(1);
   }, 30_000);
 
@@ -647,7 +654,7 @@ describe.skipIf(process.platform === "win32")("source node bootstrap", () => {
     "settles started work after %s fails before removing staging files",
     async (failure) => {
       const { home } = testHome();
-      const postinstallResponse = createDeferred<void>();
+      const postinstallResponse = Promise.withResolvers<void>();
       const postinstall = await serveArtifact(Buffer.from("finish"), {
         hold: postinstallResponse.promise,
       });
@@ -666,7 +673,7 @@ require("node:http").get(${JSON.stringify(postinstall.nodeBootstrap.url)}, (resp
 });`,
         ),
       );
-      const workerResponse = createDeferred<void>();
+      const workerResponse = Promise.withResolvers<void>();
       const worker = await serveArtifact(Buffer.from("synthetic worker archive"), {
         hold: workerResponse.promise,
       });
@@ -712,13 +719,15 @@ require("node:http").get(${JSON.stringify(postinstall.nodeBootstrap.url)}, (resp
     30_000,
   );
 
-  it("selects new source bytes even when the public version has not changed", async () => {
+  it("selects new source bytes even when the public version has not changed", async ({
+    signal,
+  }) => {
     const { home, stateDir, stop } = testHome();
     const first = await serveArtifact(await packageFixture("first"));
     const coldPhases = await expectSetupPhases(enroll(home, first.nodeBootstrap));
     expect(coldPhases).toContain("openclaw-bootstrap-installation");
     expect(coldPhases.at(-1)).toBe("openclaw-bootstrap-complete");
-    const oldLaunch = await readLaunch(stateDir);
+    const oldLaunch = await readLaunch(stateDir, receipts, signal);
     expect(oldLaunch).toMatchObject({ build: "first", args: expect.arrayContaining(["connect"]) });
     expect(
       JSON.parse(fs.readFileSync(path.join(path.dirname(oldLaunch.cli), "installed.json"), "utf8")),
@@ -727,18 +736,18 @@ require("node:http").get(${JSON.stringify(postinstall.nodeBootstrap.url)}, (resp
     fs.rmSync(path.join(stateDir, "launch.json"));
     const second = await serveArtifact(await packageFixture("second"));
     await expectSetupPhases(enroll(home, second.nodeBootstrap));
-    const launch = await readLaunch(stateDir);
+    const launch = await readLaunch(stateDir, receipts, signal);
     expect(launch.build).toBe("second");
     expect(launch.cli).not.toBe(oldLaunch.cli);
   }, 30_000);
 
   it.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
     "reuses only a live process with the exact artifact and invocation",
-    async () => {
+    async ({ signal }) => {
       const { home, stateDir } = testHome();
       const { nodeBootstrap, authorizations } = await serveArtifact(await packageFixture("first"));
       await expectSetupPhases(enroll(home, nodeBootstrap));
-      await readLaunch(stateDir);
+      const launch = await readLaunch(stateDir, receipts, signal);
       const pid = fs.readFileSync(path.join(stateDir, "node.pid"), "utf8");
       await expectSetupPhases(enroll(home, nodeBootstrap));
       expect(fs.readFileSync(path.join(stateDir, "node.pid"), "utf8")).toBe(pid);
@@ -749,7 +758,7 @@ require("node:http").get(${JSON.stringify(postinstall.nodeBootstrap.url)}, (resp
         expect(record).toMatchObject({
           pid: Number(pid),
           stateDir,
-          cli: (await readLaunch(stateDir)).cli,
+          cli: launch.cli,
         });
         expect(fs.statSync(launchFile).mode & 0o777).toBe(0o600);
         expect(fs.statSync(stateDir).mode & 0o777).toBe(0o700);
@@ -834,7 +843,9 @@ require("node:http").get(${JSON.stringify(postinstall.nodeBootstrap.url)}, (resp
     },
   );
 
-  it("validates a pinned TLS certificate before transmitting artifact authority", async () => {
+  it("validates a pinned TLS certificate before transmitting artifact authority", async ({
+    signal,
+  }) => {
     const { home, stateDir } = testHome();
     const { nodeBootstrap, authorizations } = await serveArtifact(await packageFixture("tls"), {
       tls: true,
@@ -848,7 +859,7 @@ require("node:http").get(${JSON.stringify(postinstall.nodeBootstrap.url)}, (resp
     });
     expect(authorizations).toHaveLength(0);
     await expectSetupPhases(enroll(home, nodeBootstrap));
-    expect((await readLaunch(stateDir)).build).toBe("tls");
+    expect((await readLaunch(stateDir, receipts, signal)).build).toBe("tls");
     expect(authorizations).toEqual([`Bearer ${nodeBootstrap.token}`]);
   }, 30_000);
 });
@@ -857,10 +868,15 @@ require("node:http").get(${JSON.stringify(postinstall.nodeBootstrap.url)}, (resp
 const hasBashMapfile = spawnSync("bash", ["-c", "type mapfile"], { encoding: "utf8" }).status === 0;
 
 describe.runIf(hasBashMapfile)("Crabbox desktop node bootstrap", () => {
-  it.each([0, 19])(
+  it.for([0, 19])(
     "finishes desktop setup after launch and on live replay (initial exit %s)",
-    async (exitCode) => {
+    { timeout: 30_000 },
+    async (exitCode, { signal }) => {
       const { home, stateDir } = testHome();
+      const readiness = path.join(home, "desktop-ready");
+      execFileSync("mkfifo", [readiness]);
+      const readinessFd = fs.openSync(readiness, fs.constants.O_RDWR);
+      cleanups.push(() => fs.closeSync(readinessFd));
       const { nodeBootstrap, authorizations } = await serveArtifact(
         await packageFixture("desktop"),
       );
@@ -869,20 +885,18 @@ describe.runIf(hasBashMapfile)("Crabbox desktop node bootstrap", () => {
 [ -z "\${CRABBOX_WORKER_SETUP_CODE-}" ]
 [ "$DISPLAY" = :99 ]
 [ "$DBUS_SESSION_BUS_ADDRESS" = unix:path=/run/fixture/bus ]
-for attempt in {1..200}; do
-  [ -f "$OPENCLAW_STATE_DIR/launch.json" ] && break
-  sleep 0.025
-done
+if [ ! -f "$OPENCLAW_STATE_DIR/launch.json" ]; then
+  IFS= read -r ready < "$HOME/desktop-ready"
+  [ "$ready" = ready ]
+fi
 [ -f "$OPENCLAW_STATE_DIR/launch.json" ]
 IFS= read -r pid < "$OPENCLAW_STATE_DIR/node.pid"
 kill -0 "$pid"
 echo "$pid" >> "$OPENCLAW_STATE_DIR/desktop-pids"
 # ${"x".repeat(160_000)}
 `;
-      const first = await enroll(home, nodeBootstrap, {
-        enabled: true,
-        setup: `${setup}exit ${exitCode}\n`,
-      });
+      const desktop = { enabled: true, setup: `${setup}exit ${exitCode}\n` };
+      const first = await enroll(home, nodeBootstrap, desktop, false, undefined, { signal });
       expect(first.code).toBe(exitCode === 0 ? 0 : 1);
       expect(first.output.includes("CRABBOX_PHASE:openclaw-bootstrap-complete")).toBe(
         exitCode === 0,
@@ -891,15 +905,16 @@ echo "$pid" >> "$OPENCLAW_STATE_DIR/desktop-pids"
         expect(first.output).toContain("desktop setup failed with exit code 19");
       }
       const pid = fs.readFileSync(path.join(stateDir, "node.pid"), "utf8").trim();
-      await expectSetupPhases(enroll(home, nodeBootstrap, { enabled: true, setup }));
+      await expectSetupPhases(
+        enroll(home, nodeBootstrap, { enabled: true, setup }, false, undefined, { signal }),
+      );
       expect(fs.readFileSync(path.join(stateDir, "desktop-pids"), "utf8")).toBe(`${pid}\n${pid}\n`);
       expect(fs.readFileSync(path.join(stateDir, "node.pid"), "utf8").trim()).toBe(pid);
       expect(authorizations).toEqual([`Bearer ${nodeBootstrap.token}`]);
     },
-    30_000,
   );
 
-  it.each([
+  it.for([
     { enabled: true, runtimeDir: "/run/fixture", pluginIds: ["demo"], verbose: false },
     { enabled: true, runtimeDir: "", pluginIds: ["demo"], verbose: false },
     { enabled: false, runtimeDir: "/run/fixture", pluginIds: ["demo"], verbose: false },
@@ -912,14 +927,15 @@ echo "$pid" >> "$OPENCLAW_STATE_DIR/desktop-pids"
     },
   ])(
     "binds only desktop nodes to the exact XFCE session: %j",
-    async ({ enabled, runtimeDir, pluginIds, verbose }) => {
+    { timeout: 30_000 },
+    async ({ enabled, runtimeDir, pluginIds, verbose }, { signal }) => {
       const { home, stateDir } = testHome();
       const served = await serveArtifact(
         await packageFixture(verbose ? "verbose-activation" : "desktop"),
       );
       const nodeBootstrap = { ...served.nodeBootstrap, enabledPluginIds: pluginIds };
       await expectSetupPhases(enroll(home, nodeBootstrap, { enabled, runtimeDir }));
-      const launch = await readLaunch(stateDir);
+      const launch = await readLaunch(stateDir, receipts, signal);
       expect(launch.enabledPlugins).toEqual(enabled ? ["demo", "cua-computer"] : pluginIds);
       const activationFile = path.join(stateDir, "activation.jsonl");
       const activations = fs.existsSync(activationFile)
@@ -948,7 +964,6 @@ echo "$pid" >> "$OPENCLAW_STATE_DIR/desktop-pids"
       expect(launch).not.toHaveProperty("token");
       expect(launch).not.toHaveProperty("setupCode");
     },
-    30_000,
   );
 
   it.each([{ display: ":0" }, { dbus: "" }, { runtimeDir: "relative-directory" }])(
