@@ -66,26 +66,25 @@ export type UserProfileWriteOperations = {
   };
 };
 
-export type UserProfileReadWorkerOperations = {
-  "userProfiles.list": { input: undefined; output: UserProfileListItem[] };
-  "userProfiles.directory": {
-    input: { limit: number };
-    output: { profiles: Array<{ id: string; logins: string[] }>; truncated: boolean };
+export type UserProfileWorkerOperations = UserProfileWriteOperations &
+  UserChannelIdentityWorkerOperations & {
+    "userProfiles.list": {
+    input: { githubAccountIds: readonly number[] } | undefined;
+    output: {
+      profiles: UserProfileListItem[];
+      githubProfiles?: Array<{ accountId: number; profileId: string }>;
+    };
   };
-};
-
-export type UserProfileAvatarWorkerOperations = {
-  "userProfiles.avatar.inspect": {
-    input: { profileId: string };
-    output: UserProfileAvatarInspection;
+    "userProfiles.directory": {
+      input: { limit: number };
+      output: { profiles: Array<{ id: string; logins: string[] }>; truncated: boolean };
+    };
+    "userProfiles.avatar.inspect": {
+      input: { profileId: string };
+      output: UserProfileAvatarInspection;
+    };
+    "userProfiles.avatar.adopt": {
+      input: { profileId: string; bytes: Uint8Array; mime: UserProfileAvatarMime; now: number };
+      output: { profile: UserProfile | undefined; committed?: ProfileDisplayRow };
+    };
   };
-  "userProfiles.avatar.adopt": {
-    input: { profileId: string; bytes: Uint8Array; mime: UserProfileAvatarMime; now: number };
-    output: { profile: UserProfile | undefined; committed?: ProfileDisplayRow };
-  };
-};
-
-export type UserProfileWorkerOperations = UserProfileReadWorkerOperations &
-  UserProfileAvatarWorkerOperations &
-  UserProfileWriteOperations &
-  UserChannelIdentityWorkerOperations;

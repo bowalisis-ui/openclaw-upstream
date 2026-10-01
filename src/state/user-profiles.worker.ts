@@ -30,13 +30,10 @@ import {
   ensureProfileForEmail,
   ensureProfileForTailscaleIdentity,
 } from "./user-profiles.js";
-import type {
-  UserProfileWorkerOperations,
-  UserProfileWriteOperations,
-} from "./user-profiles.worker-contract.js";
+import type { UserProfileWorkerOperations } from "./user-profiles.worker-contract.js";
 import type { WorkerOperationHandlersFor } from "./worker-operation-registry.js";
 
-const userProfileWriteOperations = {
+export const userProfileOperations = {
   "userProfiles.setRole": (input, { open, stateOptions }) =>
     executeUserProfileWrite(
       "userProfiles.setRole",
@@ -113,20 +110,13 @@ const userProfileWriteOperations = {
       },
       input.profileId,
     ),
-} satisfies WorkerOperationHandlersFor<UserProfileWriteOperations>;
-
-export const userProfileOperations = {
-  ...userProfileWriteOperations,
-  "userProfiles.list": (
-    input: { githubAccountIds: readonly number[] } | undefined,
-    { open, stateOptions },
-  ) => {
+  "userProfiles.list": (input, { open, stateOptions }) => {
     const options = { ...stateOptions(), database: open() };
     return input?.githubAccountIds === undefined
       ? { profiles: listUserProfilesSync(options) }
       : readUserProfileSnapshotSync(options, input.githubAccountIds);
   },
-  "userProfiles.directory": ({ limit }: { limit: number }, { open, stateOptions }) => {
+  "userProfiles.directory": ({ limit }, { open, stateOptions }) => {
     const database = open();
     ensureUserProfilesSchema(stateOptions(), database);
     return runSqliteDeferredTransactionSync(
