@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { replaceSessionEntrySync } from "../config/sessions/session-accessor.js";
 import { observeSessionMaintenanceCompletion } from "../config/sessions/session-accessor.sqlite-maintenance.test-support.js";
+import { prepareSessionEntryReplacementDatabase } from "../config/sessions/session-accessor.sqlite-replacement-worker.js";
 import { captureOpenClawAgentDatabaseExecution } from "../state/openclaw-agent-execution.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
@@ -28,7 +29,7 @@ describe("plugin session store maintenance", () => {
           ...scope,
           sessionKey,
           fallbackEntry: entry,
-          preserveActivity: true,
+          replaceEntry: true,
           skipMaintenance: true,
           requireWriteSuccess: true,
           update: () => entry,
@@ -39,6 +40,11 @@ describe("plugin session store maintenance", () => {
       const execution = captureOpenClawAgentDatabaseExecution(scope);
       try {
         await seed(retainedKey, "retained");
+        await prepareSessionEntryReplacementDatabase(
+          { ...scope, path: execution.path },
+          () => execution.assertCurrent(),
+          execution,
+        );
         expect(execution.fileIdentity).toBeDefined();
         await expect(
           cleanupSessionLifecycleArtifacts({
