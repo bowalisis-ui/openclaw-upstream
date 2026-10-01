@@ -237,9 +237,9 @@ export function registerSessionMaintenancePreparationTests() {
           expect(opened.mock.calls).toEqual([]);
           expect(sql.queries).toEqual([]);
           if (result.kind === "maintenance-plan") {
-            expect(result.value.entryRemovals.map((entry) => entry.sessionKey)).toEqual([
-              fixture.stale.sessionKey,
-            ]);
+            expect(result.value.archived).toBe(1);
+            expect(result.value.archivedSessionKeys).toEqual([fixture.stale.sessionKey]);
+            expect(result.value.entryRemovals).toEqual([]);
           } else if (result.kind === "maintenance-statistics") {
             expect(result.value).toBe(true);
           }
@@ -256,6 +256,13 @@ export function registerSessionMaintenancePreparationTests() {
           throw archive.reason;
         }
         expect(loadSessionEntry(fixture.active)?.sessionId).toBe("active");
+        if (kind === "maintenance-plan") {
+          expect(loadSessionEntry(fixture.stale)).toMatchObject({
+            sessionId: "stale",
+            archivedAt: expect.any(Number),
+            archiveReason: "age-retention",
+          });
+        }
       });
     },
   );
