@@ -188,7 +188,7 @@ const workerModules = new Set([
   "src/infra/device-pairing-cloud-worker.ts", // Bootstrap worker dispatcher owns binding checks and completion writes.
   "src/infra/promotions-feed.kernel.ts", // Promotion claims execute through promotions-feed.worker.
   "src/infra/push-apns-store-transaction.ts", // APNs worker cleanup and pairing worker clearApnsNodeIds only.
-  "src/infra/push-apns-store.ts", // SQL read kernels are called only by the APNs worker dispatcher.
+  "src/infra/push-apns-store.rows.ts", // SQL read kernels are called only by the APNs worker dispatcher.
   "src/infra/session-cost-usage-worker.ts",
   "src/infra/telemetry-store.kernel.ts", // Telemetry SQL executes through the shared-state worker runtime.
   "src/infra/update-candidate-exec-approvals.ts", // Approval projections run in the update-candidate-state worker.

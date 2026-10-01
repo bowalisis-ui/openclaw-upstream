@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { setActiveNodeContexts } from "../../infra/active-node-context.js";
-import { ApnsRegistrationPairingChangedError } from "../../infra/push-apns-store.js";
+import { ApnsRegistrationPairingChangedError } from "../../infra/push-apns-store.errors.js";
 import { NodeRegistry } from "../node-registry.js";
 import { makeClient, registerNodeSession } from "../node-registry.test-helpers.js";
 import type { handleNodeEvent } from "../server-node-events.js";

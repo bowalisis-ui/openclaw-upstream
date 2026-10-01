@@ -6,8 +6,8 @@ import {
   clearApnsRegistrationIfCurrent,
   loadApnsRegistration,
   loadApnsRegistrations,
-  type ApnsRegistration,
 } from "./push-apns-store.js";
+import type { ApnsRegistration } from "./push-apns-store.types.js";
 
 const mocks = vi.hoisted(() => ({
   execute:

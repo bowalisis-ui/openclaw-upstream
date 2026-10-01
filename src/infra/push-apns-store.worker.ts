@@ -18,8 +18,8 @@ import {
 import {
   readApnsRegistrationFromDatabase,
   readApnsRegistrationsFromDatabase,
-} from "./push-apns-store.js";
-import { apnsRegistrationToRow } from "./push-apns-store.rows.js";
+  apnsRegistrationToRow,
+} from "./push-apns-store.rows.js";
 import type { ApnsRegistration } from "./push-apns-store.types.js";
 import { requestSqliteWorkerOperationAdmission } from "./sqlite-worker-operation-admission.js";
 import { getSqliteWorkerStateContext } from "./sqlite-worker-state-context.js";

@@ -26,11 +26,13 @@ import {
   isValidApnsTopic,
   normalizeApnsToken,
   normalizeApnsTopic,
-  type ApnsEnvironment,
-  type ApnsRegistration,
-  type DirectApnsRegistration,
-  type RelayApnsRegistration,
-} from "./push-apns-store.js";
+} from "./push-apns-store.rows.js";
+import type {
+  ApnsEnvironment,
+  ApnsRegistration,
+  DirectApnsRegistration,
+  RelayApnsRegistration,
+} from "./push-apns-store.types.js";
 import {
   type ApnsRelayConfig,
   type ApnsRelayPushResponse,
@@ -39,15 +41,15 @@ import {
   sendApnsRelayPush,
 } from "./push-apns.relay.js";
 
+export { ApnsRegistrationPairingChangedError } from "./push-apns-store.errors.js";
+export { normalizeApnsEnvironment } from "./push-apns-store.rows.js";
 export {
-  ApnsRegistrationPairingChangedError,
   clearApnsRegistrationIfCurrent,
   loadApnsRegistration,
   loadApnsRegistrations,
-  normalizeApnsEnvironment,
   registerApnsRegistration,
 } from "./push-apns-store.js";
-export type { ApnsRegistration } from "./push-apns-store.js";
+export type { ApnsRegistration } from "./push-apns-store.types.js";
 export { resolveApnsAuthConfigFromEnv } from "./push-apns-auth.js";
 export type { ApnsAuthConfig } from "./push-apns-auth.js";
 
