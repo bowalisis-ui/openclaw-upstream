@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 /** Safely reads script files and rejects common shell-to-script bleed. */
 import type { ExecAsk, ExecHost, ExecSecurity } from "../infra/exec-approvals.js";
-import { createLazyImportLoader } from "../shared/lazy-promise.js";
+import {
+  FsSafeError,
+  isPathInside,
+  resolveOpenedFileRealPathForHandle,
+  root as fsRoot,
+} from "../infra/fs-safe.js";
 import { shouldFailClosedInterpreterPreflight } from "./bash-tools.exec-script-ambiguity.js";
 import { extractScriptTargetFromCommand } from "./bash-tools.exec-script-target.js";
 
@@ -30,12 +35,6 @@ function getNodeErrorCode(error: unknown): string | undefined {
   }
   return String((error as { code?: unknown }).code);
 }
-
-type FsSafeModule = typeof import("../infra/fs-safe.js");
-
-const fsSafeModuleLoader = createLazyImportLoader<FsSafeModule>(
-  () => import("../infra/fs-safe.js"),
-);
 
 // F-strings alternate literal text with executable replacement fields. Keep a lexical stack
 // so valid text stays invisible while nested replacement code uses the normal token check.
@@ -139,10 +138,7 @@ function findPythonShellVariable(content: string): RegExpExecArray | null {
   return null;
 }
 
-function shouldSkipScriptPreflightPathError(
-  error: unknown,
-  FsSafeError: FsSafeModule["FsSafeError"],
-): boolean {
+function shouldSkipScriptPreflightPathError(error: unknown): boolean {
   if (error instanceof FsSafeError) {
     return true;
   }
@@ -166,25 +162,24 @@ function hasLeadingTildePathSegment(relativePath: string): boolean {
 
 async function readLiteralTildePreflightScript(params: {
   absPath: string;
-  fsSafe: FsSafeModule;
-  workspaceRoot: Awaited<ReturnType<FsSafeModule["root"]>>;
+  workspaceRoot: Awaited<ReturnType<typeof fsRoot>>;
 }): Promise<string> {
   let handle: fs.FileHandle | undefined;
   try {
     handle = await fs.open(params.absPath, SCRIPT_PREFLIGHT_OPEN_FLAGS);
     const stat = await handle.stat();
     if (!stat.isFile()) {
-      throw new params.fsSafe.FsSafeError("not-file", "not a file");
+      throw new FsSafeError("not-file", "not a file");
     }
     if (stat.size > SCRIPT_PREFLIGHT_MAX_BYTES) {
-      throw new params.fsSafe.FsSafeError(
+      throw new FsSafeError(
         "too-large",
         `file exceeds limit of ${SCRIPT_PREFLIGHT_MAX_BYTES} bytes (got ${stat.size})`,
       );
     }
-    const realPath = await params.fsSafe.resolveOpenedFileRealPathForHandle(handle, params.absPath);
-    if (!params.fsSafe.isPathInside(params.workspaceRoot.rootReal, realPath)) {
-      throw new params.fsSafe.FsSafeError("outside-workspace", "file is outside workspace root");
+    const realPath = await resolveOpenedFileRealPathForHandle(handle, params.absPath);
+    if (!isPathInside(params.workspaceRoot.rootReal, realPath)) {
+      throw new FsSafeError("outside-workspace", "file is outside workspace root");
     }
     const { readFileHandleBounded } = await import("@openclaw/fs-safe/advanced");
     const buffer = await readFileHandleBounded(handle, SCRIPT_PREFLIGHT_MAX_BYTES);
@@ -231,8 +226,6 @@ export async function validateScriptFileForShellBleed(params: {
     return;
   }
 
-  const fsSafe = await fsSafeModuleLoader.load();
-  const { FsSafeError, root: fsRoot } = fsSafe;
   const workspaceRoot = await fsRoot(params.workdir);
   for (const relOrAbsPath of target.relOrAbsPaths) {
     const absPath = path.isAbsolute(relOrAbsPath)
@@ -255,7 +248,6 @@ export async function validateScriptFileForShellBleed(params: {
       content = hasLeadingTildePathSegment(relativePath)
         ? await readLiteralTildePreflightScript({
             absPath,
-            fsSafe,
             workspaceRoot,
           })
         : (
@@ -266,7 +258,7 @@ export async function validateScriptFileForShellBleed(params: {
             })
           ).buffer.toString("utf-8");
     } catch (error) {
-      if (shouldSkipScriptPreflightPathError(error, FsSafeError)) {
+      if (shouldSkipScriptPreflightPathError(error)) {
         // Preflight validation is best-effort: skip path/read failures and
         // continue to execute the command normally.
         continue;

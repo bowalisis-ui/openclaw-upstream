@@ -5,6 +5,8 @@ import path from "node:path";
 import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
 import { positiveSecondsToSafeMilliseconds } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { isVerifiedUpdateRollback } from "../shared/update-outcome.js";
+import { readSecureFile } from "./fs-safe.js";
 import type { ManagedHandoffRepairFacts } from "./update-managed-service-handoff-database.js";
 import type { ManagedHandoffLease } from "./update-managed-service-handoff-lease-types.js";
 
@@ -110,7 +112,6 @@ export async function readManagedHandoffRepairFacts(
   env: NodeJS.ProcessEnv,
   boundRunId?: string,
 ): Promise<ManagedHandoffRepairFacts> {
-  const { readSecureFile } = await import("./fs-safe.js");
   const { listUpdateRunsAsync } = await import("./update-run-reader.js");
   const { recordedUpdateRunDrivers } = await import("./update-run-activity.js");
   const { sameUpdateRunDriver } = await import("./update-run-driver.js");
@@ -212,7 +213,6 @@ export async function readManagedHandoffRepairFacts(
   await assertUpdateRecoveryAdmission({ env });
   if (!capture) {
     const { resolvePublicUpdateStepId } = await import("./update-step-identity.js");
-    const { isVerifiedUpdateRollback } = await import("../shared/update-outcome.js");
     const rollback = original.steps.filter(({ step, status }) => {
       const id = resolvePublicUpdateStepId(step);
       return (
