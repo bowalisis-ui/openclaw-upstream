@@ -1,13 +1,15 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+import { writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { closeOpenClawAgentDatabasesAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
-import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker, withTempDir } from "openclaw/plugin-sdk/test-env";
+import { register } from "tsx/esm/api";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { TLON_PENDING_APPROVAL_LIMIT, type PendingApproval } from "../settings.js";
 import { useTlonMonitorFixture } from "./monitor.test-harness.js";
 
@@ -421,45 +423,20 @@ it("continues startup after an initial group invite write fails", async () => {
   }
 });
 
-// Keep detached worker cleanup on its native clock while dispatch maintenance is held.
-function createPrefixImmediateClock() {
-  const dispatch = new AsyncLocalStorage<boolean>();
-  const realSetImmediate = globalThis.setImmediate;
-  const realClearImmediate = globalThis.clearImmediate;
-  vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] });
-  const fakeSetImmediate = globalThis.setImmediate;
-  const fakeClearImmediate = globalThis.clearImmediate;
-  const fakeHandles = new Set<ReturnType<typeof globalThis.setImmediate>>();
-  globalThis.setImmediate = new Proxy(fakeSetImmediate, {
-    apply(target, receiver, args) {
-      if (!dispatch.getStore()) {
-        return Reflect.apply(realSetImmediate, receiver, args);
-      }
-      const handle = Reflect.apply(target, receiver, args);
-      fakeHandles.add(handle);
-      return handle;
-    },
-  });
-  globalThis.clearImmediate = new Proxy(fakeClearImmediate, {
-    apply(target, receiver, args) {
-      return Reflect.apply(fakeHandles.has(args[0]) ? target : realClearImmediate, receiver, args);
-    },
-  });
-  return {
-    run<T>(operation: () => T): T {
-      return dispatch.run(true, operation);
-    },
-    restore() {
-      globalThis.setImmediate = fakeSetImmediate;
-      globalThis.clearImmediate = fakeClearImmediate;
-      vi.useRealTimers();
-      dispatch.disable();
-    },
-  };
-}
-
 describe("monitorTlonProvider reply prefixes", () => {
-  let prefixClock: ReturnType<typeof createPrefixImmediateClock> | undefined;
+  beforeAll(async () => {
+    // TSX's first cache write schedules process housekeeping; keep it on the real clock.
+    await withTempDir("tlon-prefix-source-cache-", async (dir) => {
+      const sourcePath = join(dir, "initialize.mts");
+      await writeFile(sourcePath, "export enum CacheInitialization { Ready }\n");
+      const loader = register({ namespace: "tlon-prefix-source-cache", tsconfig: false });
+      try {
+        await loader.import(pathToFileURL(sourcePath).href, import.meta.url);
+      } finally {
+        await loader.unregister();
+      }
+    });
+  });
   const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
     afterEach(async () => {
       try {
@@ -471,8 +448,7 @@ describe("monitorTlonProvider reply prefixes", () => {
           expect.soft(vi.getTimerCount()).toBe(0);
         }
       } finally {
-        prefixClock?.restore();
-        prefixClock = undefined;
+        vi.useRealTimers();
       }
     }),
   );
@@ -546,16 +522,14 @@ describe("monitorTlonProvider reply prefixes", () => {
         .find((value) => value.app === "chat");
       expect(subscription).toBeDefined();
       // Hold automatic session maintenance queued so teardown must retire it.
-      prefixClock = createPrefixImmediateClock();
-      await prefixClock.run(() =>
-        subscription.event({
-          whom: "~nec",
-          id: `dm-prefix-${name}`,
-          response: {
-            add: { essay: { author: "~nec", content: [{ inline: ["hello"] }], sent: Date.now() } },
-          },
-        }),
-      );
+      vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] });
+      await subscription.event({
+        whom: "~nec",
+        id: `dm-prefix-${name}`,
+        response: {
+          add: { essay: { author: "~nec", content: [{ inline: ["hello"] }], sent: Date.now() } },
+        },
+      });
       expect(vi.getTimerCount()).toBeGreaterThan(0);
       const sends = sseClientMock.poke.mock.calls
         .map(([value]) => value)
