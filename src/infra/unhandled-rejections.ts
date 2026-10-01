@@ -211,7 +211,6 @@ function isTransientFileWatchError(err: unknown): boolean {
   const hasFileWatchSignal = (message: string) =>
     message.includes("inotify") ||
     message.includes("watcher") ||
-    message.includes("file watcher") ||
     message.includes("watch limit") ||
     message.includes("max watches");
   const hasFileWatchExhaustionSignal = (message: string) =>
