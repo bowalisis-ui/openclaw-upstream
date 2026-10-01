@@ -574,6 +574,7 @@ export function createPreparedWorkerPool(options: PoolOptions) {
     intent.preparationKey
       ? store.list().filter((record) => {
           const limits = policy(record);
+          const presenceDemand = presence.current();
           return (
             limits.target > 0 &&
             limits.maxTotal > 0 &&
@@ -582,9 +583,9 @@ export function createPreparedWorkerPool(options: PoolOptions) {
             record.preparation !== null &&
             record.preparation.key === intent.preparationKey &&
             record.preparation.consumedAtMs === null &&
-            ((presence.current()?.project.key ===
+            ((presenceDemand?.project.key ===
               readWorkerProjectSnapshot(record.profileSnapshot.project)?.key &&
-              (presence.current()!.retireAtMs ?? Number.MAX_SAFE_INTEGER) > now()) ||
+              (presenceDemand!.retireAtMs ?? Number.MAX_SAFE_INTEGER) > now()) ||
               record.preparation.expiresAtMs > now()) &&
             record.destroyRequestedAtMs === null &&
             record.sharedHost === false &&
@@ -615,13 +616,13 @@ export function createPreparedWorkerPool(options: PoolOptions) {
     if (demandAtMs === undefined || !readWorkerProjectPreparation(record.profileSnapshot.project)) {
       return true;
     }
+    const presenceDemand = presence.current();
     if (
-      presence.current()?.profileId === record.profileId &&
-      presence.current()!.preparationKey === record.preparation?.key &&
-      presence.current()!.project.key ===
-        readWorkerProjectSnapshot(record.profileSnapshot.project)?.key
+      presenceDemand?.profileId === record.profileId &&
+      presenceDemand.preparationKey === record.preparation?.key &&
+      presenceDemand.project.key === readWorkerProjectSnapshot(record.profileSnapshot.project)?.key
     ) {
-      return presence.current()!.retireAtMs !== null && presence.current()!.retireAtMs! <= nowMs;
+      return presenceDemand.retireAtMs !== null && presenceDemand.retireAtMs <= nowMs;
     }
     // Unavailable policy cannot prove expiry. Retain metadata only; physical
     // cleanup is independent and must not wait for a provider to return.

@@ -45,8 +45,8 @@ type GitHubDetailTarget =
 
 /** Host consumers depend on this public read contract, not the plugin's source graph. */
 type GitHubPublicApi = {
-  configureGitHubApi: (apiBaseUrl: string | undefined) => void;
-  getConfiguredGitHubApiUrls: () => { baseUrl: string; graphqlUrl: string };
+  resolveGitHubApiUrls: (apiBaseUrl: string | undefined) => { baseUrl: string; graphqlUrl: string };
+  GITHUB_API_ORIGIN: string;
   GITHUB_API_BASE_URL: string;
   GITHUB_GRAPHQL_URL: string;
   GITHUB_REQUEST_TIMEOUT_MS: number;
@@ -103,6 +103,7 @@ type GitHubPublicApi = {
     fetchImpl: typeof fetch,
     token?: string,
     maxBytes?: number,
+    apiBaseUrl?: string,
   ) => Promise<unknown>;
   parseControlUiGitHubPreviewTarget: (params: unknown) => ControlUiGitHubPreviewTarget | null;
   parseGitHubTarget: (params: unknown) => GitHubDetailTarget | null;
@@ -124,12 +125,13 @@ type GitHubPublicApi = {
 export function githubApiToken(
   env: NodeJS.ProcessEnv = process.env,
   config: OpenClawConfig | null = getRuntimeConfigSnapshot(),
+  host?: string,
 ): string | undefined {
-  const selectedHost = resolveConfiguredGitHubHost(config);
+  const selectedHost = host ?? resolveConfiguredGitHubHost(config);
   const configured = config?.gateway?.controlUi?.github?.token;
-  if (configured !== undefined) {
-    const credentialHost =
-      config?.gateway?.controlUi?.github?.host?.trim().toLowerCase() || "github.com";
+  const credentialHost =
+    config?.gateway?.controlUi?.github?.host?.trim().toLowerCase() || "github.com";
+  if (configured !== undefined && (host === undefined || credentialHost === selectedHost)) {
     if (credentialHost !== selectedHost) {
       throw new SecretSurfaceUnavailableError({
         ownerKind: "capability",
@@ -181,8 +183,6 @@ export const gitHubPublicApi = createLazyFacadeObjectValue<GitHubPublicApi>(() =
     dirName: "github",
     artifactBasename: "api.js",
   });
-  const configure = () =>
-    library.configureGitHubApi(getRuntimeConfigSnapshot()?.gateway?.github?.apiBaseUrl);
   const resolveScope = (env: NodeJS.ProcessEnv = process.env, host?: string) => {
     const config = getRuntimeConfigSnapshot();
     const configuredHost = resolveConfiguredGitHubHost(config);
@@ -232,19 +232,18 @@ export const gitHubPublicApi = createLazyFacadeObjectValue<GitHubPublicApi>(() =
   return {
     ...library,
     get GITHUB_API_BASE_URL() {
-      configure();
-      return library.getConfiguredGitHubApiUrls().baseUrl;
+      return resolveConfiguredGitHubApiBaseUrl(getRuntimeConfigSnapshot());
     },
     get GITHUB_GRAPHQL_URL() {
-      configure();
-      return library.getConfiguredGitHubApiUrls().graphqlUrl;
+      return library.resolveGitHubApiUrls(getRuntimeConfigSnapshot()?.gateway?.github?.apiBaseUrl)
+        .graphqlUrl;
     },
     fetchGitHubApi(...args) {
-      configure();
+      args[8] ??= resolveConfiguredGitHubApiBaseUrl(getRuntimeConfigSnapshot());
       return library.fetchGitHubApi(...args);
     },
     fetchGitHubJson(...args) {
-      configure();
+      args[4] ??= resolveConfiguredGitHubApiBaseUrl(getRuntimeConfigSnapshot());
       return library.fetchGitHubJson(...args);
     },
     resolveGitHubApiCredentialScope: resolveScope,
@@ -254,7 +253,6 @@ export const gitHubPublicApi = createLazyFacadeObjectValue<GitHubPublicApi>(() =
         : library.formatControlUiGitHubPreviewError(error);
     },
     loadControlUiGitHubPreview(target, identity, fetchImpl, refresh) {
-      configure();
       return library.loadControlUiGitHubPreview(
         target,
         resolveReadIdentity(identity),
@@ -263,7 +261,6 @@ export const gitHubPublicApi = createLazyFacadeObjectValue<GitHubPublicApi>(() =
       );
     },
     loadGitHubDetail(target, identity, fetchImpl, refresh) {
-      configure();
       return library.loadGitHubDetail(target, resolveReadIdentity(identity), fetchImpl, refresh);
     },
   };

@@ -31,20 +31,16 @@ function resolveGitHubApiBaseUrl(value: string | undefined): string {
   return parsed.origin + (parsed.pathname.startsWith("/api/v3") ? "/api/v3" : "");
 }
 
-export let GITHUB_API_BASE_URL = resolveGitHubApiBaseUrl(undefined);
+export const GITHUB_API_BASE_URL = DEFAULT_GITHUB_API_BASE_URL;
 function githubGraphqlUrl(baseUrl: string): string {
   return baseUrl.endsWith("/api/v3") ? `${baseUrl.slice(0, -3)}/graphql` : `${baseUrl}/graphql`;
 }
 
-export let GITHUB_GRAPHQL_URL = githubGraphqlUrl(GITHUB_API_BASE_URL);
+export const GITHUB_GRAPHQL_URL = githubGraphqlUrl(GITHUB_API_BASE_URL);
 
-export function configureGitHubApi(apiBaseUrl: string | undefined): void {
-  GITHUB_API_BASE_URL = resolveGitHubApiBaseUrl(apiBaseUrl);
-  GITHUB_GRAPHQL_URL = githubGraphqlUrl(GITHUB_API_BASE_URL);
-}
-
-export function getConfiguredGitHubApiUrls() {
-  return { baseUrl: GITHUB_API_BASE_URL, graphqlUrl: GITHUB_GRAPHQL_URL };
+export function resolveGitHubApiUrls(apiBaseUrl: string | undefined) {
+  const baseUrl = resolveGitHubApiBaseUrl(apiBaseUrl);
+  return { baseUrl, graphqlUrl: githubGraphqlUrl(baseUrl) };
 }
 
 export function githubRestApiPath(url: URL, apiBaseUrl = GITHUB_API_BASE_URL): string {
@@ -566,8 +562,22 @@ export function fetchGitHubJson(
   fetchImpl: typeof fetch,
   token?: string,
   maxBytes?: number,
+  apiBaseUrl = GITHUB_API_BASE_URL,
 ): Promise<unknown> {
   return withOptionalGitHubAuth(token, async (requestToken) =>
-    readGitHubJsonResponse(await fetchGitHubApi(rawUrl, fetchImpl, requestToken), maxBytes),
+    readGitHubJsonResponse(
+      await fetchGitHubApi(
+        rawUrl,
+        fetchImpl,
+        requestToken,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        apiBaseUrl,
+      ),
+      maxBytes,
+    ),
   );
 }

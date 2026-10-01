@@ -1,13 +1,12 @@
 // Public GitHub transport and preview data for core-owned project/session and
 // compatibility integrations. Importing this barrel never activates the plugin.
 export {
-  configureGitHubApi,
   ControlUiGitHubError,
   discardResponse,
   fetchGitHubApi,
   fetchGitHubJson,
   formatControlUiGitHubPreviewError,
-  getConfiguredGitHubApiUrls,
+  resolveGitHubApiUrls,
   GITHUB_API_ORIGIN,
   GITHUB_API_BASE_URL,
   GITHUB_GRAPHQL_URL,

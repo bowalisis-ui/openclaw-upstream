@@ -2,12 +2,12 @@ import os from "node:os";
 import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { readNonBlankString } from "@openclaw/normalization-core/string-coerce";
-import { githubRepositoryUrl, resolveGitHubHost } from "../agents/github-host-runtime.js";
+import { githubRepositoryUrl } from "../agents/github-host.js";
 
 export function githubPublicationBaseLookupArgs(
   repository: string,
   baseBranch: string,
-  host = resolveGitHubHost(),
+  host: string,
 ): string[] {
   return [
     "gh",
@@ -23,7 +23,7 @@ export function githubPublicationBaseLookupArgs(
 export function githubPublicationBaseFetchArgs(
   repository: string,
   sha: string,
-  host = resolveGitHubHost(),
+  host: string,
 ): string[] {
   return [
     "git",

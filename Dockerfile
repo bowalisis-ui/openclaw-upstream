@@ -221,7 +221,8 @@ RUN node scripts/postinstall-bundled-plugins.mjs && \
         -name 'claude-agent-sdk-linux-*' -exec rm -rf {} +; \
     fi && \
     node --input-type=module -e 'await import("grammy")' && \
-    node scripts/check-package-dist-imports.mjs /app
+    node scripts/check-package-dist-imports.mjs /app && \
+    node scripts/docker/copy-bootstrap-scripts.mjs /app/.runtime-bootstrap
 
 # ── Runtime base image ──────────────────────────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE} AS base-runtime
@@ -291,36 +292,8 @@ COPY --from=runtime-assets --chown=node:node /app/node-host-launcher.mjs .
 COPY --from=runtime-assets --chown=node:node /app/node-compile-cache.mjs .
 COPY --from=runtime-assets --chown=node:node /app/docker-entrypoint.mjs .
 COPY --from=runtime-assets --chown=node:node /app/openclaw.mjs .
-COPY --from=runtime-assets --chown=node:node \
-    /app/scripts/check-install-dependency-ownership.mjs \
-    /app/scripts/freebsd-service-inspect.mjs \
-    /app/scripts/generate-kysely-types.mts \
-    /app/scripts/install-cli.sh \
-    /app/scripts/install-policy.sh \
-    /app/scripts/install.ps1 \
-    /app/scripts/prepare-git-hooks.mjs \
-    /app/scripts/prepare-native-protocol.mjs \
-    /app/scripts/preinstall-package-manager-warning.mjs \
-    /app/scripts/postinstall-bundled-plugins.mjs \
-    /app/scripts/postinstall-bun-cli-launcher.mjs \
-    /app/scripts/runtime-postbuild-shared.mjs \
-    /app/scripts/windows-cmd-helpers.mjs \
-    ./scripts/
-COPY --from=runtime-assets --chown=node:node \
-    /app/scripts/lib/bun-cli-launcher.mjs \
-    /app/scripts/lib/direct-run.mjs \
-    /app/scripts/lib/freebsd-service-discovery.d.mts \
-    /app/scripts/lib/freebsd-service-discovery.mjs \
-    /app/scripts/lib/fs-safe-prebuild.mjs \
-    /app/scripts/lib/javascript-statements.mjs \
-    /app/scripts/lib/official-external-channel-catalog.json \
-    /app/scripts/lib/official-external-plugin-catalog.json \
-    /app/scripts/lib/official-external-provider-catalog.json \
-    /app/scripts/lib/guard-inventory-utils.mjs \
-    /app/scripts/lib/package-dist-imports.mjs \
-    /app/scripts/lib/package-lifecycle-marker.mjs \
-    /app/scripts/lib/recommended-tool-installs.json \
-    ./scripts/lib/
+COPY --from=runtime-assets --chown=node:node /app/.runtime-bootstrap/scripts ./scripts
+COPY --from=runtime-assets --chown=node:node /app/scripts/lib/guard-inventory-utils.mjs ./scripts/lib/
 COPY --from=runtime-assets --chown=node:node /app/${OPENCLAW_BUNDLED_PLUGIN_DIR} ./${OPENCLAW_BUNDLED_PLUGIN_DIR}
 COPY --from=runtime-assets --chown=node:node /app/skills ./skills
 COPY --from=runtime-assets --chown=node:node /app/docs ./docs

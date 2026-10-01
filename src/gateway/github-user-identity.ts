@@ -155,13 +155,15 @@ async function resolveGitHubUserIdentityByLogin(
   if (!requestedLogin) {
     throw new TypeError("GitHub username is invalid");
   }
-  const token = githubApiToken();
+  const token = githubApiToken(process.env, undefined, "github.com");
   let payload: unknown;
   try {
     payload = await gitHubPublicApi.fetchGitHubJson(
-      `${gitHubPublicApi.GITHUB_API_BASE_URL}/users/${encodeURIComponent(requestedLogin)}`,
+      `${gitHubPublicApi.GITHUB_API_ORIGIN}/users/${encodeURIComponent(requestedLogin)}`,
       fetch,
       token,
+      undefined,
+      gitHubPublicApi.GITHUB_API_ORIGIN,
     );
   } catch (error) {
     if (error instanceof gitHubPublicApi.ControlUiGitHubError) {
@@ -214,12 +216,15 @@ function resolveGitHubUserIdentityById(
     async () => {
       try {
         const response = await gitHubPublicApi.fetchGitHubApi(
-          `${gitHubPublicApi.GITHUB_API_BASE_URL}/user/${accountId}`,
+          `${gitHubPublicApi.GITHUB_API_ORIGIN}/user/${accountId}`,
           fetchImpl,
           token,
           undefined,
           undefined,
           cached?.etag,
+          undefined,
+          undefined,
+          gitHubPublicApi.GITHUB_API_ORIGIN,
         );
         let identity: ResolvedGitHubUserIdentity;
         if (response.status === 304 && cached?.etag) {
@@ -334,7 +339,7 @@ export function createAuthenticatedGitHubIdentitySync(params: {
     }
     const identityBinding = { accountId, email: access.principal };
     // Service auth raises public-data quota; Access still owns the signed-in account id.
-    const token = githubApiToken();
+    const token = githubApiToken(process.env, undefined, "github.com");
     let lookup: GitHubIdentityLookup;
     try {
       lookup = await gitHubPublicApi.withOptionalGitHubAuth(token, (requestToken) =>

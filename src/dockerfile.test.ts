@@ -571,16 +571,32 @@ describe("Dockerfile", () => {
     const scripts = manifest.files.filter(
       (file) => file.startsWith("scripts/") && !file.includes("*") && !file.endsWith("/"),
     );
-    expect(scripts.filter((file) => !copiedFiles.has(file))).toEqual([]);
-    expect(
-      collectPackageDistImportErrors({
-        files: [...copiedFiles.keys()],
-        readText: (file: string) =>
-          scripts.includes(file)
-            ? readFileSync(join(repoRoot, copiedFiles.get(file)!), "utf8")
-            : "",
-      }),
-    ).toEqual([]);
+    expect(dockerfile).toContain(
+      "node scripts/docker/copy-bootstrap-scripts.mjs /app/.runtime-bootstrap",
+    );
+    expect(runtime).toContain(
+      "COPY --from=runtime-assets --chown=node:node /app/.runtime-bootstrap/scripts ./scripts",
+    );
+    const output = await mkdtemp(join(tmpdir(), "docker-bootstrap-"));
+    try {
+      execFileSync(resolveTestNodeExecPath(), [
+        join(repoRoot, "scripts/docker/copy-bootstrap-scripts.mjs"),
+        output,
+      ]);
+      for (const file of scripts) {
+        expect(await readFile(join(output, file))).toEqual(await readFile(join(repoRoot, file)));
+        copiedFiles.set(file, file);
+      }
+      expect(
+        collectPackageDistImportErrors({
+          files: [...copiedFiles.keys()],
+          readText: (file: string) =>
+            scripts.includes(file) ? readFileSync(join(output, file), "utf8") : "",
+        }),
+      ).toEqual([]);
+    } finally {
+      await rm(output, { recursive: true, force: true });
+    }
   });
 
   it("keeps package manager metadata in runtime images", async () => {
