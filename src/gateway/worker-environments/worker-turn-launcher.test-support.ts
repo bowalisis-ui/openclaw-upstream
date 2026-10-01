@@ -11,7 +11,7 @@ import {
 } from "../../agents/admitted-run-context.js";
 import type { SessionPlacementTurnParams } from "../../agents/session-placement-admission.js";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
-import { clearRuntimeConfigSnapshot } from "../../config/io.js";
+import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../../config/io.js";
 import { patchSessionEntryCore } from "../../config/sessions/session-accessor.js";
 import { readTranscriptStorageRows } from "../../config/sessions/session-accessor.sqlite-read.js";
 import {
@@ -179,6 +179,7 @@ export async function setupWorkerTurnLauncherTest(): Promise<void> {
     fallbackEntry: entry,
     skipMaintenance: true,
   });
+  setRuntimeConfigSnapshot({ session: { store: sessionTarget.storePath } });
   SessionManager.open(sessionTarget);
   sessionFile = SESSION_KEY;
 }
