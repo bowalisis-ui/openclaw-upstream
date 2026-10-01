@@ -7,6 +7,7 @@ import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
+import { runOpenClawAgentWriteAdmission } from "../../state/openclaw-agent-write-admission.js";
 import {
   applySessionEntryLifecycleMutation,
   cleanupSessionLifecycleArtifactsCore,
@@ -23,7 +24,7 @@ import type { SessionEntry } from "./types.js";
 
 const hooks = vi.hoisted(() => ({
   before: undefined as (() => Promise<void>) | undefined,
-  after: undefined as (() => void) | undefined,
+  after: undefined as (() => void | Promise<void>) | undefined,
   observe: undefined as ((sessionIds: string[]) => void) | undefined,
   publicationFailure: undefined as Error | undefined,
 }));
@@ -38,7 +39,7 @@ vi.mock("./session-accessor.sqlite-archive.js", async (importOriginal) => {
       await hooks.before?.();
       hooks.observe?.(args[0].map((plan) => plan.sessionId));
       const result = await actual.materializeSessionStateDeletePlans(...args);
-      hooks.after?.();
+      await hooks.after?.();
       return result;
     },
   };
@@ -252,12 +253,13 @@ describe("SQLite lifecycle cleanup races", () => {
     const db = database();
     const refreshed = { label: "refreshed", sessionId: target.sessionId, updatedAt: now + 1 };
     let changed = false;
-    hooks.after = () => {
-      changed = true;
-      db.db
-        .prepare("UPDATE session_nodes SET entry_json = ?, updated_at = ? WHERE session_key = ?")
-        .run(JSON.stringify(refreshed), refreshed.updatedAt, target.sessionKey);
-    };
+    hooks.after = () =>
+      runOpenClawAgentWriteAdmission({ agentId: "main", path: db.path }, () => {
+        changed = true;
+        db.db
+          .prepare("UPDATE session_nodes SET entry_json = ?, updated_at = ? WHERE session_key = ?")
+          .run(JSON.stringify(refreshed), refreshed.updatedAt, target.sessionKey);
+      });
     await expect(cleanup({ orphanTranscriptMinAgeMs: 0, nowMs: now + 60_000 })).rejects.toThrow(
       "SQLite lifecycle cleanup entry changed",
     );
