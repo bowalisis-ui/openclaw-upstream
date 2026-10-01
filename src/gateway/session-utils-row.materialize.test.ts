@@ -106,6 +106,7 @@ type RowFixture = {
   name: string;
   key: string;
   entry?: InternalSessionEntry;
+  acpMeta?: SessionEntry["acp"];
   store?: Record<string, SessionEntry>;
   runs?: SubagentRunRecord[];
   transcript?: boolean;
@@ -265,23 +266,25 @@ function fixtures(): RowFixture[] {
         totalTokensVersion: 1,
       },
     },
-    ...([-1, 0, 1] as const).map((offset): RowFixture => ({
-      name: `observer digest ${offset < 0 ? "older" : offset === 0 ? "equal" : "newer"} than run start`,
-      key: `agent:main:dashboard:observer-${offset}`,
-      entry: {
-        ...BASE_ENTRY,
-        startedAt: START,
-        observerDigest: {
-          sessionKey: `agent:main:dashboard:observer-${offset}`,
-          agentId: "main",
-          runId: "observer-run",
-          headline: "The fixture is ready",
-          health: "wrapping-up",
-          updatedAt: START + offset,
-          revision: 3,
+    ...([-1, 0, 1] as const).map(
+      (offset): RowFixture => ({
+        name: `observer digest ${offset < 0 ? "older" : offset === 0 ? "equal" : "newer"} than run start`,
+        key: `agent:main:dashboard:observer-${offset}`,
+        entry: {
+          ...BASE_ENTRY,
+          startedAt: START,
+          observerDigest: {
+            sessionKey: `agent:main:dashboard:observer-${offset}`,
+            agentId: "main",
+            runId: "observer-run",
+            headline: "The fixture is ready",
+            health: "wrapping-up",
+            updatedAt: START + offset,
+            revision: 3,
+          },
         },
-      },
-    })),
+      }),
+    ),
     {
       name: "live subagent accumulated runtime and inherited model",
       key: LIVE,
@@ -343,16 +346,14 @@ function fixtures(): RowFixture[] {
     {
       name: "ACP metadata owns the runtime",
       key: "agent:main:acp:golden",
-      entry: {
-        ...BASE_ENTRY,
-        acp: {
-          backend: "acpx",
-          agent: "fixture",
-          runtimeSessionName: "golden-acp",
-          mode: "persistent",
-          state: "idle",
-          lastActivityAt: START,
-        },
+      entry: BASE_ENTRY,
+      acpMeta: {
+        backend: "acpx",
+        agent: "fixture",
+        runtimeSessionName: "golden-acp",
+        mode: "persistent",
+        state: "idle",
+        lastActivityAt: START,
       },
     },
     {
@@ -500,6 +501,7 @@ test("preserves complete base rows across time and caller presentation fixtures"
         agentId: "main",
         key: fixture.key,
         entry: fixture.entry,
+        preparedAcpMeta: fixture.acpMeta ?? null,
         store: fixture.store ?? (fixture.entry ? { [fixture.key]: fixture.entry } : {}),
         storePath,
         now: TIMES[0],

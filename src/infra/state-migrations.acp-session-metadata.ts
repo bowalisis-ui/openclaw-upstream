@@ -1,7 +1,7 @@
+import { selectAcpMigrationRowForStoreEntry } from "../acp/runtime/session-meta-doctor-keys.js";
 import {
   buildAcpDatabaseSessionKey,
   selectAcpSessionRow,
-  selectAcpSessionRowForStoreEntry,
 } from "../acp/runtime/session-meta-keys.js";
 import { writeAcpSessionMetaForMigration } from "../acp/runtime/session-meta.js";
 import { readLegacyAcpMigrationContext } from "../config/sessions/session-accessor.sqlite-acp-provenance.js";
@@ -53,7 +53,7 @@ export function importLegacyAcpSessionMetadata(params: LegacyAcpMetadataInput): 
         });
         imported =
           legacyAcpMigrationBindingMatches(source, canonical) &&
-          !selectAcpSessionRowForStoreEntry(
+          !selectAcpMigrationRowForStoreEntry(
             database.db,
             sessionKey,
             params.agentId,

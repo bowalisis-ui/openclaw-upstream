@@ -13,6 +13,7 @@ import {
   validateSessionsPluginPatchParams,
   validateSessionsResetParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { readAcpSessionMetaForEntries } from "../../acp/runtime/session-meta-readonly.js";
 import {
   assignSessionOwner,
   updateSessionProfileInvolvement,
@@ -176,11 +177,23 @@ function createSessionPatchHandler(
       const prepared = executed.preparedByIndex[0]!;
       diagnostics?.scope("response");
       const catalog = await executed.catalogs.available(prepared.targetAgentId);
+      const [acpMeta] = await readAcpSessionMetaForEntries({
+        cfg: executed.cfg,
+        entries: [
+          {
+            agentId: prepared.targetAgentId,
+            sessionKey: prepared.canonicalKey,
+            entry: outcome.entry,
+          },
+        ],
+      });
+      assertCurrent();
       respond(
         true,
         projectSessionPatchResult({
           ...prepared,
           cfg: executed.cfg,
+          preparedAcpMeta: acpMeta ?? null,
           entry: {
             ...outcome.entry,
             fastMode: prepareSessionFastModePresentation(client)(outcome.entry.fastMode),

@@ -5,11 +5,9 @@ import {
   observeHostDataSql,
   observeSqliteReadSql,
 } from "../../test/helpers/sqlite-statement-execution-counter.js";
+import { seedCanonicalAcpSessionMeta } from "../acp/runtime/session-meta-fixture.test-support.js";
 import { readAcpSessionMetaForEntries } from "../acp/runtime/session-meta-readonly.js";
-import {
-  upsertAcpSessionMeta,
-  writeAcpSessionMetaForMigration,
-} from "../acp/runtime/session-meta.js";
+import { upsertAcpSessionMeta } from "../acp/runtime/session-meta.js";
 import { subagentRuns } from "../agents/subagents/registry/subagent-registry-memory.js";
 import { persistSubagentRunsToDiskOrThrow } from "../agents/subagents/registry/subagent-registry-state.js";
 import type { SubagentRunRecord } from "../agents/subagents/registry/subagent-registry.types.js";
@@ -875,8 +873,8 @@ it("refreshes prepared ACP metadata on publication and fences replacement lifecy
       await projection.ensureMaterialized();
       expect(projection.snapshot({ agentId: "main", key }).row?.runtimeSelectionLocked).toBe(false);
       for (const backend of ["acpx", "replacement-acp-backend"]) {
-        // Released free-runtime aliases are case-insensitive and read-only compatible.
-        writeAcpSessionMetaForMigration({
+        // Canonical publication invalidates prepared metadata without host SQL.
+        seedCanonicalAcpSessionMeta({
           sessionKey: key.toUpperCase(),
           lifecycleRevision: "first",
           meta: {

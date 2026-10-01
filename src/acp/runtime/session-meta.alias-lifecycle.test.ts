@@ -86,19 +86,17 @@ async function seedAliases(state: OpenClawTestState) {
       now: () => row.updatedAt,
     });
   }
-  return { ...fixture, retainedKeys: new Set(retained.map((row) => row.key)) };
+  return fixture;
 }
 
 describe("ACP raw alias lifecycle", () => {
   it.each(["update", "close"] as const)(
-    "%s consumes every readable alias while preserving other lifecycle rows",
+    "%s changes canonical metadata while preserving every historical alias",
     async (operation) => {
       await withOpenClawTestState({ label: `acp-alias-${operation}` }, async (state) => {
         const fixture = await seedAliases(state);
         const before = fixture.snapshot();
-        const retainedRows = before.rows.filter((row) =>
-          fixture.retainedKeys.has(String(row.session_key)),
-        );
+        const retainedRows = before.rows.filter((row) => row.session_key !== fixture.canonicalKey);
         const updated = { ...CANONICAL_META, runtimeSessionName: "updated-runtime" };
         await upsertAcpSessionMeta({
           ...fixture.scope,
@@ -179,60 +177,6 @@ describe("ACP raw alias lifecycle", () => {
         await upsertAcpSessionMeta({ ...fixture.scope, mutate: () => null });
         expect(fixture.snapshot().rows).toEqual(retainedRows);
         expect(readAcpSessionMeta(fixture.scope)).toBeUndefined();
-      });
-    },
-  );
-
-  it.each(["update", "close"] as const)(
-    "%s retains a selected raw alias rebound during the awaited session patch",
-    async (operation) => {
-      await withOpenClawTestState({ label: `acp-alias-rebound-${operation}` }, async (state) => {
-        const fixture = await seedCanonicalSession(state);
-        const aliasKey = "agent:MAIN:acp:alias-runtime";
-        const { db } = openOpenClawStateDatabase({ env: state.env });
-        db.prepare("UPDATE acp_sessions SET session_key = ? WHERE session_key = ?").run(
-          aliasKey,
-          fixture.canonicalKey,
-        );
-        const before = fixture.snapshot().rows;
-        expect(before).toHaveLength(1);
-        const updated = { ...CANONICAL_META, runtimeSessionName: "updated-runtime" };
-        let rebound = false;
-        const unsubscribe = sessionChanges.subscribe((change) => {
-          if ("all" in change) {
-            return;
-          }
-          if (
-            !rebound &&
-            change.scope === "session-entry" &&
-            change.agentId === "main" &&
-            change.sessionKey === SESSION_KEY
-          ) {
-            rebound = true;
-            db.prepare("UPDATE acp_sessions SET session_id = ? WHERE session_key = ?").run(
-              "replacement-revision",
-              aliasKey,
-            );
-          }
-        });
-        try {
-          await upsertAcpSessionMeta({
-            ...fixture.scope,
-            mutate: (current) => {
-              expect(current).toEqual(CANONICAL_META);
-              return operation === "close" ? null : updated;
-            },
-          });
-        } finally {
-          unsubscribe();
-        }
-        expect(rebound).toBe(true);
-        expect(fixture.snapshot().rows.filter((row) => row.session_key === aliasKey)).toEqual([
-          { ...before[0], session_id: "replacement-revision" },
-        ]);
-        expect(readAcpSessionMeta(fixture.scope)).toEqual(
-          operation === "close" ? undefined : updated,
-        );
       });
     },
   );

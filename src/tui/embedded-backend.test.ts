@@ -50,6 +50,8 @@ const updateSessionStoreMock = vi.fn();
 const applySessionPatchProjectionMock = vi.fn();
 const projectSessionsPatchEntryMock = vi.fn();
 const projectSessionPatchResultMock = vi.fn();
+const readAcpSessionMetaForEntriesMock =
+  vi.fn<typeof import("../acp/runtime/session-meta-readonly.js").readAcpSessionMetaForEntries>();
 const createSessionGoalMock = vi.fn();
 const clearSessionGoalMock = vi.fn();
 const getSessionGoalMock = vi.fn();
@@ -346,6 +348,12 @@ vi.mock("../gateway/session-utils-model.js", () => ({
   projectSessionPatchResult: (...args: unknown[]) => projectSessionPatchResultMock(...args),
 }));
 
+vi.mock("../acp/runtime/session-meta-readonly.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../acp/runtime/session-meta-readonly.js")>()),
+  readAcpSessionMetaForEntries: (...args: Parameters<typeof readAcpSessionMetaForEntriesMock>) =>
+    readAcpSessionMetaForEntriesMock(...args),
+}));
+
 vi.mock("../gateway/session-create-service.js", () => ({
   createGatewaySession: (...args: unknown[]) => createGatewaySessionMock(...args),
 }));
@@ -508,6 +516,10 @@ describe("EmbeddedTuiBackend", () => {
     projectSessionsPatchEntryMock.mockReset();
     projectSessionsPatchEntryMock.mockResolvedValue({ ok: true, entry: {} });
     projectSessionPatchResultMock.mockReset();
+    readAcpSessionMetaForEntriesMock.mockReset();
+    readAcpSessionMetaForEntriesMock.mockImplementation(async ({ entries }) =>
+      entries.map(() => null),
+    );
     projectSessionPatchResultMock.mockImplementation(
       (params: { canonicalKey: string; entry: unknown; storePath: string }) => ({
         ok: true,
@@ -2970,6 +2982,7 @@ describe("EmbeddedTuiBackend", () => {
           canonicalKey: "global",
           cfg: expect.anything(),
           entry,
+          preparedAcpMeta: null,
           storePath: target.storePath,
           targetAgentId: owner,
         });

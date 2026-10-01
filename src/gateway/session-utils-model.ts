@@ -584,6 +584,7 @@ export function projectSessionPatchResult(params: {
   canonicalKey: string;
   cfg: OpenClawConfig;
   entry: SessionEntry;
+  preparedAcpMeta: SessionEntry["acp"] | null;
   modelCatalog?: ModelCatalogEntry[];
   modelCatalogRouteVariants?: readonly ModelCatalogEntry[];
   storePath: string;
@@ -608,6 +609,7 @@ export function projectSessionPatchResult(params: {
     model: resolved.model,
     sessionKey: params.canonicalKey,
     entry: params.entry,
+    preparedAcpMeta: params.preparedAcpMeta,
     modelCatalog,
     modelCatalogRouteVariants: params.modelCatalogRouteVariants,
   });

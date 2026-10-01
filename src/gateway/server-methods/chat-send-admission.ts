@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isFutureDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { ErrorCodes, errorShape } from "../../../packages/gateway-protocol/src/index.js";
+import { readAcpSessionMetaForEntries } from "../../acp/runtime/session-meta-readonly.js";
 import {
   createAgentRunRestartAbortError,
   isAgentRunDirectAbortReason,
@@ -211,7 +212,7 @@ export async function admitChatSend(
   let runInterruptTarget: ReturnType<typeof replyRunRegistry.resolveCurrentInterruptTarget>;
   let reservationSuperseded = false;
   let supersedingResult: DedupeEntry | undefined;
-  const commitChatWorkAdmission = () => {
+  const commitChatWorkAdmission = (acpMeta: SessionEntry["acp"] | null) => {
     params.assertCurrent?.();
     const retainedRequestConflict = resolveChatSendRequestConflict(params);
     if (retainedRequestConflict) {
@@ -346,6 +347,7 @@ export async function admitChatSend(
       context,
       entry: latestEntry,
       initialSessionEntry,
+      acpMeta,
       now: Date.now(),
       request: restartSafeRequest,
       requestedSessionId,
@@ -395,7 +397,19 @@ export async function admitChatSend(
         assertSessionTargetCurrent();
         assertChatSendExclusiveAdmission(request, session);
       },
-      revalidateAllowed: commitChatWorkAdmission,
+      revalidateAllowed: async () => {
+        if (!restartSafeRequest) {
+          commitChatWorkAdmission(null);
+          return;
+        }
+        const latest = loadCurrentChatSendSession(session);
+        const [acpMeta] = await readAcpSessionMetaForEntries({
+          cfg: latest.cfg,
+          entries: [{ agentId, sessionKey: latest.canonicalKey, entry: latest.entry }],
+        });
+        // The writer barrier retains the selected row; commit rechecks request and run authority.
+        commitChatWorkAdmission(acpMeta ?? null);
+      },
       onInterrupt: (reason) => {
         const stopReason = isAgentRunDirectAbortReason(reason) ? "rpc" : "restart";
         if (!admittedRunAbort) {

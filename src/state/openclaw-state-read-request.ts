@@ -225,7 +225,6 @@ function commandBytes(command: OpenClawStateReadRequest["command"]): number {
       (total, input) =>
         total +
         input.keys.reduce((sum, key) => sum + Buffer.byteLength(key, "utf8"), 0) +
-        Buffer.byteLength(input.legacyKey ?? "", "utf8") +
         Buffer.byteLength(input.entry?.lifecycleRevision ?? "", "utf8") +
         Buffer.byteLength(input.entry?.sessionId ?? "", "utf8") +
         (input.entry?.sessionStartedAt === undefined ? 0 : 8),

@@ -1,5 +1,6 @@
 /** Native subagent registration and paused-run adoption precede Gateway acceptance. */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { readAcpSessionMetaForEntries } from "../../acp/runtime/session-meta-readonly.js";
 import type { AgentRunTerminalOutcome } from "../../agents/agent-run-terminal-outcome.js";
 import {
   readFollowupRequest,
@@ -26,6 +27,7 @@ import type { AgentTurnContext, AgentTurnPrincipal } from "./types.js";
 
 export async function prepareGatewaySubagentRun(params: {
   cfg: OpenClawConfig;
+  activeSessionAgentId: string;
   client: AgentTurnPrincipal | null;
   resolvedSessionKey?: string;
   inputProvenance?: InputProvenance;
@@ -128,19 +130,25 @@ export async function prepareGatewaySubagentRun(params: {
       });
     }
   }
-  return {
-    pluginSubagent,
-    // Operator follow-ups may continue a child; inter-session delivery retains its own owner.
-    reactivateSubagent: Boolean(
-      sessionKey &&
-      !params.isOneShotModelRun &&
-      !interSession &&
-      !pluginSubagent &&
-      internalOwner !== "native_subagent" &&
-      !params.sessionEntry?.acp &&
-      !isAcpSessionKey(sessionKey),
-    ),
-  };
+  // Operator follow-ups may continue a child; inter-session delivery retains its own owner.
+  const reactivateSubagent = Boolean(
+    sessionKey &&
+    !params.isOneShotModelRun &&
+    !interSession &&
+    !pluginSubagent &&
+    internalOwner !== "native_subagent" &&
+    !isAcpSessionKey(sessionKey),
+  );
+  if (!reactivateSubagent || !sessionKey) {
+    return { pluginSubagent, reactivateSubagent: false };
+  }
+  const entry = params.assertResumeAdmissionCurrent() ?? params.sessionEntry;
+  const [acpMeta] = await readAcpSessionMetaForEntries({
+    cfg: params.cfg,
+    entries: [{ agentId: params.activeSessionAgentId, sessionKey, entry }],
+  });
+  params.assertResumeAdmissionCurrent();
+  return { pluginSubagent, reactivateSubagent: acpMeta == null };
 }
 
 /** Rejection may settle only the exact physical execution already adopted by this admission. */
