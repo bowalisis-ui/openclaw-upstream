@@ -28,7 +28,6 @@ import {
   beginSessionWorkAdmission,
   isSessionWorkAdmissionActive,
 } from "../sessions/session-lifecycle-admission.js";
-import { withTestDir } from "../test-helpers/temp-dir.js";
 import { embeddedRunMock, onceMessage, agentDiscoveryMock, rpcReq } from "./test-helpers.js";
 import { getTestPluginRegistry } from "./test-helpers.plugin-registry.js";
 import { testConfigRoot } from "./test-helpers.runtime-state.js";
@@ -913,60 +912,56 @@ test("sessions.compact maxLines does not interrupt an active run when no transcr
 });
 
 test("sessions.patch preserves nested model ids under provider overrides", async () => {
-  await withTestDir({ prefix: "openclaw-gw-sessions-nested-" }, async (dir) => {
-    const storePath = path.join(dir, "sessions.json");
-    const runtimeConfig = {
-      agents: {
-        defaults: {
-          model: { primary: "openai/gpt-test-a" },
-        },
-        list: [{ id: "main", default: true, workspace: dir }],
+  const { dir, storePath } = await createSessionStoreDir();
+  const runtimeConfig = {
+    agents: {
+      defaults: {
+        model: { primary: "openai/gpt-test-a" },
       },
-      session: { mainKey: "main", store: storePath },
+      list: [{ id: "main", default: true, workspace: dir }],
+    },
+    session: { mainKey: "main", store: storePath },
+  };
+  await upsertSessionEntryCore(
+    { sessionKey: "agent:main:main", storePath },
+    sessionStoreEntry("sess-main"),
+  );
+
+  agentDiscoveryMock.enabled = true;
+  agentDiscoveryMock.models = [
+    { id: "moonshotai/kimi-k2.5", name: "Kimi K2.5 (NVIDIA)", provider: "nvidia" },
+  ];
+
+  const context = { getRuntimeConfig: () => runtimeConfig };
+  const patched = await directSessionReq<{
+    entry: {
+      modelOverride?: string;
+      providerOverride?: string;
+      model?: string;
+      modelProvider?: string;
     };
-    await upsertSessionEntryCore(
-      { sessionKey: "agent:main:main", storePath },
-      sessionStoreEntry("sess-main"),
-    );
+    resolved?: { model?: string; modelProvider?: string };
+  }>(
+    "sessions.patch",
+    {
+      key: "agent:main:main",
+      model: "nvidia/moonshotai/kimi-k2.5",
+    },
+    { context },
+  );
+  expect(patched.ok).toBe(true);
+  expect(patched.payload?.entry.modelOverride).toBe("moonshotai/kimi-k2.5");
+  expect(patched.payload?.entry.providerOverride).toBe("nvidia");
+  expect(patched.payload?.entry.model).toBeUndefined();
+  expect(patched.payload?.entry.modelProvider).toBeUndefined();
+  expect(patched.payload?.resolved?.modelProvider).toBe("nvidia");
+  expect(patched.payload?.resolved?.model).toBe("moonshotai/kimi-k2.5");
 
-    agentDiscoveryMock.enabled = true;
-    agentDiscoveryMock.models = [
-      { id: "moonshotai/kimi-k2.5", name: "Kimi K2.5 (NVIDIA)", provider: "nvidia" },
-    ];
-
-    const context = { getRuntimeConfig: () => runtimeConfig };
-    const patched = await directSessionReq<{
-      entry: {
-        modelOverride?: string;
-        providerOverride?: string;
-        model?: string;
-        modelProvider?: string;
-      };
-      resolved?: { model?: string; modelProvider?: string };
-    }>(
-      "sessions.patch",
-      {
-        key: "agent:main:main",
-        model: "nvidia/moonshotai/kimi-k2.5",
-      },
-      { context },
-    );
-    expect(patched.ok).toBe(true);
-    expect(patched.payload?.entry.modelOverride).toBe("moonshotai/kimi-k2.5");
-    expect(patched.payload?.entry.providerOverride).toBe("nvidia");
-    expect(patched.payload?.entry.model).toBeUndefined();
-    expect(patched.payload?.entry.modelProvider).toBeUndefined();
-    expect(patched.payload?.resolved?.modelProvider).toBe("nvidia");
-    expect(patched.payload?.resolved?.model).toBe("moonshotai/kimi-k2.5");
-
-    const listed = await directSessionReq<{
-      sessions: Array<{ key: string; modelProvider?: string; model?: string }>;
-    }>("sessions.list", {}, { context });
-    expect(listed.ok).toBe(true);
-    const mainSession = listed.payload?.sessions.find(
-      (session) => session.key === "agent:main:main",
-    );
-    expect(mainSession?.modelProvider).toBe("nvidia");
-    expect(mainSession?.model).toBe("moonshotai/kimi-k2.5");
-  });
+  const listed = await directSessionReq<{
+    sessions: Array<{ key: string; modelProvider?: string; model?: string }>;
+  }>("sessions.list", {}, { context });
+  expect(listed.ok).toBe(true);
+  const mainSession = listed.payload?.sessions.find((session) => session.key === "agent:main:main");
+  expect(mainSession?.modelProvider).toBe("nvidia");
+  expect(mainSession?.model).toBe("moonshotai/kimi-k2.5");
 });
