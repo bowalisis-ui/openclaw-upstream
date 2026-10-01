@@ -214,6 +214,32 @@ describe.each([
     expect(calls).toHaveLength(1);
   });
 
+  it("admits each retry inside the current credential owner", async () => {
+    results(failure);
+    const rotated = new Error("credential rotated");
+    let current = true;
+    let admissions = 0;
+    const pending = execute("/repo", ["fetch", "origin"], {
+      timeoutMs: 10_000,
+      startRun: async <T>(start: () => T): Promise<Awaited<T>> => {
+        await Promise.resolve();
+        admissions += 1;
+        if (!current) {
+          throw rotated;
+        }
+        return await start();
+      },
+    });
+    const outcome = expect(pending).rejects.toBe(rotated);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
+    current = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await outcome;
+    expect(admissions).toBe(2);
+    expect(calls).toHaveLength(1);
+  });
+
   it("keeps the existing deadline when the first attempt consumed the retry window", async () => {
     results(failure);
     await execute("/repo", ["fetch", "origin"], { timeoutMs: 1_000 });

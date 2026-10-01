@@ -277,8 +277,20 @@ export async function prepareSessionWorkspace(params: {
           })
         : undefined;
     const projectToken = configuredToken ?? projectIdentity?.token;
+    const assertProjectCurrent = () => {
+      assertRunOwnership();
+      projectIdentity?.assertSelected();
+    };
     const project = gitUrl
-      ? await materializeProjectClone({ cfg, gitUrl }, { signal, token: projectToken })
+      ? await materializeProjectClone(
+          { cfg, gitUrl },
+          {
+            signal,
+            token: projectToken,
+            assertCurrent: assertProjectCurrent,
+            startRun: projectIdentity?.start,
+          },
+        )
       : undefined;
     projectIdentity?.assertSelected();
     assertRunOwnership();
@@ -341,6 +353,8 @@ export async function prepareSessionWorkspace(params: {
           await refreshProjectClone(project, {
             signal,
             token: projectToken,
+            assertCurrent: assertProjectCurrent,
+            startRun: projectIdentity?.start,
           });
           projectIdentity?.assertSelected();
           assertRunOwnership();

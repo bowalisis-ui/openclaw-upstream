@@ -7,11 +7,13 @@ import {
   gitNullConfigPath,
   requireGitCommandOutput,
 } from "../infra/git-exec.js";
-import { withGitNetworkRetry } from "../infra/git-network-retry.js";
+import { withGitNetworkRetry, type GitOperationStarter } from "../infra/git-network-retry.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 
 const PROJECT_CLONE_TIMEOUT_MS = 10 * 60_000;
 type ProjectCloneOptions = {
+  assertCurrent?: () => void;
+  startRun?: GitOperationStarter;
   env?: NodeJS.ProcessEnv;
   objectDirectory?: string;
   signal?: AbortSignal;
@@ -133,6 +135,8 @@ export async function cloneProjectCheckout(
     {
       timeoutMs: options.timeoutMs ?? PROJECT_CLONE_TIMEOUT_MS,
       signal: options.signal,
+      beforeRun: options.assertCurrent,
+      startRun: options.startRun,
     },
     async (timeoutMs) => {
       const attempt = await runCommandWithTimeout(
@@ -335,6 +339,8 @@ function runProjectCheckoutGit(
       signal: options.signal,
       killProcessTree: true,
       maxOutputBytes: 256 * 1024,
+      beforeRun: options.assertCurrent,
+      startRun: options.startRun,
       ...commandOptions,
     },
   );

@@ -108,7 +108,7 @@ export async function materializeSessionRepositoryWorkspaceOnGateway(params: {
       gitUrl: repository.url,
       requiredCommit: published?.pushed_head_commit ?? repository.baseCommit,
     },
-    { signal: params.signal, token: github?.token },
+    { signal: params.signal, token: github?.token, assertCurrent },
   ).catch((error: unknown) => {
     if (error instanceof ProjectCloneError && error.failure === "auth_required") {
       throw new ProjectCloneError(
@@ -120,7 +120,7 @@ export async function materializeSessionRepositoryWorkspaceOnGateway(params: {
   });
   assertCurrent();
   const { step, require: command, run } = createGitHubPublicationCommandRunner(assertCurrent);
-  const cloneOptions = { signal: params.signal, token: github?.token };
+  const cloneOptions = { signal: params.signal, token: github?.token, assertCurrent };
   const source = { url: repository.url, target: project.repoRoot };
   const remoteHead = await step(() =>
     readProjectCheckoutRemoteHead({ ...source, branch: repository.branch }, cloneOptions),
