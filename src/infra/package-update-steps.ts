@@ -28,16 +28,13 @@ import {
   validatePnpmIsolatedUpdate,
 } from "./package-update-manager-preflight.js";
 import { prepareNpmGitSourceInstallSpec } from "./package-update-npm-pack.js";
-import type {
-  PackageActivationOptions,
-  PackageUpdateTransaction,
-  StagedPackageInstall,
-} from "./package-update-swap-contract.js";
 import {
   PackageUpdateActivationError,
-  removePackageUpdatePath,
-  swapStagedPackageInstall,
-} from "./package-update-swap.js";
+  type PackageActivationOptions,
+  type PackageUpdateTransaction,
+  type StagedPackageInstall,
+} from "./package-update-swap-contract.js";
+import { removePackageUpdatePath, swapStagedPackageInstall } from "./package-update-swap.js";
 import {
   createPackageVerificationFailureStep,
   type PackagePostInstallVerifier,
