@@ -205,10 +205,6 @@ async function readDiskEvictableArchivedSessionBatch({
   }
   const options = { ...databaseOptions, path: resolveOpenClawAgentSqlitePath(databaseOptions) };
   return withSqliteMutationWorkerLifetime(options, async ({ assertCurrent }) => {
-    const [{ withSessionHistoryWorkerDatabase }, { maintenanceLane }] = await Promise.all([
-      import("./session-transcript-worker-runtime.js"),
-      import("./session-transcript-worker-resources.js"),
-    ]);
     assertCurrent();
     const batch = await withSessionHistoryWorkerDatabase(
       options,

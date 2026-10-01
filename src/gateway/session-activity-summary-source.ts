@@ -19,6 +19,7 @@ import {
 import { readRestoredSessionTranscript } from "../config/sessions/session-cold-storage-read.js";
 import { resolveSessionTranscriptReadFence } from "../config/sessions/session-transcript-read-fence.js";
 import { startSessionTranscriptIndexReconcile } from "../config/sessions/session-transcript-reconcile.js";
+import { withSessionHistoryWorkerDatabase } from "../config/sessions/session-transcript-worker-runtime.js";
 import { redactToolPayloadText } from "../logging/redact.js";
 import { extractTextFromChatContent } from "../shared/chat-content.js";
 import {
@@ -97,8 +98,6 @@ export async function readActivitySummarySource(
     assertCurrent: () => void;
   },
 ) {
-  const { withSessionHistoryWorkerDatabase } =
-    await import("../config/sessions/session-transcript-worker-runtime.js");
   const resolved = await prepareSqliteTranscriptReadScope(params.scope);
   params.assertCurrent();
   const options = toDatabaseOptions(resolved);
