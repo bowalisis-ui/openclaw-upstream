@@ -30,6 +30,9 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
       (input.command.mode === "pending" || input.command.mode === "unfinished")) ||
       input.command.type === "acpSessions.list" ||
       input.command.type === "backup.runs" ||
+      (input.command.type === "claws.packageOwnership" &&
+        typeof input.command.includeInstalls === "boolean" &&
+        (input.command.agentId === undefined || typeof input.command.agentId === "string")) ||
       (input.command.type === "acpSessions.metadata" &&
         Array.isArray(input.command.entries) &&
         input.command.entries.length <= 64 &&

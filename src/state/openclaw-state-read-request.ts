@@ -205,8 +205,8 @@ function commandBytes(command: OpenClawStateReadRequest["command"]): number {
     return Buffer.byteLength(JSON.stringify(command), "utf8");
   }
   let bytes = Buffer.byteLength(command.type, "utf8");
-  if (command.type === "cron.activeReceiptOwners") {
-    return bytes + Buffer.byteLength(command.agentId, "utf8");
+  if (command.type === "cron.activeReceiptOwners" || command.type === "claws.packageOwnership") {
+    return bytes + Buffer.byteLength(command.agentId ?? "", "utf8");
   }
   if (command.type === "workerPlacements.changeSnapshot") {
     return (command.profileIds ?? []).reduce(

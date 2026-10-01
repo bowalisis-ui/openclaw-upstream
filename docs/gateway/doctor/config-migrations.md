@@ -122,6 +122,19 @@ Gateway `cron.add` and `cron.update` requests still accept the deprecated
 `announce`. This request adapter does not repair stored `deliver` values; those
 still require Doctor.
 
+## Claw provenance schema
+
+Claw update plans and resume previews require the current provenance columns.
+Older SQLite databases that lack bootstrap or extension provenance columns now
+stop with `openclaw doctor --fix` guidance. Read-only planning leaves those
+databases unchanged instead of projecting absent columns as empty values.
+
+Doctor and the update-time Doctor pass use the existing shared-state schema
+repair. Doctor preserves a verified pre-migration database snapshot even when
+the numeric schema version is already current, then adds the missing nullable
+columns. Install records, package references, timestamps, and consent-bound v1
+resume plans retain their values. Repeating the repair is idempotent.
+
 ## Channel ownership during an update
 
 When Doctor migrates a legacy `agents.list` roster without a `default: true` marker

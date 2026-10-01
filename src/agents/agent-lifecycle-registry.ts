@@ -13,6 +13,7 @@ import {
   beginAgentDeletionJournal,
   claimCompletedAgentDeletionJournal,
   completeAgentDeletionJournalInDatabase,
+  handoffAgentDeletionJournalInDatabase,
   readAgentDeletionJournal,
   readAgentDeletionJournalInDatabase,
   removeAgentDeletionJournal,
@@ -68,6 +69,7 @@ export type AgentDeletionOperation = {
   fenceCleanupPaths: (paths: readonly AgentDeletionJournalCleanupPath[]) => void;
   finish: () => void;
   completeInTransaction: (database: OpenClawStateDatabase) => void;
+  handoffToRetry: (database: OpenClawStateDatabase) => void;
   rollback: () => void;
 };
 
@@ -178,6 +180,20 @@ export function withAgentDeletion<T>(
           return {
             entry: journal,
             assertCurrent,
+            handoffToRetry: (database) => {
+              assertCurrent(database);
+              if (
+                !handoffAgentDeletionJournalInDatabase(
+                  database,
+                  id,
+                  operationId,
+                  crypto.randomUUID(),
+                )
+              ) {
+                throw new Error(`Failed to hand off deletion journal for agent ${id}.`);
+              }
+              // Journal replacement revokes this attempt; rollback must leave its local authority usable.
+            },
             runDatabaseCleanup: createAgentDeletionDatabaseCleanup({
               statePath,
               assertAdmission: () => assertNoOpenClawAgentDatabaseLeases(id, stateOptions),
@@ -264,6 +280,31 @@ export function isAgentDeletionBlocked(
       ? readAgentDeletionJournalInDatabase({ db: database }, agentId, "runtime")
       : readAgentDeletionJournal(agentId, options, "runtime"),
   );
+}
+
+/** Keep persisted identity stable until the winning deletion completes or rolls back. */
+export function assertAgentDeletionAllowsMutation(
+  database: OpenClawStateDatabase,
+  agentId: string,
+  deletion?: AgentDeletionOperation,
+): void {
+  const id = normalizeAgentId(agentId);
+  const journal = readAgentDeletionJournalInDatabase(database, id);
+  if (deletion) {
+    if (
+      deletion.entry.agentId !== id ||
+      !journal ||
+      journal.operationId !== deletion.entry.operationId ||
+      journal.cleanupCompleted
+    ) {
+      throw new Error(`Agent ${id} mutation does not belong to the current deletion.`);
+    }
+    deletion.assertCurrent(database);
+    return;
+  }
+  if (journal && !journal.cleanupCompleted) {
+    throw new Error(`Agent ${id} has pending deletion; retry after removal completes.`);
+  }
 }
 
 /** Captures the exact durable incarnation of an existing, deletion-safe agent. */
