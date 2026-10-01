@@ -1,5 +1,6 @@
+import type { Api } from "grammy";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import { expect, it, vi } from "vitest";
+import { expect, it, vi, type Mock } from "vitest";
 import {
   expectMockMessageContains,
   expectStatusCall,
@@ -11,7 +12,7 @@ import { postWebhookJson } from "./webhook-http.js";
 type WebhookGateway = ReturnType<typeof createTelegramWebhookTestGateway>;
 type RegistrationFixture = {
   gateway: WebhookGateway;
-  setWebhookSpy: ReturnType<typeof vi.fn>;
+  setWebhookSpy: Mock<Api["setWebhook"]>;
   stopSpy: ReturnType<typeof vi.fn>;
   transportCloseSpies: Array<ReturnType<typeof vi.fn>>;
   startWebhookStartupFixture: (

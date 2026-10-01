@@ -1,18 +1,32 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { expectDefined } from "@openclaw/normalization-core";
-import { afterEach, describe, expect, it } from "vitest";
-import { replaceConfigFile, type OpenClawConfig } from "../config/config.js";
-import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { migrateImplicitWebhookListeners } from "../commands/doctor/shared/webhook-listener-migration.js";
+import {
+  readConfigFileSnapshotForWrite,
+  replaceConfigFile,
+  type OpenClawConfig,
+} from "../config/config.js";
+import { transformConfigFile } from "../config/mutate.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import { withSqliteReadOnlyWorkerScope } from "../infra/sqlite-readonly-worker.js";
+import type { DB } from "../state/openclaw-state-db.generated.js";
+import {
+  closeOpenClawStateDatabaseForTest,
+  runOpenClawStateWriteTransaction,
+} from "../state/openclaw-state-db.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { resolvePluginArtifactDeclaredSurface } from "./capability-artifact.js";
 import { resolvePluginCapabilityConsent } from "./capability-consent.js";
 import { computeDeclaredSurfaceHash } from "./capability-summary.js";
 import { enablePluginWithCapabilityConsent } from "./enable.js";
+import { persistPluginInstall } from "./install-persistence.js";
 import {
   commitConfigWithPendingPluginInstalls,
   commitConfigWriteWithPendingPluginInstalls,
@@ -20,9 +34,11 @@ import {
 import { writePersistedInstalledPluginIndexInstallRecordsWithLease } from "./installed-plugin-index-records.js";
 import { readPersistedInstalledPluginIndex } from "./installed-plugin-index-store.js";
 import { resolveInstalledPluginIndexPolicyHash } from "./installed-plugin-index.js";
+import type { PluginLifecycleRuntimeApply } from "./lifecycle.js";
 import { withPluginLifecycleLease } from "./plugin-lifecycle-lease.js";
 
 afterEach(() => {
+  vi.restoreAllMocks();
   closeOpenClawStateDatabaseForTest();
 });
 
@@ -325,6 +341,203 @@ describe("plugin install record commit rollback", () => {
 });
 
 describe("committed plugin configuration", () => {
+  it.each([
+    {
+      mode: "install",
+      name: "publishes a pending webhook pin before runtime activation and never recreates a removed pin",
+    },
+    {
+      mode: "unchanged-cli",
+      name: "publishes a late webhook pin for an unchanged CLI update and never recreates a removed pin",
+    },
+  ] as const)("$name", async ({ mode }) => {
+    await withOpenClawTestState({ label: "plugin-webhook-publication" }, async (state) =>
+      withSqliteReadOnlyWorkerScope(async () => {
+        const pluginId = "msteams";
+        const oldPath = state.statePath("npm", "old-teams");
+        const newPath = state.statePath("npm", "new-teams");
+        for (const [rootDir, implicit] of [
+          [oldPath, false],
+          [newPath, true],
+        ] as const) {
+          await fs.promises.mkdir(rootDir, { recursive: true });
+          await fs.promises.writeFile(
+            path.join(rootDir, "package.json"),
+            JSON.stringify({
+              name: "@openclaw/msteams",
+              version: implicit ? "2026.9.8" : "2026.9.7",
+              type: "module",
+              openclaw: { extensions: ["./index.js"] },
+            }),
+          );
+          await fs.promises.writeFile(
+            path.join(rootDir, "index.js"),
+            'export default { id: "msteams", register() {} };\n',
+          );
+          await fs.promises.writeFile(
+            path.join(rootDir, "openclaw.plugin.json"),
+            JSON.stringify({
+              id: pluginId,
+              channels: [pluginId],
+              configSchema: { type: "object", properties: {}, additionalProperties: false },
+              doctorContract: { configRepair: true },
+            }),
+          );
+          await fs.promises.writeFile(
+            path.join(rootDir, "doctor-contract-api.ts"),
+            `import { createLegacyWebhookListenerDoctorContract } from "openclaw/plugin-sdk/runtime-doctor-migrations";
+export const { legacyConfigRules, normalizeCompatibilityConfig } = createLegacyWebhookListenerDoctorContract({
+  channelKey: "msteams", defaultPort: 3978, webhookKey: "webhook", portKey: "port", hostKey: null,
+  ${implicit ? "implicitAccountIds: () => [undefined]," : ""}
+});\n`,
+          );
+        }
+        const config: OpenClawConfig = {
+          plugins: { allow: [pluginId], entries: { [pluginId]: { enabled: true } } },
+          channels: { msteams: { enabled: true } },
+        };
+        await state.writeConfig(config);
+        const original = await fs.promises.readFile(state.configPath, "utf8");
+        await withPluginLifecycleLease({}, (lease) =>
+          writePersistedInstalledPluginIndexInstallRecordsWithLease(
+            {
+              [pluginId]: {
+                source: "npm",
+                spec: "@openclaw/msteams@2026.9.7",
+                version: "2026.9.7",
+                installPath: oldPath,
+              },
+            },
+            { config, lease },
+          ),
+        );
+        runOpenClawStateWriteTransaction(
+          ({ db }) =>
+            executeSqliteQuerySync(
+              db,
+              getNodeSqliteKysely<DB>(db)
+                .insertInto("gateway_boot_lifecycle")
+                .values({
+                  boot_id: randomUUID(),
+                  pid: process.pid + 1,
+                  started_at_ms: Date.now() - 60_000,
+                  completed_at_ms: Date.now() - 30_000,
+                  outcome: "clean_stop",
+                  reason: null,
+                  startup_reason: null,
+                }),
+            ),
+          { env: state.env },
+        );
+        expect((await migrateImplicitWebhookListeners({ env: state.env })).changed).toBe(false);
+        const nextInstall = {
+          source: "npm" as const,
+          spec: "@openclaw/msteams@2026.9.8",
+          version: "2026.9.8",
+          installPath: newPath,
+        };
+        let activations = 0;
+        let expectedPin: { port: number } | undefined = { port: 3978 };
+        const applyRuntime: PluginLifecycleRuntimeApply = async ({
+          config: runtimeConfig,
+          write,
+        }) => {
+          expect(runtimeConfig.channels?.msteams?.legacyWebhook).toEqual(expectedPin);
+          expect(write?.persistedSourceConfig?.channels?.msteams?.legacyWebhook).toEqual(
+            expectedPin,
+          );
+          const persisted = JSON.parse(await fs.promises.readFile(state.configPath, "utf8"));
+          expect(persisted.channels.msteams.legacyWebhook).toEqual(expectedPin);
+          activations += 1;
+          return {
+            operationId: "webhook-publication",
+            generation: activations,
+            pluginIds: [pluginId],
+          };
+        };
+        const install = async (beforePersistentEffect?: () => void) => {
+          const { snapshot, writeOptions } = await readConfigFileSnapshotForWrite();
+          return await persistPluginInstall({
+            snapshot: { config: snapshot.sourceConfig, baseHash: snapshot.hash, writeOptions },
+            pluginId,
+            install: nextInstall,
+            enable: false,
+            applyRuntime,
+            beforePersistentEffect,
+          });
+        };
+        let publish: () => Promise<unknown> = install;
+        const gatewayCall = vi.fn();
+        if (mode === "install") {
+          const failure = new Error("synthetic pre-publication refusal");
+          await expect(
+            install(() => {
+              throw failure;
+            }),
+          ).rejects.toBe(failure);
+          expect(activations).toBe(0);
+          expect(await fs.promises.readFile(state.configPath, "utf8")).toBe(original);
+          expect(
+            (await readPersistedInstalledPluginIndex())?.installRecords[pluginId]?.installPath,
+          ).toBe(oldPath);
+        } else {
+          await withPluginLifecycleLease({}, (lease) =>
+            writePersistedInstalledPluginIndexInstallRecordsWithLease(
+              { [pluginId]: nextInstall },
+              { config, lease },
+            ),
+          );
+          const updates = await import("./update.js");
+          vi.spyOn(updates, "updateNpmInstalledPlugins").mockImplementation(
+            async ({ config: current }) => ({
+              config: current,
+              changed: false,
+              outcomes: [{ pluginId, status: "unchanged", message: "Teams package is current." }],
+            }),
+          );
+          gatewayCall.mockImplementation(async (method: string) => {
+            if (method === "plugins.list") return {};
+            expect(method).toBe("plugins.refresh");
+            const persisted = JSON.parse(await fs.promises.readFile(state.configPath, "utf8"));
+            expect(persisted.channels.msteams.legacyWebhook).toEqual({ port: 3978 });
+            expect(await fs.promises.readFile(`${state.configPath}.bak`, "utf8")).toBe(original);
+            activations += 1;
+            return { runtime: { generation: activations } };
+          });
+          const lifecycle = await import("../cli/plugins-lifecycle-client.js");
+          vi.spyOn(lifecycle, "resolvePluginLifecycleGateway").mockResolvedValue(gatewayCall);
+          const { runPluginUpdateCommand } = await import("../cli/plugins-update-command.js");
+          publish = () => runPluginUpdateCommand({ ids: [pluginId], opts: {} });
+        }
+        await publish();
+        expect(activations).toBe(1);
+        expect(await fs.promises.readFile(`${state.configPath}.bak`, "utf8")).toBe(original);
+        await transformConfigFile({
+          base: "source",
+          transform: (current) => {
+            const nextConfig = structuredClone(current);
+            delete nextConfig.channels?.msteams?.legacyWebhook;
+            return { nextConfig };
+          },
+        });
+        expectedPin = undefined;
+        await publish();
+        expect(activations).toBe(mode === "install" ? 2 : 1);
+        expect(
+          JSON.parse(await fs.promises.readFile(state.configPath, "utf8")).channels.msteams
+            .legacyWebhook,
+        ).toBeUndefined();
+        if (mode === "unchanged-cli") {
+          expect(gatewayCall.mock.calls.map(([method]) => method)).toEqual([
+            "plugins.list",
+            "plugins.refresh",
+            "plugins.list",
+          ]);
+        }
+      }),
+    );
+  });
+
   it.each([false, true])(
     "returns committed source separately from authored configuration (pending records: %s)",
     async (pending) => {

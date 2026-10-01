@@ -585,23 +585,21 @@ async function runPluginUpdateCommandUnlocked(
               },
             })
           : undefined;
-      if (!pluginResult.changed && !hookResult.changed && !migration?.changed) {
-        await migration?.publish(nextConfig, async () => {});
-        return logPluginUpdateOutcomes({
-          outcomes: [...pluginResult.outcomes, ...hookResult.outcomes],
-          log: defaultRuntime.log,
-          error: defaultRuntime.error,
-        }).hasErrors
-          ? 1
-          : 0;
-      }
+      const unchanged = !pluginResult.changed && !hookResult.changed && !migration?.changed;
       nextConfig = migration?.config ?? nextConfig;
-      const commit = async () => {
+      const publicationInput = nextConfig;
+      let published = false;
+      const commit = async (publishedConfig: OpenClawConfig) => {
+        if (unchanged && isDeepStrictEqual(publishedConfig, publicationInput)) {
+          return;
+        }
+        nextConfig = publishedConfig;
+        const configChanged = !isDeepStrictEqual(
+          nextConfig,
+          sourceSnapshot?.snapshot.sourceConfig ?? sourceCfg,
+        );
         if (shouldPersistPluginInstallIndex) {
-          if (
-            !migration?.changed &&
-            isDeepStrictEqual(nextConfig, sourceSnapshot?.snapshot.sourceConfig ?? sourceCfg)
-          ) {
+          if (!migration?.changed && !configChanged) {
             await commitPluginInstallRecordsOnly({
               previousInstallRecords: pluginInstallRecords,
               nextInstallRecords: nextPluginInstallRecords,
@@ -629,8 +627,18 @@ async function runPluginUpdateCommandUnlocked(
             writeOptions,
           });
         }
+        published = true;
       };
-      await (migration ? migration.publish(nextConfig, commit) : commit());
+      await (migration ? migration.publish(nextConfig, commit) : commit(nextConfig));
+      if (!published) {
+        return logPluginUpdateOutcomes({
+          outcomes: [...pluginResult.outcomes, ...hookResult.outcomes],
+          log: defaultRuntime.log,
+          error: defaultRuntime.error,
+        }).hasErrors
+          ? 1
+          : 0;
+      }
       packageUpdatePersisted = true;
       onMetadataChanged?.();
       await settlePluginInstallTransactions(deferredInstallTransactions, "commit").catch(() =>

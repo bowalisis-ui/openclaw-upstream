@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import nodePath from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import type { Api } from "grammy";
 import {
   closeOpenClawStateDatabaseForTest,
   createChannelIngressQueueForTests as createChannelIngressQueue,
@@ -82,7 +83,7 @@ vi.mock("openclaw/plugin-sdk/webhook-ingress", async (importOriginal) => ({
 
 const handleUpdateSpy = vi.hoisted(() => vi.fn((..._args: unknown[]): unknown => undefined));
 const answerCallbackQuerySpy = vi.hoisted(() => vi.fn(async () => true));
-const setWebhookSpy = vi.hoisted(() => vi.fn());
+const setWebhookSpy = vi.hoisted(() => vi.fn<Api["setWebhook"]>());
 const deleteWebhookSpy = vi.hoisted(() => vi.fn(async () => true));
 const initSpy = vi.hoisted(() => vi.fn(async () => undefined));
 const stopSpy = vi.hoisted(() => vi.fn());

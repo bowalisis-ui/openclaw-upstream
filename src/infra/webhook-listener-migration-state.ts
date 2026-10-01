@@ -10,20 +10,31 @@ import { isTruthyEnvValue } from "./env.js";
 import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "./kysely-sync.js";
 
 export type WebhookListenerPin = { path: string[]; value: unknown };
-type WebhookListenerMigrationPhase = "all" | "ambient-teams";
+export const WEBHOOK_LISTENER_CHANNEL_IDS = [
+  "feishu",
+  "msteams",
+  "nextcloud-talk",
+  "telegram",
+] as const;
+type WebhookListenerChannelId = (typeof WEBHOOK_LISTENER_CHANNEL_IDS)[number];
+export type WebhookListenerMigrationProgress = {
+  pendingChannelIds: WebhookListenerChannelId[];
+  ambientTeamsDeferred?: boolean;
+};
 export type WebhookListenerMigrationReceipt = {
   existingInstall: boolean;
-  phase: WebhookListenerMigrationPhase;
-  updateRun?: { id: string; rollbackPhase: WebhookListenerMigrationPhase };
-} & (
-  | { state: "completed" }
-  | {
-      state: "prepared";
-      sourceHash?: string;
-      pins?: WebhookListenerPin[];
-      nextPhase?: "ambient-teams";
-    }
-);
+  updateRun?: { id: string; rollbackProgress: WebhookListenerMigrationProgress };
+} & WebhookListenerMigrationProgress &
+  (
+    | { state: "completed" }
+    | {
+        state: "prepared";
+        sourceHash?: string;
+        completionConfigHash?: string;
+        pins?: WebhookListenerPin[];
+        nextProgress?: WebhookListenerMigrationProgress;
+      }
+  );
 
 export function webhookListenerMigrationKey(configPath: string): string {
   return `doctor.webhook-listeners.v1:${createHash("sha256")
@@ -87,7 +98,11 @@ export function prepareWebhookListenerMigrationInDatabase(
     db,
     key,
     (current) =>
-      current ?? { state: "prepared", phase: "all", existingInstall: hasPriorOperation(db, env) },
+      current ?? {
+        state: "prepared",
+        pendingChannelIds: [...WEBHOOK_LISTENER_CHANNEL_IDS],
+        existingInstall: hasPriorOperation(db, env),
+      },
     Date.now(),
   );
 }

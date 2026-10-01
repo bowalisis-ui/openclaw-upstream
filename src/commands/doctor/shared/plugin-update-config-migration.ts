@@ -101,101 +101,125 @@ export async function preparePluginUpdateConfigMigration(params: {
       async [Symbol.asyncDispose]() {
         await cache[Symbol.asyncDispose]();
       },
-      async publish<T>(activationConfig: OpenClawConfig, commit: () => Promise<T>): Promise<T> {
+      async publish<T>(
+        initialConfig: OpenClawConfig,
+        commit: (config: OpenClawConfig) => Promise<T>,
+      ): Promise<T> {
         params.assertCurrent();
-        const availability =
-          selectedPending.length > 0
-            ? await inspectPluginMigrationAvailability({
-                cfg: activationConfig,
-                env: process.env,
-                installRecords: params.installRecords,
-                retainedPluginIds: [...selectedIds],
-                deferInstallation: false,
-              })
-            : undefined;
-        params.assertCurrent();
-        // Install owns enablement after normalization. Inspect state obligations against
-        // that final policy; inactive owners retain their inputs without running state work.
-        const resolvedPluginIds = withPluginCache(cache, () => {
-          const metadata = resolveConfigWidePluginMetadataSnapshot({
-            config: activationConfig,
+        const publicationMetadata = withPluginCache(cache, () =>
+          resolveConfigWidePluginMetadataSnapshot({
+            config: initialConfig,
             installRecords: params.installRecords,
             allowCurrent: false,
-          });
-          return withPluginMetadataSnapshotScope(
-            metadata,
-            () => {
-              const rules = listPluginDoctorLegacyConfigRules({
-                config: activationConfig,
-                pluginIds: [...selectedIds],
-                manifestRegistry: metadata.manifestRegistry,
-                activeOnly: true,
-              });
-              const legacyIssues = findLegacyConfigRuleIssues(activationConfig, rules);
-              if (legacyIssues.length > 0) {
-                throw new Error(
-                  `Plugin config repair is incomplete: ${legacyIssues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")}`,
-                );
-              }
-              if (selectedPending.length === 0) {
-                return [];
-              }
-              const active = new Set<string>();
-              const stateless = new Set(
-                availability?.statelessPluginIds.filter((id) => selectedIds.has(id)),
-              );
-              listPluginDoctorStateMigrationEntries({
-                config: activationConfig,
-                pluginIds: [...selectedIds],
-                manifestRegistry: metadata.manifestRegistry,
-                onSelectedPlugin: (id) => active.add(id),
-                onInspectedStatelessPlugin: (id) => stateless.add(id),
-              });
-              const known = new Map(metadata.plugins.map((plugin) => [plugin.id, plugin]));
-              const uninspected = selectedPending.filter(
-                (entry) =>
-                  active.has(entry.pluginId) &&
-                  (entry.configPaths?.length ||
-                    entry.validationExcludedPaths?.length ||
-                    (!known.get(entry.pluginId)?.doctorContract &&
-                      entry.requiresDoctorInspection)) &&
-                  !inspected.has(entry.pluginId),
-              );
-              if (uninspected.length > 0) {
-                throw new Error(
-                  `Plugin config repair could not be inspected: ${uninspected.map((entry) => entry.pluginId).join(", ")}. Repair the plugin's Doctor artifact, then retry the update.`,
-                );
-              }
-              const unresolved = selectedPending.filter(
-                (entry) =>
-                  !known.has(entry.pluginId) ||
-                  (active.has(entry.pluginId) &&
-                    (entry.requiresStateMigration || !stateless.has(entry.pluginId))),
-              );
-              if (unresolved.length > 0) {
-                throw new Error(
-                  `Plugin settings are not ready for activation: ${unresolved.map((entry) => entry.pluginId).join(", ")}. Run openclaw doctor --fix to complete their data migrations, then retry the plugin update.`,
-                );
-              }
-              return selectedPending
-                .filter((entry) => active.has(entry.pluginId))
-                .map((entry) => entry.pluginId);
-            },
-            { config: activationConfig },
-          );
-        });
-        params.assertCurrent();
-        if (resolvedPluginIds.length === 0) {
-          return await commit();
-        }
-        return await withDeferredPluginConfigCompletion(
+          }),
+        );
+        const { publishImplicitWebhookListenerMigration } =
+          await import("./webhook-listener-migration.js");
+        return await publishImplicitWebhookListenerMigration(
           {
-            configPath: params.snapshot.path,
-            expectedPending: pending,
-            resolvedPluginIds,
+            config: initialConfig,
+            snapshot: params.snapshot,
+            manifestRegistry: publicationMetadata.manifestRegistry,
+            pluginIds: [...selectedIds],
             assertCurrent: params.assertCurrent,
           },
-          commit,
+          async (activationConfig) => {
+            params.assertCurrent();
+            const availability =
+              selectedPending.length > 0
+                ? await inspectPluginMigrationAvailability({
+                    cfg: activationConfig,
+                    env: process.env,
+                    installRecords: params.installRecords,
+                    retainedPluginIds: [...selectedIds],
+                    deferInstallation: false,
+                  })
+                : undefined;
+            params.assertCurrent();
+            // Install owns enablement after normalization. Inspect state obligations against
+            // that final policy; inactive owners retain their inputs without running state work.
+            const resolvedPluginIds = withPluginCache(cache, () => {
+              const metadata = resolveConfigWidePluginMetadataSnapshot({
+                config: activationConfig,
+                installRecords: params.installRecords,
+                allowCurrent: false,
+              });
+              return withPluginMetadataSnapshotScope(
+                metadata,
+                () => {
+                  const rules = listPluginDoctorLegacyConfigRules({
+                    config: activationConfig,
+                    pluginIds: [...selectedIds],
+                    manifestRegistry: metadata.manifestRegistry,
+                    activeOnly: true,
+                  });
+                  const legacyIssues = findLegacyConfigRuleIssues(activationConfig, rules);
+                  if (legacyIssues.length > 0) {
+                    throw new Error(
+                      `Plugin config repair is incomplete: ${legacyIssues.map((issue) => `${issue.path}: ${issue.message}`).join("\n")}`,
+                    );
+                  }
+                  if (selectedPending.length === 0) {
+                    return [];
+                  }
+                  const active = new Set<string>();
+                  const stateless = new Set(
+                    availability?.statelessPluginIds.filter((id) => selectedIds.has(id)),
+                  );
+                  listPluginDoctorStateMigrationEntries({
+                    config: activationConfig,
+                    pluginIds: [...selectedIds],
+                    manifestRegistry: metadata.manifestRegistry,
+                    onSelectedPlugin: (id) => active.add(id),
+                    onInspectedStatelessPlugin: (id) => stateless.add(id),
+                  });
+                  const known = new Map(metadata.plugins.map((plugin) => [plugin.id, plugin]));
+                  const uninspected = selectedPending.filter(
+                    (entry) =>
+                      active.has(entry.pluginId) &&
+                      (entry.configPaths?.length ||
+                        entry.validationExcludedPaths?.length ||
+                        (!known.get(entry.pluginId)?.doctorContract &&
+                          entry.requiresDoctorInspection)) &&
+                      !inspected.has(entry.pluginId),
+                  );
+                  if (uninspected.length > 0) {
+                    throw new Error(
+                      `Plugin config repair could not be inspected: ${uninspected.map((entry) => entry.pluginId).join(", ")}. Repair the plugin's Doctor artifact, then retry the update.`,
+                    );
+                  }
+                  const unresolved = selectedPending.filter(
+                    (entry) =>
+                      !known.has(entry.pluginId) ||
+                      (active.has(entry.pluginId) &&
+                        (entry.requiresStateMigration || !stateless.has(entry.pluginId))),
+                  );
+                  if (unresolved.length > 0) {
+                    throw new Error(
+                      `Plugin settings are not ready for activation: ${unresolved.map((entry) => entry.pluginId).join(", ")}. Run openclaw doctor --fix to complete their data migrations, then retry the plugin update.`,
+                    );
+                  }
+                  return selectedPending
+                    .filter((entry) => active.has(entry.pluginId))
+                    .map((entry) => entry.pluginId);
+                },
+                { config: activationConfig },
+              );
+            });
+            params.assertCurrent();
+            if (resolvedPluginIds.length === 0) {
+              return await commit(activationConfig);
+            }
+            return await withDeferredPluginConfigCompletion(
+              {
+                configPath: params.snapshot.path,
+                expectedPending: pending,
+                resolvedPluginIds,
+                assertCurrent: params.assertCurrent,
+              },
+              () => commit(activationConfig),
+            );
+          },
         );
       },
     };

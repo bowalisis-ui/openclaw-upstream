@@ -11,23 +11,36 @@ import type { ConfigFileSnapshot, OpenClawConfig } from "../../../config/types.o
 import { withConfigWriteLock } from "../../../config/write-lock.js";
 import {
   prepareWebhookListenerMigrationInDatabase,
+  WEBHOOK_LISTENER_CHANNEL_IDS as CHANNEL_IDS,
   webhookListenerMigrationKey,
+  type WebhookListenerMigrationProgress,
   type WebhookListenerMigrationReceipt as MigrationReceipt,
   type WebhookListenerPin,
 } from "../../../infra/webhook-listener-migration-state.js";
+import { hashStableJson } from "../../../plugins/installed-plugin-index-hash.js";
+import type { PluginManifestRegistry } from "../../../plugins/manifest-registry.types.js";
 import { writeConfigMachineState } from "../../../state/config-machine-state-write.js";
 import { readConfigMachineState } from "../../../state/config-machine-state.js";
 import { runOpenClawStateWriteTransaction } from "../../../state/openclaw-state-db.js";
 import { shouldSkipLegacyUpdateDoctorConfigWrite } from "./update-phase.js";
-
-const CHANNEL_IDS = ["feishu", "msteams", "nextcloud-talk", "telegram"] as const;
 
 type MigrationResult = {
   changed: boolean;
   changes: string[];
   warnings: string[];
   needsMigration?: boolean;
+  inspectionFailed?: boolean;
 };
+
+function completedChannelConfigHash(
+  config: OpenClawConfig,
+  before: WebhookListenerMigrationProgress,
+  after: WebhookListenerMigrationProgress,
+): string {
+  // Writer metadata and unrelated channels do not change a completed listener decision.
+  const completed = before.pendingChannelIds.filter((id) => !after.pendingChannelIds.includes(id));
+  return hashStableJson(Object.fromEntries(completed.map((id) => [id, config.channels?.[id]])));
+}
 
 function collectPins(before: OpenClawConfig, after: OpenClawConfig): WebhookListenerPin[] {
   const pins: WebhookListenerPin[] = [];
@@ -58,15 +71,19 @@ function collectPins(before: OpenClawConfig, after: OpenClawConfig): WebhookList
   return pins;
 }
 
-/** Doctor and boot admission share this one-shot config writer; runtime reads only explicit pins. */
-export async function migrateImplicitWebhookListeners(
+async function runWebhookListenerMigration(
   params: {
     snapshot?: ConfigFileSnapshot;
     env?: NodeJS.ProcessEnv;
     trigger?: "doctor" | "gateway-startup";
+    config?: OpenClawConfig;
+    manifestRegistry?: PluginManifestRegistry;
+    publishConfig?: (config: OpenClawConfig) => Promise<void>;
+    assertCurrent?: () => void;
   } = {},
 ): Promise<MigrationResult> {
   const env = params.env ?? process.env;
+  const assertCurrent = () => params.assertCurrent?.();
   const configPath = params.snapshot?.path ?? resolveConfigPath(env);
   const key = webhookListenerMigrationKey(configPath);
   const readReceipt = () =>
@@ -86,12 +103,14 @@ export async function migrateImplicitWebhookListeners(
   ) {
     return unchanged();
   }
-  const prepareReceipt = () =>
-    runOpenClawStateWriteTransaction(
+  const prepareReceipt = () => {
+    assertCurrent();
+    return runOpenClawStateWriteTransaction(
       ({ db }) => prepareWebhookListenerMigrationInDatabase(db, env, configPath),
       { env },
       { operationLabel: "doctor.webhook-listeners.prepare" },
     );
+  };
   const readOnly = resolveIsConfigReadOnly(env);
   const migrate = async (): Promise<MigrationResult> => {
     let receipt = readReceipt();
@@ -99,9 +118,13 @@ export async function migrateImplicitWebhookListeners(
       // Compatible package rollback retains SQLite but restores the old config bytes.
       receipt = {
         state: "prepared",
-        phase: receipt.updateRun?.rollbackPhase ?? receipt.phase,
+        ...(receipt.updateRun?.rollbackProgress ?? {
+          pendingChannelIds: receipt.pendingChannelIds,
+          ambientTeamsDeferred: receipt.ambientTeamsDeferred,
+        }),
         existingInstall: receipt.existingInstall,
       };
+      assertCurrent();
       writeConfigMachineState(key, receipt, { env });
     }
     if (receipt?.state === "completed") {
@@ -117,26 +140,37 @@ export async function migrateImplicitWebhookListeners(
     const associateUpdate = async () => {
       const { resolveDoctorUpdateRun } = await import("../../../infra/update-doctor-run.js");
       const updateRun = resolveDoctorUpdateRun(env);
-      // One update can finish both phases; its rollback still restores the pre-migration config.
+      // An update can finish multiple channels; rollback restores its original pending set.
       if (updateRun && prepared.updateRun?.id !== updateRun.runId) {
         prepared = {
           ...prepared,
-          updateRun: { id: updateRun.runId, rollbackPhase: prepared.phase },
+          updateRun: {
+            id: updateRun.runId,
+            rollbackProgress: {
+              pendingChannelIds: prepared.pendingChannelIds,
+              ambientTeamsDeferred: prepared.ambientTeamsDeferred,
+            },
+          },
         };
       }
     };
-    const complete = (nextPhase: "ambient-teams" | undefined) => {
+    const complete = async (progress: WebhookListenerMigrationProgress, publish = true) => {
+      assertCurrent();
       if (readOnly) {
         assertBaseSnapshotStillCurrent(snapshot, configPath, fs, {
           hashes: writeOptions.includeFileHashesForWrite ?? {},
           targets: writeOptions.includeFileTargetsForWrite ?? {},
         });
       }
+      if (publish) {
+        await params.publishConfig?.(publicationConfig);
+      }
+      assertCurrent();
       writeConfigMachineState(
         key,
         {
-          state: nextPhase ? "prepared" : "completed",
-          phase: nextPhase ?? prepared.phase,
+          state: progress.pendingChannelIds.length ? "prepared" : "completed",
+          ...progress,
           existingInstall: prepared.existingInstall,
           ...(prepared.updateRun ? { updateRun: prepared.updateRun } : {}),
         } satisfies MigrationReceipt,
@@ -145,22 +179,36 @@ export async function migrateImplicitWebhookListeners(
     };
     const io = createConfigIO({ configPath, env, observe: false });
     const { snapshot, writeOptions } = await io.readConfigFileSnapshotForWrite({ observe: false });
-    if (!snapshot.valid) {
+    if (!snapshot.valid && !params.config) {
       return unchanged();
     }
+    let publicationConfig = params.config ?? snapshot.sourceConfig;
     const sourceHash = resolveConfigSnapshotHash(snapshot) ?? hashConfigRaw(snapshot.raw);
+    if (
+      params.config &&
+      params.snapshot &&
+      sourceHash !==
+        (resolveConfigSnapshotHash(params.snapshot) ?? hashConfigRaw(params.snapshot.raw))
+    ) {
+      throw new Error("Config changed before plugin webhook listener migration publication.");
+    }
     if (prepared.sourceHash !== undefined && prepared.sourceHash !== sourceHash) {
       if (
-        prepared.pins?.length &&
-        prepared.pins.every((pin) => {
-          const value = getConfigValueAtPath(snapshot.sourceConfig, pin.path);
-          return pin.value === true
-            ? typeof value === "boolean"
-            : value === false || typeof asNullableRecord(value)?.port === "number";
-        })
+        (prepared.completionConfigHash !== undefined &&
+          prepared.nextProgress !== undefined &&
+          prepared.completionConfigHash ===
+            completedChannelConfigHash(snapshot.sourceConfig, prepared, prepared.nextProgress)) ||
+        (prepared.pins?.length &&
+          prepared.pins.every((pin) => {
+            const value = getConfigValueAtPath(snapshot.sourceConfig, pin.path);
+            return pin.value === true
+              ? typeof value === "boolean"
+              : value === false || typeof asNullableRecord(value)?.port === "number";
+          }))
       ) {
-        complete(prepared.nextPhase);
-        return prepared.nextPhase ? await migrate() : unchanged();
+        const progress = prepared.nextProgress ?? prepared;
+        await complete(progress, false);
+        return progress.pendingChannelIds.length ? await migrate() : unchanged();
       }
       return {
         ...unchanged(),
@@ -176,18 +224,21 @@ export async function migrateImplicitWebhookListeners(
         ],
       };
     }
-    let migrationInput = snapshot.sourceConfig;
+    let migrationInput = publicationConfig;
+    const pending = new Set(prepared.pendingChannelIds);
     if (
-      prepared.phase === "ambient-teams" &&
+      prepared.ambientTeamsDeferred &&
       prepared.sourceHash === undefined &&
-      Object.hasOwn(migrationInput.channels ?? {}, "msteams")
+      Object.hasOwn(snapshot.sourceConfig.channels ?? {}, "msteams")
     ) {
       // This source entry was authored after the initial migration inspected the installed channels.
-      await associateUpdate();
-      complete(undefined);
-      return unchanged();
+      pending.delete("msteams");
     }
-    if (prepared.existingInstall && !Object.hasOwn(migrationInput.channels ?? {}, "msteams")) {
+    if (
+      prepared.existingInstall &&
+      pending.has("msteams") &&
+      !Object.hasOwn(migrationInput.channels ?? {}, "msteams")
+    ) {
       const { applyPluginAutoEnable } = await import("../../../config/plugin-auto-enable.js");
       const activation = applyPluginAutoEnable({
         config: migrationInput,
@@ -202,22 +253,30 @@ export async function migrateImplicitWebhookListeners(
         };
       }
     }
-    const nextPhase =
+    const ambientTeamsDeferred =
       prepared.existingInstall &&
+      pending.has("msteams") &&
       !Object.hasOwn(migrationInput.channels ?? {}, "msteams") &&
-      params.trigger !== "gateway-startup"
-        ? "ambient-teams"
-        : undefined;
+      params.trigger !== "gateway-startup";
     // Doctor cannot see service-only credentials; the first Gateway startup bounds that deferral.
-    if (prepared.phase === "ambient-teams" && nextPhase) {
-      return unchanged();
+    for (const channelId of pending) {
+      if (
+        !Object.hasOwn(migrationInput.channels ?? {}, channelId) &&
+        !(channelId === "msteams" && ambientTeamsDeferred)
+      ) {
+        pending.delete(channelId);
+      }
     }
-    const configured = (prepared.phase === "ambient-teams" ? ["msteams"] : CHANNEL_IDS).filter(
-      (id) => Object.hasOwn(migrationInput.channels ?? {}, id),
+    const configured = [...pending].filter((id) =>
+      Object.hasOwn(migrationInput.channels ?? {}, id),
     );
+    const progress = (): WebhookListenerMigrationProgress => ({
+      pendingChannelIds: [...pending],
+      ...(ambientTeamsDeferred ? { ambientTeamsDeferred: true } : {}),
+    });
     if (!configured.length) {
       await associateUpdate();
-      complete(nextPhase);
+      await complete(progress());
       return unchanged();
     }
     const [{ withImplicitLegacyWebhookMigration }, { applyPluginDoctorCompatibilityMigrations }] =
@@ -234,6 +293,7 @@ export async function migrateImplicitWebhookListeners(
           config: migrationInput,
           env,
           pluginIds: [...configured],
+          manifestRegistry: params.manifestRegistry,
         }),
       (channelId) => inspected.add(channelId),
       (channelId) => blocked.add(channelId),
@@ -242,13 +302,14 @@ export async function migrateImplicitWebhookListeners(
     const teams = migrated.config.channels?.msteams;
     const needsTeamsActivation =
       prepared.existingInstall &&
-      prepared.phase === "all" &&
+      configured.includes("msteams") &&
+      !prepared.ambientTeamsDeferred &&
       previousTeams !== undefined &&
-      Object.keys(previousTeams).some((key) => key !== "enabled") &&
+      Object.keys(previousTeams).some((field) => field !== "enabled") &&
       teams !== undefined &&
       teams.enabled === undefined &&
       Object.hasOwn(teams, "legacyWebhook") &&
-      Object.keys(teams).every((key) => key === "enabled" || key === "legacyWebhook");
+      Object.keys(teams).every((field) => field === "enabled" || field === "legacyWebhook");
     const teamsListener = teams?.legacyWebhook;
     if (teamsListener === false || (teamsListener && typeof teamsListener.port === "number")) {
       // Explicit canonical settings do not depend on the installed plugin's implicit-default hook.
@@ -265,17 +326,19 @@ export async function migrateImplicitWebhookListeners(
     }
     const pins = collectPins(snapshot.sourceConfig, migrated.config);
     const missing = configured.filter((id) => !inspected.has(id));
-    if (missing.length || migrated.warnings?.length || blocked.size) {
+    const warnings = missing.length
+      ? [
+          `Webhook listener migration is pending for ${missing.join(", ")}. Update or repair those plugins, then run openclaw doctor --fix; their listener settings were preserved.`,
+        ]
+      : [];
+    if (migrated.warnings?.length || blocked.size) {
       return {
         ...unchanged(),
+        inspectionFailed: true,
         ...(pins.length || blocked.size ? { needsMigration: true } : {}),
         warnings: [
           ...(migrated.warnings ?? []),
-          ...(missing.length
-            ? [
-                `Webhook listener migration is pending for ${missing.join(", ")}. Update or repair those plugins, then run openclaw doctor --fix; their listener settings were preserved.`,
-              ]
-            : []),
+          ...warnings,
           ...(pins.length
             ? [
                 `Webhook listeners require these explicit settings before startup: ${pins
@@ -288,6 +351,12 @@ export async function migrateImplicitWebhookListeners(
         ],
       };
     }
+    for (const channelId of configured) {
+      if (inspected.has(channelId)) {
+        pending.delete(channelId);
+      }
+    }
+    publicationConfig = migrated.config;
     if (readOnly) {
       if (pins.length) {
         return {
@@ -303,12 +372,33 @@ export async function migrateImplicitWebhookListeners(
         };
       }
       await associateUpdate();
-      complete(nextPhase);
-      return unchanged();
+      await complete(progress());
+      return { ...unchanged(), warnings };
     }
     await associateUpdate();
-    if (migrated.changes.length) {
-      writeConfigMachineState(key, { ...prepared, sourceHash, pins, nextPhase }, { env });
+    if (migrated.changes.length || params.publishConfig) {
+      assertCurrent();
+      writeConfigMachineState(
+        key,
+        {
+          ...prepared,
+          sourceHash,
+          pins,
+          nextProgress: progress(),
+          ...(params.publishConfig
+            ? {
+                completionConfigHash: completedChannelConfigHash(
+                  publicationConfig,
+                  prepared,
+                  progress(),
+                ),
+              }
+            : {}),
+        },
+        { env },
+      );
+    }
+    if (migrated.changes.length && !params.publishConfig) {
       await transformConfigFile({
         base: "source",
         baseHash: sourceHash,
@@ -320,13 +410,59 @@ export async function migrateImplicitWebhookListeners(
           expectedConfigPath: configPath,
           observe: false,
           skipRuntimeSnapshotRefresh: true,
+          assertConfigPathForWrite: () => {
+            writeOptions.assertConfigPathForWrite?.();
+            assertCurrent();
+          },
         },
         transform: () => ({ nextConfig: migrated.config }),
       });
     }
     // Keep the config lock through receipt publication so an operator removal cannot interleave.
-    complete(nextPhase);
-    return { changed: migrated.changes.length > 0, changes: migrated.changes, warnings: [] };
+    await complete(progress());
+    return { changed: migrated.changes.length > 0, changes: migrated.changes, warnings };
   };
   return readOnly ? await migrate() : await withConfigWriteLock(configPath, migrate, env);
+}
+
+/** Doctor and boot admission share this one-shot writer; runtime consumes explicit endpoints. */
+export async function migrateImplicitWebhookListeners(
+  params: {
+    snapshot?: ConfigFileSnapshot;
+    env?: NodeJS.ProcessEnv;
+    trigger?: "doctor" | "gateway-startup";
+  } = {},
+): Promise<MigrationResult> {
+  return await runWebhookListenerMigration(params);
+}
+
+/** Install publication owns the config backup and must finish before a channel's receipt. */
+export async function publishImplicitWebhookListenerMigration<T>(
+  params: {
+    config: OpenClawConfig;
+    snapshot: ConfigFileSnapshot;
+    manifestRegistry: PluginManifestRegistry;
+    pluginIds: readonly string[];
+    assertCurrent: () => void;
+  },
+  publish: (config: OpenClawConfig) => Promise<T>,
+): Promise<T> {
+  params.assertCurrent();
+  if (!params.pluginIds.some((id) => CHANNEL_IDS.some((channelId) => channelId === id))) {
+    return await publish(params.config);
+  }
+  let publication: Promise<T> | undefined;
+  const migration = await runWebhookListenerMigration({
+    ...params,
+    publishConfig: async (config) => {
+      params.assertCurrent();
+      publication = publish(config);
+      await publication;
+    },
+  });
+  if (migration.needsMigration || migration.inspectionFailed) {
+    throw new Error(migration.warnings.join("\n"));
+  }
+  params.assertCurrent();
+  return await (publication ?? publish(params.config));
 }

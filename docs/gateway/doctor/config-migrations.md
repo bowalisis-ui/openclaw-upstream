@@ -103,6 +103,10 @@ and backs up the config through the normal write flow, then records completion
 in canonical state. Fresh installations record completion without pins. Removing
 a pin later is permanent: subsequent Doctor runs, restarts, and updates do not
 recreate it. Account pins preserve the accounts present during migration.
+Completion is tracked per channel, so a plugin with an older Doctor contract can
+remain pending while other channels finish. Replacing that plugin runs the same
+migration through the installer's backed-up config publication before its new
+runtime starts. Completed channels are not pinned again during later plugin updates.
 For a read-only external config source, add any required pins in that source
 before upgrading; startup refuses the unmigrated endpoints instead of silently
 dropping them. A fresh read-only installation needs no pins.

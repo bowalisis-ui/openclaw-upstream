@@ -403,8 +403,9 @@ async function persistPluginInstallOwned(
               })),
           )
         : undefined;
-      const commit = () =>
-        tracePluginLifecyclePhaseAsync(
+      const commit = (publishedConfig: OpenClawConfig) => {
+        next = publishedConfig;
+        return tracePluginLifecyclePhaseAsync(
           "config mutation",
           () =>
             commitPluginInstallRecordsWithConfig({
@@ -431,7 +432,8 @@ async function persistPluginInstallOwned(
             }),
           { command: "install" },
         );
-      const receipt = migration ? await migration.publish(next, commit) : await commit();
+      };
+      const receipt = migration ? await migration.publish(next, commit) : await commit(next);
       // Publish the durable install before activation can fail; keep running metadata unchanged.
       committed = true;
       params.deferRuntime?.record(

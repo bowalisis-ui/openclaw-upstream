@@ -66,6 +66,10 @@ describe("Feishu webhook route configuration", () => {
         "shutdown-response",
         "/hook-shutdown-response",
       );
+      if (ending === "finish") {
+        account.config.legacyWebhook = { port: 3000, host: "127.0.0.1" };
+        legacyListener.value = account.config.legacyWebhook;
+      }
       const abort = new AbortController();
       const invoked = createDeferred<void>();
       const releaseDispatch = createDeferred<void>();
@@ -109,6 +113,11 @@ describe("Feishu webhook route configuration", () => {
       );
       try {
         await invoked.promise;
+        expect(
+          getActivePluginRegistry()?.httpRoutes.find(
+            (route) => route.path === account.config.webhookPath,
+          )?.legacyListeners ?? [],
+        ).toEqual(ending === "finish" ? [account.config.legacyWebhook] : []);
         vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
         abort.abort();
         await vi.advanceTimersByTimeAsync(0);

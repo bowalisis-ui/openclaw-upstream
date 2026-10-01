@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { createConfigIO } from "../../../config/io.factory.js";
+import { resolveConfigWidePluginMetadataSnapshot } from "../../../config/io.plugin-metadata.js";
 import * as configWrite from "../../../config/io.write.js";
 import { transformConfigFile } from "../../../config/mutate.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
@@ -18,7 +20,10 @@ import {
   withOpenClawTestState,
   type OpenClawTestState,
 } from "../../../test-utils/openclaw-test-state.js";
-import { migrateImplicitWebhookListeners } from "./webhook-listener-migration.js";
+import {
+  migrateImplicitWebhookListeners,
+  publishImplicitWebhookListenerMigration,
+} from "./webhook-listener-migration.js";
 
 const config: OpenClawConfig = {
   channels: {
@@ -93,6 +98,58 @@ async function readPersisted(state: OpenClawTestState): Promise<OpenClawConfig> 
 }
 
 describe("one-shot webhook listener migration", () => {
+  it("recovers a committed zero-pin publication without treating writer metadata as an operator edit", async () => {
+    await withMigrationState("webhook-zero-pin-publication", async (state) => {
+      const authored: OpenClawConfig = {
+        ...config,
+        channels: {
+          ...config.channels,
+          feishu: { ...config.channels?.feishu, legacyWebhook: false },
+        },
+      };
+      await state.writeConfig(authored);
+      recordPriorBoot(state);
+      const { snapshot } = await createConfigIO({
+        configPath: state.configPath,
+        env: state.env,
+      }).readConfigFileSnapshotForWrite();
+      const metadata = resolveConfigWidePluginMetadataSnapshot({ config: snapshot.sourceConfig });
+      const failure = new Error("synthetic failure after config commit");
+      await expect(
+        publishImplicitWebhookListenerMigration(
+          {
+            config: snapshot.sourceConfig,
+            snapshot,
+            manifestRegistry: metadata.manifestRegistry,
+            pluginIds: ["feishu"],
+            assertCurrent: () => {},
+          },
+          async (nextConfig) => {
+            await transformConfigFile({
+              base: "source",
+              transform: () => ({ nextConfig }),
+            });
+            throw failure;
+          },
+        ),
+      ).rejects.toBe(failure);
+      expect((await readPersisted(state)).meta?.lastTouchedVersion).toEqual(expect.any(String));
+      expect((await migrateImplicitWebhookListeners({ env: state.env })).warnings).toEqual([]);
+      await transformConfigFile({
+        base: "source",
+        transform: (current) => {
+          const nextConfig = structuredClone(current);
+          delete nextConfig.channels?.feishu?.legacyWebhook;
+          return { nextConfig };
+        },
+      });
+      await migrateImplicitWebhookListeners({ env: state.env });
+      expect((await readPersisted(state)).channels?.feishu?.legacyWebhook).toBeUndefined();
+      expect(
+        (await readPersisted(state)).channels?.feishu?.accounts?.default?.legacyWebhook,
+      ).toBeUndefined();
+    });
+  });
   it("backs up and pins prior listeners through the loaded plugin, then respects removal", async () => {
     await withMigrationState("webhook-existing", async (state) => {
       await state.writeConfig(config);
@@ -112,7 +169,11 @@ describe("one-shot webhook listener migration", () => {
         port: 3000,
       });
       expect(await fs.readFile(`${state.configPath}.bak`, "utf8")).toBe(original);
-      expect(readReceipt(state)).toMatchObject({ state: "prepared", phase: "ambient-teams" });
+      expect(readReceipt(state)).toMatchObject({
+        state: "prepared",
+        pendingChannelIds: ["msteams"],
+        ambientTeamsDeferred: true,
+      });
 
       await transformConfigFile({
         base: "source",
@@ -221,7 +282,11 @@ describe("one-shot webhook listener migration", () => {
           },
         },
       });
-      expect(readReceipt(state)).toMatchObject({ state: "prepared", phase: "ambient-teams" });
+      expect(readReceipt(state)).toMatchObject({
+        state: "prepared",
+        pendingChannelIds: ["msteams"],
+        ambientTeamsDeferred: true,
+      });
     });
   });
 
@@ -426,7 +491,7 @@ describe("one-shot webhook listener migration", () => {
             await migrateImplicitWebhookListeners({ env: configuredEnv });
             expect((await readPersisted(state)).channels?.msteams).toEqual({ enabled: true });
           });
-          expect(readReceipt(state)).toMatchObject({ state: "completed", phase: "ambient-teams" });
+          expect(readReceipt(state)).toMatchObject({ state: "completed", pendingChannelIds: [] });
         }),
       );
     },
@@ -442,7 +507,7 @@ describe("one-shot webhook listener migration", () => {
 
       expect((await migrateImplicitWebhookListeners({ env: configuredEnv })).changed).toBe(false);
       expect((await readPersisted(state)).channels?.msteams).toEqual({ enabled: false });
-      expect(readReceipt(state)).toMatchObject({ state: "completed", phase: "ambient-teams" });
+      expect(readReceipt(state)).toMatchObject({ state: "completed", pendingChannelIds: [] });
 
       await state.writeConfig({ channels: { msteams: { enabled: true } } });
       await migrateImplicitWebhookListeners({ env: configuredEnv });
@@ -483,7 +548,7 @@ describe("one-shot webhook listener migration", () => {
           'export default { id: "msteams", register() {} };\n',
         );
         await fs.writeFile(
-          path.join(pluginDir, "config-doctor-api.ts"),
+          path.join(pluginDir, "doctor-contract-api.ts"),
           `import { createLegacyWebhookListenerDoctorContract } from "openclaw/plugin-sdk/runtime-doctor-migrations";
 export const { legacyConfigRules, normalizeCompatibilityConfig } = createLegacyWebhookListenerDoctorContract({
   channelKey: "msteams", defaultPort: 3978, webhookKey: "webhook", portKey: "port", hostKey: null,
@@ -516,11 +581,51 @@ export const { legacyConfigRules, normalizeCompatibilityConfig } = createLegacyW
         });
         expect(await fs.readFile(state.configPath, "utf8")).toBe(original);
         if (legacyWebhook === undefined) {
-          await expect(loadGatewayStartupConfigSnapshot(startupParams)).rejects.toThrow(
-            requiredSetting,
+          const startup = await loadGatewayStartupConfigSnapshot(startupParams);
+          expect(
+            startup.snapshot.sourceConfig.channels?.feishu?.accounts?.default?.legacyWebhook,
+          ).toEqual({ port: 3000, host: "127.0.0.1" });
+          expect(startup.snapshot.sourceConfig.channels?.msteams).toEqual({ enabled: true });
+          expect(readReceipt(state)).toMatchObject({
+            state: "prepared",
+            pendingChannelIds: ["msteams"],
+          });
+          await transformConfigFile({
+            base: "source",
+            transform: (current) => {
+              const nextConfig = structuredClone(current);
+              delete nextConfig.channels?.feishu?.accounts?.default?.legacyWebhook;
+              return { nextConfig };
+            },
+          });
+          await migrateImplicitWebhookListeners({ env: state.env });
+          expect(
+            (await readPersisted(state)).channels?.feishu?.accounts?.default?.legacyWebhook,
+          ).toBeUndefined();
+          const upgradedPlugin = state.path("msteams-9.8");
+          await fs.cp(pluginDir, upgradedPlugin, { recursive: true });
+          const contractPath = path.join(upgradedPlugin, "doctor-contract-api.ts");
+          await fs.writeFile(
+            contractPath,
+            (await fs.readFile(contractPath, "utf8")).replace(
+              'channelKey: "msteams",',
+              'channelKey: "msteams", implicitAccountIds: () => [undefined],',
+            ),
           );
-          expect(await fs.readFile(state.configPath, "utf8")).toBe(original);
-          expect(readReceipt(state)).toMatchObject({ state: "prepared", phase: "all" });
+          await transformConfigFile({
+            base: "source",
+            transform: (current) => ({
+              nextConfig: { ...current, plugins: { load: { paths: [upgradedPlugin] } } },
+            }),
+          });
+          await migrateImplicitWebhookListeners({ env: state.env });
+          expect((await readPersisted(state)).channels?.msteams?.legacyWebhook).toEqual({
+            port: 3978,
+          });
+          expect(
+            (await readPersisted(state)).channels?.feishu?.accounts?.default?.legacyWebhook,
+          ).toBeUndefined();
+          expect(readReceipt(state)).toMatchObject({ state: "completed", pendingChannelIds: [] });
           return;
         }
         const startup = await loadGatewayStartupConfigSnapshot(startupParams);
@@ -545,7 +650,7 @@ export const { legacyConfigRules, normalizeCompatibilityConfig } = createLegacyW
       await migrateImplicitWebhookListeners({ env: state.env });
       expect(readReceipt(state)).toEqual({
         state: "prepared",
-        phase: "all",
+        pendingChannelIds: ["feishu", "msteams", "nextcloud-talk", "telegram"],
         existingInstall: false,
       });
 
@@ -605,14 +710,22 @@ export const { legacyConfigRules, normalizeCompatibilityConfig } = createLegacyW
             },
           });
           await migrateImplicitWebhookListeners({ env: state.env });
-          expect(readReceipt(state)).toMatchObject({ state: "prepared", phase: "ambient-teams" });
+          expect(readReceipt(state)).toMatchObject({
+            state: "prepared",
+            pendingChannelIds: ["msteams"],
+            ambientTeamsDeferred: true,
+          });
           expect(
             (await readPersisted(state)).channels?.feishu?.accounts?.default?.legacyWebhook,
           ).toBe(false);
           return;
         }
         await migrateImplicitWebhookListeners({ env: state.env });
-        expect(readReceipt(state)).toMatchObject({ state: "prepared", phase: "ambient-teams" });
+        expect(readReceipt(state)).toMatchObject({
+          state: "prepared",
+          pendingChannelIds: ["msteams"],
+          ambientTeamsDeferred: true,
+        });
         expect(
           (await readPersisted(state)).channels?.feishu?.accounts?.default?.legacyWebhook,
         ).toEqual({
@@ -623,7 +736,7 @@ export const { legacyConfigRules, normalizeCompatibilityConfig } = createLegacyW
     },
   );
 
-  it("reopens only the phase changed by a rolled-back update", async () => {
+  it("reopens only the channels changed by a rolled-back update", async () => {
     await withMigrationState("webhook-update-rollback", async (state) => {
       await state.writeConfig(config);
       const original = await fs.readFile(state.configPath, "utf8");
@@ -723,7 +836,11 @@ export const { legacyConfigRules, normalizeCompatibilityConfig } = createLegacyW
         port: 3000,
       });
       expect(await fs.readFile(`${fragmentPath}.bak`, "utf8")).toBe(fragment);
-      expect(readReceipt(state)).toMatchObject({ state: "prepared", phase: "ambient-teams" });
+      expect(readReceipt(state)).toMatchObject({
+        state: "prepared",
+        pendingChannelIds: ["msteams"],
+        ambientTeamsDeferred: true,
+      });
     });
   });
 
