@@ -890,7 +890,7 @@ export function buildGatewayCronService(params: {
   });
 
   const exitWatcherHandlers = {
-    legacyDefaultAgentId,
+    getDefaultAgentId: () => cron.getDefaultAgentId(),
     getProcessSupervisor,
     fireOnExit: async (job, exit, controls) => {
       // Reload adopts children before draining the previous scheduler. Its
@@ -966,7 +966,7 @@ export function buildGatewayCronService(params: {
   } satisfies CronExitWatcherHandlers;
   exitWatchers = createCronExitWatchers(exitWatcherHandlers, params.scheduler);
   const streamWatchers = createCronStreamWatchers({
-    legacyDefaultAgentId,
+    getDefaultAgentId: () => cron.getDefaultAgentId(),
     scheduler: params.scheduler,
     getProcessSupervisor,
     updateState: async (jobId, patch, streamScheduleKey, streamSourceIdentity) => {
