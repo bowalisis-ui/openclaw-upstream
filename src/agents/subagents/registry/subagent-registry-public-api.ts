@@ -140,7 +140,7 @@ export function createSubagentRegistryPublicApi(config: {
   }
 
   function recordSwarmStructuredOutput(
-    identity: { runId?: string; childSessionKey?: string },
+    identity: { runId?: string; childSessionKey?: string; childAgentId?: string },
     state: SwarmStructuredOutputState,
   ): void {
     const runId = identity.runId?.trim();
@@ -149,8 +149,10 @@ export function createSubagentRegistryPublicApi(config: {
       (runId ? findRunById(runs, runId) : undefined) ??
       (childSessionKey
         ? getLatestSubagentRunByChildSessionKeyFromRuns(
-            getSubagentRunsForChildSession(childSessionKey),
+            getSubagentRunsForChildSession(childSessionKey, identity.childAgentId),
             childSessionKey,
+            undefined,
+            identity.childAgentId,
           )
         : undefined);
     if (!entry?.collect || entry.collectorCompletion) {

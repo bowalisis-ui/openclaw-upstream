@@ -31,6 +31,7 @@ export type SubagentLifecycleOptions = {
   getLatestRunForChildSession(
     childSessionKey: string,
     matches?: (entry: SubagentRunRecord) => boolean,
+    childAgentId?: string,
   ): SubagentRunRecord | null;
   suppressAnnounceForSteerRestart(entry?: SubagentRunRecord): boolean;
   shouldEmitEndedHookForRun: ContextCleanup["shouldEmitEndedHookForRun"];

@@ -120,12 +120,14 @@ export function isRequesterCompletionCohortCurrent(
   latestForSession: (
     sessionKey: string,
     matches?: (candidate: SubagentRunRecord) => boolean,
+    childAgentId?: string,
   ) => SubagentRunRecord | null,
 ): boolean {
   const taskRunId = entry.taskRunId ?? entry.runId;
   const task = latestForSession(
     entry.childSessionKey,
     (candidate) => (candidate.taskRunId ?? candidate.runId) === taskRunId,
+    entry.childAgentId,
   );
   if (
     entry.killReconciliation?.supersededAt !== undefined ||
@@ -133,7 +135,7 @@ export function isRequesterCompletionCohortCurrent(
   ) {
     return false;
   }
-  const latest = latestForSession(entry.childSessionKey);
+  const latest = latestForSession(entry.childSessionKey, undefined, entry.childAgentId);
   return (
     !latest ||
     compareSubagentRunGeneration(latest, entry) <= 0 ||

@@ -20,6 +20,7 @@ import {
   updateSwarmCollectorCompletion,
 } from "../swarm/swarm-collector.js";
 import { bindSwarmRunReservation } from "../swarm/swarm-scheduler.js";
+import { matchesSubagentChildSessionOwner } from "./subagent-child-session-owner.js";
 import { SUBAGENT_ENDED_REASON_ERROR } from "./subagent-lifecycle-events.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import {
@@ -38,18 +39,32 @@ import type { RegisterSubagentRunOptions, SubagentRunRecord } from "./subagent-r
 import { latestSubagentRun, nextSubagentRunGeneration } from "./subagent-run-generation.js";
 
 function resolveSwarmWaitOwnerSessionKeys(
-  getRunsForChildSession: (childSessionKey: string) => Iterable<SubagentRunRecord>,
+  getRunsForChildSession: (
+    childSessionKey: string,
+    childAgentId?: string,
+  ) => Iterable<SubagentRunRecord>,
   requesterSessionKey: string,
+  requesterAgentId?: string,
 ): string[] {
   const ownerSessionKeys: string[] = [];
-  const visited = new Set<string>();
+  const visited: Array<{ childSessionKey: string; childAgentId?: string }> = [];
   let currentSessionKey = requesterSessionKey.trim();
-  while (currentSessionKey && !visited.has(currentSessionKey)) {
-    visited.add(currentSessionKey);
+  let currentAgentId = requesterAgentId;
+  while (
+    currentSessionKey &&
+    !visited.some((entry) =>
+      matchesSubagentChildSessionOwner(entry, currentSessionKey, currentAgentId),
+    )
+  ) {
+    visited.push({ childSessionKey: currentSessionKey, childAgentId: currentAgentId });
     ownerSessionKeys.push(currentSessionKey);
-    const latestOwner = latestSubagentRun(getRunsForChildSession(currentSessionKey));
+    const latestOwner = latestSubagentRun(
+      getRunsForChildSession(currentSessionKey, currentAgentId),
+    );
     currentSessionKey =
       latestOwner?.controllerSessionKey?.trim() || latestOwner?.requesterSessionKey.trim() || "";
+    currentAgentId =
+      parseAgentSessionKey(currentSessionKey)?.agentId ?? latestOwner?.requesterAgentId;
   }
   return ownerSessionKeys;
 }
@@ -136,7 +151,11 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
     const queuedContext = queued ? captureOpenClawStateWorkerContext() : undefined;
     const workerContext =
       !queued && options.persistence === "worker" ? captureOpenClawStateWorkerContext() : undefined;
-    const registrationOwnership = subagentRuns.captureRegistrationOwnership(childSessionKey);
+    const registrationOwnership = subagentRuns.captureRegistrationOwnership(
+      childSessionKey,
+      undefined,
+      childAgentId,
+    );
     let workerOwnsRegistration = false;
     const register = (
       completionAuthority?: Awaited<
@@ -161,8 +180,9 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
         }
         registrationOwnership.assertCurrent();
         const generation = nextSubagentRunGeneration(
-          this.options.getRunsForChildSession(childSessionKey),
+          this.options.getRunsForChildSession(childSessionKey, childAgentId),
           childSessionKey,
+          childAgentId,
         );
         const entry = createSubagentRegistrationRecord(registerParams, {
           now,
@@ -175,6 +195,7 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
               ? resolveSwarmWaitOwnerSessionKeys(
                   this.options.getRunsForChildSession,
                   registerParams.swarmRequesterSessionKey,
+                  requesterAgentId,
                 )
               : undefined,
         });

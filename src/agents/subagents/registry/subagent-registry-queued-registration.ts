@@ -67,7 +67,7 @@ export function registerRequiredQueuedSubagent(params: {
   const ownsSession = () =>
     entry.runId === runId &&
     (!manager.runs.has(runId) || exactEntry()) &&
-    !Array.from(manager.getRunsForChildSession(entry.childSessionKey)).some(
+    !Array.from(manager.getRunsForChildSession(entry.childSessionKey, entry.childAgentId)).some(
       (candidate) => candidate !== entry && compareSubagentRunGeneration(candidate, entry) > 0,
     );
   const assertRegistryCurrent = () => {

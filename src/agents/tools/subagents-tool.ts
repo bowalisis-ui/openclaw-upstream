@@ -263,6 +263,7 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
         const childController = resolveSubagentControllerIdentity({
           cfg,
           agentSessionKey: entry.childSessionKey,
+          agentId: entry.childAgentId,
         });
         pending.push({
           owner: childController,
@@ -309,7 +310,11 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
             entry,
             generation: entry.generation,
             createdAt: entry.createdAt,
-            ownership: subagentRuns.captureRegistrationOwnership(entry.childSessionKey, entry),
+            ownership: subagentRuns.captureRegistrationOwnership(
+              entry.childSessionKey,
+              entry,
+              entry.childAgentId,
+            ),
           };
         }
         if (selection) {
@@ -408,7 +413,7 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
             {
               cfg,
               sessionKey: target.childSessionKey,
-              agentId: target.requesterAgentId,
+              agentId: target.childAgentId ?? target.requesterAgentId,
               expectedRunId: target.runId,
               expectedTaskRunId: target.taskRunId ?? target.runId,
               expectedGeneration: target.generation,

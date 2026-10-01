@@ -524,7 +524,12 @@ export function createSubagentRegistryRestorer(config: {
     const ownsSessionEffects = () =>
       isAgentEventLifecycleGenerationCurrent(lifecycleGeneration) &&
       !shouldSuppressSubagentRecoverySessionEffects(entry) &&
-      getLatestSubagentRunByChildSessionKeyFromRuns(runs, entry.childSessionKey) === entry;
+      getLatestSubagentRunByChildSessionKeyFromRuns(
+        runs,
+        entry.childSessionKey,
+        undefined,
+        entry.childAgentId,
+      ) === entry;
     const ownsCleanup = () => ownsClaim() && ownsSessionEffects();
     let sessionOwnershipChanged = false;
     let sessionDeleted = false;

@@ -132,6 +132,7 @@ function stripAndClassifyReply(text: string): string | null {
 
 type SubagentAnnounceFlowParams = {
   childSessionKey: string;
+  childAgentId?: string;
   childRunId: string;
   runTimeoutSeconds?: number;
   requesterSessionKey: string;
@@ -263,7 +264,10 @@ async function runSubagentAnnounceFlowBound(
       if (
         params.completionTarget !== "parent" &&
         requesterDepth >= 1 &&
-        shouldIgnorePostCompletionAnnounceForSession(targetRequesterSessionKey)
+        shouldIgnorePostCompletionAnnounceForSession(
+          targetRequesterSessionKey,
+          targetRequesterAgentId,
+        )
       ) {
         return "delivered";
       }
@@ -361,7 +365,10 @@ async function runSubagentAnnounceFlowBound(
       ? (stripAndClassifyReply(fallbackReply ?? "") ?? undefined)
       : undefined;
 
-    const childRun = getLatestSubagentRunByChildSessionKey(params.childSessionKey);
+    const childRun = getLatestSubagentRunByChildSessionKey(
+      params.childSessionKey,
+      params.childAgentId,
+    );
     if (
       childRun?.runId === params.childRunId &&
       (await prepareChildSessionEffects()) &&
@@ -471,10 +478,13 @@ async function runSubagentAnnounceFlowBound(
 
     let requesterIsSubagent = requesterIsInternalSession();
     if (requesterIsSubagent) {
-      if (!isSubagentSessionRunActive(targetRequesterSessionKey)) {
+      if (!isSubagentSessionRunActive(targetRequesterSessionKey, targetRequesterAgentId)) {
         if (
           params.completionTarget !== "parent" &&
-          shouldIgnorePostCompletionAnnounceForSession(targetRequesterSessionKey)
+          shouldIgnorePostCompletionAnnounceForSession(
+            targetRequesterSessionKey,
+            targetRequesterAgentId,
+          )
         ) {
           return "delivered";
         }
@@ -486,7 +496,10 @@ async function runSubagentAnnounceFlowBound(
             shouldDeleteChildSession = false;
             return "retryable";
           }
-          const fallback = resolveRequesterForChildSession(targetRequesterSessionKey);
+          const fallback = resolveRequesterForChildSession(
+            targetRequesterSessionKey,
+            targetRequesterAgentId,
+          );
           if (!fallback?.requesterSessionKey) {
             shouldDeleteChildSession = false;
             return "retryable";

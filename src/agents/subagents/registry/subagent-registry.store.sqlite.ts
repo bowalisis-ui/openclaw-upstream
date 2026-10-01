@@ -184,6 +184,7 @@ const subagentSessionListPaths = [
   "delivery.handoffLeaseId",
   "delivery.handoffLeasedAt",
   "delivery.handoffInjectedAt",
+  "childAgentId",
   "requesterAgentId",
   "sessionStartedAt",
   "accumulatedRuntimeMs",

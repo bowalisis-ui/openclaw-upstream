@@ -313,7 +313,7 @@ async function mutateCompletion(
       for (const snapshot of previous.values()) {
         if (
           retiredCancellationEndedAt(snapshot, Date.now()) !== undefined &&
-          [...getSubagentRunsForChildSession(snapshot.childSessionKey)].some(
+          [...getSubagentRunsForChildSession(snapshot.childSessionKey, snapshot.childAgentId)].some(
             (candidate) => compareSubagentRunGeneration(candidate, snapshot) > 0,
           )
         ) {

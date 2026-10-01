@@ -85,8 +85,9 @@ export class SubagentRecoveryManager extends SubagentWaitManager {
 
     const now = Date.now();
     const generation = nextSubagentRunGeneration(
-      [...this.options.getRunsForChildSession(source.childSessionKey), source],
+      [...this.options.getRunsForChildSession(source.childSessionKey, source.childAgentId), source],
       source.childSessionKey,
+      source.childAgentId,
     );
     const cfg = this.options.getRuntimeConfig();
     const spawnMode = source.spawnMode === "session" ? "session" : "run";

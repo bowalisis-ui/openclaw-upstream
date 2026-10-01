@@ -139,7 +139,10 @@ export function preserveSubagentRunForRestart(params: {
 
 export type SubagentManagerOptions = {
   runs: Map<string, SubagentRunRecord>;
-  getRunsForChildSession: (childSessionKey: string) => Iterable<SubagentRunRecord>;
+  getRunsForChildSession: (
+    childSessionKey: string,
+    childAgentId?: string,
+  ) => Iterable<SubagentRunRecord>;
   resumedRuns: Set<string>;
   persist(...runIds: string[]): void;
   persistOrThrow(...runIds: string[]): void;
@@ -173,7 +176,10 @@ export class SubagentWaitManager {
 
   protected markOlderKillReconciliationsSuperseded(next: SubagentRunRecord) {
     const snapshots = new Map<SubagentRunRecord, SubagentRunRecord["killReconciliation"]>();
-    for (const candidate of this.options.getRunsForChildSession(next.childSessionKey)) {
+    for (const candidate of this.options.getRunsForChildSession(
+      next.childSessionKey,
+      next.childAgentId,
+    )) {
       if (
         candidate.runId === next.runId ||
         compareSubagentRunGeneration(candidate, next) >= 0 ||
@@ -194,9 +200,9 @@ export class SubagentWaitManager {
     return (
       this.options.runs.get(entry.runId) === entry &&
       entry.killReconciliation?.supersededAt === undefined &&
-      !Array.from(this.options.getRunsForChildSession(entry.childSessionKey)).some(
-        (candidate) => compareSubagentRunGeneration(candidate, entry) > 0,
-      )
+      !Array.from(
+        this.options.getRunsForChildSession(entry.childSessionKey, entry.childAgentId),
+      ).some((candidate) => compareSubagentRunGeneration(candidate, entry) > 0)
     );
   }
 

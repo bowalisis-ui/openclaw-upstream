@@ -285,8 +285,8 @@ export function commitRequesterInitialTransfer(
       params.entries.some(
         (entry) =>
           context.pendingRequesterSettleWakeCommits.get(entry) !== pending ||
-          !isRequesterCompletionCohortCurrent(entry, params.entries, (key, matches) =>
-            context.options.getLatestRunForChildSession(key, matches),
+          !isRequesterCompletionCohortCurrent(entry, params.entries, (key, matches, childAgentId) =>
+            context.options.getLatestRunForChildSession(key, matches, childAgentId),
           ),
       )
     ) {
@@ -533,8 +533,8 @@ export function commitRequesterWake(
       if (
         !owner ||
         !isDeepStrictEqual(captureRequesterSettleRunIdentity(entry), owner.identity) ||
-        !isRequesterCompletionCohortCurrent(entry, entries, (key, matches) =>
-          context.options.getLatestRunForChildSession(key, matches),
+        !isRequesterCompletionCohortCurrent(entry, entries, (key, matches, childAgentId) =>
+          context.options.getLatestRunForChildSession(key, matches, childAgentId),
         )
       ) {
         return false;

@@ -60,7 +60,7 @@ export async function admitCorrelatedSubagentSessionDelivery(params: {
     const sourceIsCurrent = () =>
       subagentRuns.get(runId) === current &&
       isDeepStrictEqual(current, expected) &&
-      ![...getSubagentRunsForChildSession(expected.childSessionKey)].some(
+      ![...getSubagentRunsForChildSession(expected.childSessionKey, expected.childAgentId)].some(
         (candidate) => compareSubagentRunGeneration(candidate, expected) > 0,
       );
     return withSubagentRegistryWriteAuthority(
