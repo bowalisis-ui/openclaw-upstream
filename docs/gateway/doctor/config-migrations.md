@@ -30,16 +30,22 @@ untouched so Doctor can report and persist the repair.
 
 ## Retention policy
 
-Doctor uses a six-month migration retention window. The current retirement cutoff
-is `v2026.3.1`: retain a transform whenever any release from that version onward
-can still write its input format. A supported release that preserves a legacy
-format when rewriting existing data also counts as a writer. A format last
-written before the cutoff may be retired only with a clear refusal naming an
-intermediate release to upgrade through before retrying. Retirement must never
-silently discard persisted data.
+OpenClaw supports upgrades from config and state shapes shipped on or after
+July 1, 2026. The publication date controls this cutoff: an older version number
+published later, including an extended-stable release, still counts. Retain a
+transform when a supported release writes or preserves its input shape while
+rewriting state. Older shapes may be retired with a clear intermediate upgrade
+path; retirement must never silently discard persisted data.
 
 Legacy normalization belongs to Doctor and migration owners, with the existing
 backup and verification flow. Runtime readers consume canonical state.
+
+Device Pair `device-pair-notify.json` is retired. Upgrade through `2026.9.5` and
+run `openclaw doctor --fix` to import subscribers. Verify the imported state
+before updating. If the intermediate release retains the original file for
+rollback or cannot interpret an empty or invalid source, preserve a backup and
+move that file out of the active state directory before retrying. Current Doctor
+refuses the retired source without deleting or rewriting it.
 
 OpenClaw `v2026.9.7` can still write ownerless and mode-less cron jobs, and its
 migration/import writers can preserve null, `deliver`, or mixed-case delivery

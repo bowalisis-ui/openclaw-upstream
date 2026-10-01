@@ -52,6 +52,8 @@ export type {
   OpenClawPluginDefinition,
   OpenClawPluginService,
   OpenClawPluginServiceContext,
+  OpenClawPluginServiceContextV2,
+  OpenClawPluginServiceV2,
   PluginCommandContext,
   PluginCommandResult,
   PluginAgentEventEmitParams,
@@ -69,6 +71,7 @@ export type {
   PluginRunContextGetParams,
   PluginRunContextPatch,
   PluginRuntimeLifecycleRegistration,
+  PluginServiceSchedulerV1,
   PluginSessionActionContext,
   PluginSessionActionRegistration,
   PluginSessionActionResult,
@@ -777,3 +780,8 @@ export function createChannelPluginBase<TResolvedAccount>(
   } as CreatedChannelPluginBase<TResolvedAccount>;
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
+
+export type {
+  ChannelGatewayContextV2,
+  ChannelGatewayAdapterV2,
+} from "../channels/plugins/types.adapters.js";

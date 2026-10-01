@@ -1,6 +1,9 @@
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
-import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
+import {
+  createTestPluginServiceScheduler,
+  createTestPluginApi,
+} from "openclaw/plugin-sdk/plugin-test-api";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEVICE_PAIR_NOTIFY_SUBSCRIBER_NAMESPACE,
@@ -15,7 +18,7 @@ vi.mock("openclaw/plugin-sdk/device-bootstrap", () => ({
   }),
 }));
 
-import { createPairingNotifierService } from "./notify.js";
+import { startPairingNotifier } from "./notify.js";
 
 describe("device-pair notify CAS", () => {
   beforeEach(() => {
@@ -90,13 +93,13 @@ describe("device-pair notify CAS", () => {
       snapshot,
       replace,
       async poll() {
-        const service = createPairingNotifierService(api);
+        const scheduler = createTestPluginServiceScheduler();
         try {
-          await service.start({} as never);
+          startPairingNotifier(api, scheduler);
           await vi.advanceTimersByTimeAsync(10_000);
           await settled.promise;
         } finally {
-          await service.stop?.({} as never);
+          await scheduler.stop();
           if (pollStarted) {
             await settled.promise;
             await vi.advanceTimersByTimeAsync(0);

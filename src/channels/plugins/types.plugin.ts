@@ -12,6 +12,7 @@ import type {
   ChannelResolverAdapter,
   ChannelElevatedAdapter,
   ChannelGatewayAdapter,
+  ChannelGatewayAdapterV2,
   ChannelGroupAdapter,
   ChannelHeartbeatAdapter,
   ChannelLifecycleAdapter,
@@ -76,7 +77,7 @@ export type ChannelPlugin<ResolvedAccount = any, Probe = unknown, Audit = unknow
   status?: ChannelStatusAdapter<ResolvedAccount, Probe, Audit>;
   gatewayMethods?: string[];
   gatewayMethodDescriptors?: ChannelGatewayMethodDescriptor[];
-  gateway?: ChannelGatewayAdapter<ResolvedAccount>;
+  gateway?: ChannelGatewayAdapter<ResolvedAccount> | ChannelGatewayAdapterV2<ResolvedAccount>;
   // Login/logout and channel-auth only. Approval auth lives on approvalCapability.
   auth?: ChannelAuthAdapter;
   approvalCapability?: ChannelApprovalCapability;

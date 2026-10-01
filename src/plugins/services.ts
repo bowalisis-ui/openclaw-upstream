@@ -1,25 +1,14 @@
 import { STATE_DIR } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { runOutsideOperatorToolGatewayAuthority } from "../gateway/operator-tool-gateway-authority.js";
-import { getGatewayProcessInstanceId } from "../gateway/process-instance.js";
 import { createScheduledGatewayRunner } from "../gateway/scheduled-run-gateway-context.js";
 import type { GatewayPluginEventBroadcastFn } from "../gateway/server-broadcast-types.js";
-import {
-  emitTrustedDiagnosticEventWithPrivateData,
-  onTrustedInternalDiagnosticEvent,
-  waitForDiagnosticEventsDrained,
-} from "../infra/diagnostic-events.js";
-import { markTrustedOtelDiagnosticListener } from "../infra/diagnostic-otel-listener-provenance.js";
-import { registerDiagnosticTracePropagationBridge } from "../infra/diagnostic-trace-propagation.js";
+import { waitForDiagnosticEventsDrained } from "../infra/diagnostic-events.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import {
-  recordDiagnosticExporterHealth,
-  type DiagnosticExporterHealthUpdate,
-} from "../logging/diagnostic-stability.js";
+import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
-import { resolveRuntimeServiceBuildId } from "../version.js";
 import {
   createPluginRuntimeCapabilityLease,
   type PluginRuntimeCapabilityLease,
@@ -35,10 +24,16 @@ import type { PluginServiceRegistration } from "./registry-types.js";
 import type { PluginRegistry } from "./registry.js";
 import { getGatewayContextResolver } from "./runtime/gateway-request-scope.js";
 import { createPluginServiceCronGetter, type PluginServiceCronHost } from "./service-cron.js";
+import { createPluginServiceDiagnostics } from "./service-diagnostics.js";
 import { createPluginServiceHealthReporter } from "./service-health.js";
 import { createPluginServiceNodeInvoker } from "./service-nodes.js";
+import { createPluginServiceSchedulerRunner } from "./service-scheduler-context.js";
+import {
+  createPluginServiceScheduler,
+  type PluginServiceSchedulerOwner,
+} from "./service-scheduler.js";
 import { encodeStartupTraceSegment } from "./startup-trace-segment.js";
-import type { OpenClawPluginServiceContext } from "./types.js";
+import type { OpenClawPluginServiceContext, OpenClawPluginServiceContextV2 } from "./types.js";
 
 const log = createSubsystemLogger("plugins");
 export const PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS = 5_000;
@@ -75,12 +70,6 @@ export function getPluginServiceCleanupSettlement(
   return { error, settled };
 }
 
-type TrustedExporterInternalDiagnostics = NonNullable<
-  OpenClawPluginServiceContext["internalDiagnostics"]
-> & {
-  reportExporterHealth: (update: DiagnosticExporterHealthUpdate) => void;
-};
-
 type PluginServiceStopResult = { errors: readonly unknown[] };
 
 export type PluginServicesHandle = {
@@ -111,6 +100,7 @@ type OwnedPluginService = {
   stopNodeInvocations?: () => void;
   health: NonNullable<OpenClawPluginServiceContext["serviceHealth"]>;
   lease: PluginRuntimeCapabilityLease;
+  scheduling: PluginServiceSchedulerOwner;
 };
 
 type PluginServicesOwner = {
@@ -123,6 +113,7 @@ type PluginServicesOwner = {
 const serviceOwners = new WeakMap<PluginServicesHandle, PluginServicesOwner>();
 
 type StartPluginServicesParams = {
+  scheduler: GatewayScheduler;
   registry: PluginRegistry;
   config: OpenClawConfig;
   workspaceDir?: string;
@@ -190,6 +181,7 @@ export function startPluginServices({
 }
 
 async function startPreparedPluginServices({
+  scheduler,
   registry,
   config: initialConfig,
   workspaceDir,
@@ -245,6 +237,7 @@ async function startPreparedPluginServices({
     beforeStop?: Promise<unknown>,
   ) => {
     entry.stopRequested = true;
+    entry.scheduling.scheduler.beginClose();
     entry.stopNodeInvocations?.();
     const recordFailure = (error: unknown) => {
       if (!failures) {
@@ -280,7 +273,17 @@ async function startPreparedPluginServices({
         const stopRegistry = record
           ? getPluginRecordRegistry(entry.registry, record)
           : entry.registry;
-        return withPluginHttpRouteRegistry(stopRegistry, () => entry.stop?.(), entry.lease);
+        const scheduled = entry.scheduling.close();
+        const cleanup = () =>
+          withPluginHttpRouteRegistry(stopRegistry, () => entry.stop?.(), entry.lease);
+        // Cleanup releases transports needed by scheduled callbacks, so invoke it before joining.
+        // The scheduler records callback failures; its join only observes physical settlement.
+        // An idle scope must preserve the hook's raw result for zero-budget deadlines.
+        return scheduled
+          ? Promise.resolve()
+              .then(cleanup)
+              .finally(() => scheduled)
+          : cleanup();
       };
       const cleanup = () => {
         if (!entry.stopping) {
@@ -407,6 +410,7 @@ async function startPreparedPluginServices({
         for (const entry of selected) {
           entry.reloading = reloading;
           entry.stopRequested = true;
+          entry.scheduling.scheduler.beginClose();
           entry.stopNodeInvocations?.();
         }
         const failures: unknown[] = [];
@@ -452,6 +456,7 @@ async function startPreparedPluginServices({
       );
       for (const entry of selected) {
         entry.stopRequested = true;
+        entry.scheduling.scheduler.beginClose();
         entry.stopNodeInvocations?.();
       }
       const strict = options?.strict === true;
@@ -493,6 +498,10 @@ async function startPreparedPluginServices({
     const { health, revoke } = createPluginServiceHealthReporter(entry);
     lease.retain(revoke);
     const runtime = getPluginRegistryRuntime(registry);
+    const scheduling = createPluginServiceScheduler(
+      scheduler,
+      createPluginServiceSchedulerRunner({ registry, record, instance, lease }),
+    );
     const runServiceStart = createScheduledGatewayRunner(
       runtime ? getGatewayContextResolver(runtime) : undefined,
     );
@@ -512,51 +521,12 @@ async function startPreparedPluginServices({
           isStopping: () => ownedService.owner.closed || ownedService.stopRequested,
         })
       : undefined;
-    const isDiagnosticsExporter =
-      entry.pluginId === id && (id === "diagnostics-otel" || id === "diagnostics-prometheus");
-    const isOtelExporter = isDiagnosticsExporter && entry.id === "diagnostics-otel";
-    const grantsInternalDiagnostics =
-      isDiagnosticsExporter &&
-      (entry.origin === "bundled" || entry.trustedOfficialInstall === true);
-    const internalDiagnostics: TrustedExporterInternalDiagnostics | undefined =
-      grantsInternalDiagnostics
-        ? {
-            getRuntimeIdentity: () => {
-              lease.assertActive("runtime diagnostic identity");
-              const buildId = resolveRuntimeServiceBuildId();
-              return {
-                processInstanceId: getGatewayProcessInstanceId(),
-                ...(buildId ? { buildId } : {}),
-              };
-            },
-            emit: (event, privateData) => {
-              lease.assertActive("internal diagnostic emitter");
-              emitTrustedDiagnosticEventWithPrivateData(event, privateData);
-            },
-            onEvent: (listener, filter, options) => {
-              lease.assertActive("internal diagnostic listener");
-              const trustedListener = isOtelExporter
-                ? markTrustedOtelDiagnosticListener(listener)
-                : listener;
-              return lease.retain(
-                onTrustedInternalDiagnosticEvent(trustedListener, filter, options),
-              );
-            },
-            registerTracePropagationBridge: (bridge) => {
-              lease.assertActive("diagnostic trace propagation bridge");
-              return lease.retain(registerDiagnosticTracePropagationBridge(bridge));
-            },
-            reportExporterHealth: (update) => {
-              if (lease.isActive()) {
-                recordDiagnosticExporterHealth(entry.id, update);
-              }
-            },
-          }
-        : undefined;
+    const internalDiagnostics = createPluginServiceDiagnostics(entry, lease);
 
     const scopeTraceName = (name: string) =>
       `${traceName}.${name.split(".").map(encodeStartupTraceSegment).join(".")}`;
-    const serviceContext: OpenClawPluginServiceContext = {
+    const serviceContext: OpenClawPluginServiceContextV2 = {
+      scheduler: scheduling.scheduler,
       config,
       workspaceDir,
       stateDir: STATE_DIR,
@@ -622,6 +592,7 @@ async function startPreparedPluginServices({
         : undefined,
       health,
       lease,
+      scheduling,
     };
     // Retry in place. A new registration is inserted before retained later declarations,
     // so transfer cannot reorder a dependency behind its already-running consumer.

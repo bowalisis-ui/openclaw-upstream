@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { OpenClawPluginService } from "openclaw/plugin-sdk/core";
 import { listDevicePairing } from "openclaw/plugin-sdk/device-bootstrap";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+import type { OpenClawPluginApi, PluginServiceSchedulerV1 } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
@@ -19,10 +18,6 @@ import {
 } from "./notify-state.js";
 
 const NOTIFY_POLL_INTERVAL_MS = 10_000;
-
-// Config reload recreates plugin services before an uncancellable delivery may settle.
-// Keep one module-owned poll so the replacement service cannot race state or delivery.
-let notifyPollInFlight: Promise<void> | null = null;
 
 type PendingPairingRequest = {
   requestId: string;
@@ -348,18 +343,6 @@ async function notifyPendingPairingRequests(params: { api: OpenClawPluginApi }):
   }
 }
 
-async function runNotifyPoll(api: OpenClawPluginApi): Promise<void> {
-  if (notifyPollInFlight) {
-    return;
-  }
-  notifyPollInFlight = notifyPendingPairingRequests({ api });
-  try {
-    await notifyPollInFlight;
-  } finally {
-    notifyPollInFlight = null;
-  }
-}
-
 type NotifyCommandContext = {
   assertOwnerCurrent?: () => void;
   channel: string;
@@ -468,26 +451,18 @@ export async function handleNotifyCommand(params: {
   return { text: "Usage: /pair notify on|off|once|status" };
 }
 
-export function createPairingNotifierService(api: OpenClawPluginApi): OpenClawPluginService {
-  let notifyInterval: ReturnType<typeof setInterval> | null = null;
-
-  return {
-    id: "device-pair-notifier",
-    start: () => {
-      // Pairing notifications are eventual background work. Starting on the
-      // existing interval keeps SQLite pairing scans out of Gateway readiness.
-      notifyInterval = setInterval(() => {
-        runNotifyPoll(api).catch((err: unknown) => {
-          api.logger.warn(`device-pair: notify poll failed: ${formatErrorMessage(err)}`);
-        });
-      }, NOTIFY_POLL_INTERVAL_MS);
-      notifyInterval.unref?.();
-    },
-    stop: async () => {
-      if (notifyInterval) {
-        clearInterval(notifyInterval);
-        notifyInterval = null;
-      }
-    },
-  };
+export function startPairingNotifier(
+  api: OpenClawPluginApi,
+  scheduler: PluginServiceSchedulerV1,
+): void {
+  // Keep the first scan off Gateway readiness; retirement joins delivery and its receipt.
+  scheduler.schedule({
+    id: "notifications",
+    delayMs: NOTIFY_POLL_INTERVAL_MS,
+    everyMs: NOTIFY_POLL_INTERVAL_MS,
+    run: () =>
+      notifyPendingPairingRequests({ api }).catch((err: unknown) => {
+        api.logger.warn(`device-pair: notify poll failed: ${formatErrorMessage(err)}`);
+      }),
+  });
 }
