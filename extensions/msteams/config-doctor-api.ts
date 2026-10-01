@@ -14,6 +14,7 @@ const webhookMigration = createLegacyWebhookListenerDoctorContract({
   webhookKey: "webhook",
   portKey: "port",
   hostKey: null,
+  implicitAccountIds: (cfg) => (cfg.channels?.msteams?.enabled === false ? [] : [undefined]),
 });
 
 const streamingAliasMigration = defineChannelAliasMigration({

@@ -212,7 +212,7 @@ describe("Feishu webhook route configuration", () => {
     { path: "/health", reason: "is reserved for Gateway probes" },
     { path: "/%61pi/channels/feishu?tenant=test", reason: "requires Gateway authentication" },
   ])(
-    "keeps the default legacy listener for restricted path $path until explicitly disabled",
+    "keeps an explicit legacy listener for restricted path $path and rejects an omitted listener",
     async ({ path, reason }) => {
       const port = await getGatewayPort();
       const abortController = new AbortController();
@@ -221,10 +221,7 @@ describe("Feishu webhook route configuration", () => {
       const eventDispatcher = new Lark.EventDispatcher({ encryptKey: "encrypt_key" });
       vi.spyOn(eventDispatcher, "invoke").mockImplementation(invoke);
       const params = {
-        account: {
-          ...account,
-          config: FeishuConfigSchema.parse({ ...account.config, legacyWebhook: false }),
-        },
+        account,
         accountId: account.accountId,
         abortSignal: abortController.signal,
         eventDispatcher,
@@ -236,7 +233,13 @@ describe("Feishu webhook route configuration", () => {
       legacyListener.value = { port: 3000, host: "127.0.0.1" };
       const monitor = monitorWebhook({
         ...params,
-        account,
+        account: {
+          ...account,
+          config: FeishuConfigSchema.parse({
+            ...account.config,
+            legacyWebhook: { port: 3000 },
+          }),
+        },
       });
       try {
         const response = await postSignedPayload(`http://127.0.0.1:${port}${path}`, {
@@ -247,7 +250,7 @@ describe("Feishu webhook route configuration", () => {
         await expect(response.json()).resolves.toEqual({ accepted: true });
         expect(invoke).toHaveBeenCalledTimes(1);
         expect(params.runtime.log).toHaveBeenCalledWith(
-          expect.stringContaining("before setting legacyWebhook:false"),
+          expect.stringContaining("before removing the legacyWebhook pin"),
         );
       } finally {
         legacyListener.value = undefined;
@@ -257,7 +260,10 @@ describe("Feishu webhook route configuration", () => {
     },
   );
 
-  it("disables an inherited legacy listener without disabling Gateway delivery", async () => {
+  it.each([
+    { label: "an omitted listener", root: undefined, accountSetting: undefined },
+    { label: "an inherited listener override", root: { port: 3100 }, accountSetting: false },
+  ] as const)("keeps Gateway delivery with $label", async ({ root, accountSetting }) => {
     const path = "/hook-legacy-bind-address";
     const port = await getGatewayPort();
     const fixture = createFeishuWebhookTestAccount("legacy-bind-address", path);
@@ -269,9 +275,9 @@ describe("Feishu webhook route configuration", () => {
             ...fixture.config,
             appId: "cli_test",
             appSecret: "secret_test",
-            legacyWebhook: { port: 3100 },
+            legacyWebhook: root,
             accounts: {
-              [fixture.accountId]: { legacyWebhook: false },
+              [fixture.accountId]: { legacyWebhook: accountSetting },
             },
           }),
         },

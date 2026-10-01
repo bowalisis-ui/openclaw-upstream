@@ -5,11 +5,18 @@ import {
   createLegacyWebhookListenerDoctorContract,
   defineChannelAliasMigration,
 } from "openclaw/plugin-sdk/runtime-doctor-migrations";
+import { listNextcloudTalkAccountIds, mergeNextcloudTalkAccountConfig } from "./accounts.js";
 
 const webhookContract = createLegacyWebhookListenerDoctorContract({
   channelKey: "nextcloud-talk",
   defaultHost: "0.0.0.0",
   defaultPort: 8788,
+  implicitAccountIds: (cfg) =>
+    cfg.channels?.["nextcloud-talk"]?.enabled === false
+      ? []
+      : listNextcloudTalkAccountIds(cfg).filter(
+          (accountId) => mergeNextcloudTalkAccountConfig(cfg, accountId).enabled !== false,
+        ),
 });
 
 const networkContract = createLegacyPrivateNetworkDoctorContract({

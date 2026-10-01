@@ -111,11 +111,36 @@ export async function loadGatewayStartupConfigSnapshot(params: {
   initialSnapshotRead?: ReadConfigFileSnapshotWithPluginMetadataResult;
 }): Promise<GatewayStartupConfigSnapshotLoadResult> {
   const measure = params.measure ?? (async (_name, run) => await run());
-  const snapshotRead =
+  let snapshotRead =
     params.initialSnapshotRead ??
     (await measure("config.snapshot.read", () =>
       readConfigFileSnapshotWithPluginMetadata({ measure }),
     ));
+  if (!params.minimalTestGateway) {
+    const { migrateImplicitWebhookListeners } =
+      await import("../commands/doctor/shared/webhook-listener-migration.js");
+    const migration = await measure("config.webhook-listeners", () =>
+      migrateImplicitWebhookListeners({
+        snapshot: snapshotRead.snapshot,
+        trigger: "gateway-startup",
+      }),
+    );
+    if (migration.needsMigration) {
+      throw createInvalidConfigError(snapshotRead.snapshot.path, migration.warnings.join("\n"), {
+        recovery: "manual",
+      });
+    }
+    for (const warning of migration.warnings) {
+      params.log.warn(warning);
+    }
+    if (migration.changed) {
+      params.log.info(migration.changes.join("\n"));
+      snapshotRead = await readConfigFileSnapshotWithPluginMetadata({
+        measure,
+        allowCurrentPluginMetadata: false,
+      });
+    }
+  }
   const configSnapshot = snapshotRead.snapshot;
   const pluginMetadataSnapshot = snapshotRead.pluginMetadataSnapshot;
   if (configSnapshot.legacyIssues.length > 0 && resolveIsConfigReadOnly()) {

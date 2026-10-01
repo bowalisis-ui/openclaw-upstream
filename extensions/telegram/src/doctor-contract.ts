@@ -12,11 +12,36 @@ import {
   normalizeChannelAccounts,
   type CompatMutationResult,
 } from "openclaw/plugin-sdk/runtime-doctor-migrations";
+import { mergeTelegramAccountConfig } from "./account-config.js";
+import { listTelegramAccountIds } from "./account-selection.js";
+import {
+  DEFAULT_TELEGRAM_WEBHOOK_PATH,
+  resolveTelegramGatewayWebhookUrl,
+  resolveTelegramWebhookPathConflict,
+} from "./webhook-route.js";
 
 const webhookListenerMigration = createLegacyWebhookListenerDoctorContract({
   channelKey: "telegram",
   defaultPort: 8787,
   defaultHost: "127.0.0.1",
+  implicitAccountIds: (cfg) => {
+    if (cfg.channels?.telegram?.enabled === false) {
+      return [];
+    }
+    return listTelegramAccountIds(cfg).filter((accountId) => {
+      const account = mergeTelegramAccountConfig(cfg, accountId);
+      if (account.enabled === false || !account.webhookUrl?.trim()) {
+        return false;
+      }
+      const path = account.webhookPath ?? DEFAULT_TELEGRAM_WEBHOOK_PATH;
+      const gatewayUrl = resolveTelegramGatewayWebhookUrl(cfg, path);
+      return (
+        !gatewayUrl ||
+        URL.parse(account.webhookUrl)?.href !== gatewayUrl ||
+        resolveTelegramWebhookPathConflict(path) !== undefined
+      );
+    });
+  },
 });
 
 const streamingAliasMigration = defineChannelAliasMigration({

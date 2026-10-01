@@ -724,10 +724,10 @@ export async function monitorWebhook(params: MonitorTransportParams): Promise<vo
     statusSink?.(channelReadyPatch({ lastConnectedAt: connectedAt, lastEventAt: connectedAt }));
     runtime?.log?.(
       ownedListener
-        ? `feishu[${accountId}]: 2026.9.6 compatibility listener ${legacyListener?.host}:${legacyListener?.port} serves this account directly. This host requires distinct legacy endpoints for separate accounts; set legacyWebhook:false after verifying delivery on the Gateway route.`
+        ? `feishu[${accountId}]: 2026.9.6 compatibility listener ${legacyListener?.host}:${legacyListener?.port} serves this account directly. This host requires distinct legacy endpoints for separate accounts; remove the legacyWebhook pin after verifying delivery on the Gateway route.`
         : pathConflict
-          ? `feishu[${accountId}]: ${pathConflict} The legacy listener keeps the old path working; move the path and callback before setting legacyWebhook:false.`
-          : `feishu[${accountId}]: webhook registered on Gateway port ${params.gatewayPort ?? 18789} at ${rawPath}; point the Feishu callback URL or reverse-proxy upstream to this Gateway route. ${legacyListener ? `The legacy listener on ${legacyListener.host}:${legacyListener.port} forwards here; set legacyWebhook:false after verifying delivery through the Gateway to disable legacy forwarding for this account.` : "legacyWebhook:false disables legacy forwarding for this account."}`,
+          ? `feishu[${accountId}]: ${pathConflict} The legacy listener keeps the old path working; move the path and callback before removing the legacyWebhook pin.`
+          : `feishu[${accountId}]: webhook registered on Gateway port ${params.gatewayPort ?? 18789} at ${rawPath}; point the Feishu callback URL or reverse-proxy upstream to this Gateway route. ${legacyListener ? `The legacy listener on ${legacyListener.host}:${legacyListener.port} forwards here; remove the legacyWebhook pin after verifying delivery through the Gateway, or use legacyWebhook:false to override an inherited endpoint.` : "No legacy listener is configured."}`,
     );
     // Stopping targets retain only signature recognition until their responses finish.
     await waitUntilAbort(abortSignal, cleanup);

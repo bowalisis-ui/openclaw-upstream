@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { createLegacyWebhookListenerDoctorContract } from "./legacy-webhook-listener-migration.js";
+import {
+  createLegacyWebhookListenerDoctorContract,
+  withImplicitLegacyWebhookMigration,
+} from "./legacy-webhook-listener-migration.js";
 
 const contract = createLegacyWebhookListenerDoctorContract({
   channelKey: "telegram",
@@ -12,6 +15,120 @@ const config = (entry: Record<string, unknown>): OpenClawConfig => ({
 });
 
 describe("legacy webhook listener migration", () => {
+  it("does not treat an older constructor as proof that implicit accounts were inspected", () => {
+    const inspected: string[] = [];
+    const migrated = withImplicitLegacyWebhookMigration(
+      true,
+      () => contract.normalizeCompatibilityConfig({ cfg: config({ webhookPort: 9000 }) }),
+      (channelId) => inspected.push(channelId),
+    );
+    expect(migrated.config.channels?.telegram?.legacyWebhook).toEqual({
+      port: 9000,
+      host: "127.0.0.1",
+    });
+    expect(inspected).toEqual([]);
+  });
+
+  it("pins a sole default account without giving future accounts an inherited listener", () => {
+    const migration = createLegacyWebhookListenerDoctorContract({
+      channelKey: "telegram",
+      defaultPort: 8787,
+      implicitAccountIds: () => ["default"],
+    });
+    const cfg = config({ webhookUrl: "https://example.com/hook" });
+    const migrated = withImplicitLegacyWebhookMigration(true, () =>
+      migration.normalizeCompatibilityConfig({ cfg }),
+    );
+    expect(migrated.config.channels?.telegram).toEqual({
+      webhookUrl: "https://example.com/hook",
+      accounts: { default: { legacyWebhook: { port: 8787 } } },
+    });
+  });
+
+  it("pins only the admitted existing accounts without making future accounts inherit a port", () => {
+    const migration = createLegacyWebhookListenerDoctorContract({
+      channelKey: "telegram",
+      defaultPort: 8787,
+      defaultHost: "127.0.0.1",
+      implicitAccountIds: () => ["default", "inherited", "disabled", "explicit", "optedout"],
+    });
+    const cfg = config({
+      accounts: {
+        Inherited: { webhookUrl: "https://example.com/hook" },
+        disabled: { enabled: false },
+        explicit: { legacyWebhook: { port: 9000 } },
+        optedOut: { legacyWebhook: false },
+      },
+    });
+    expect(migration.normalizeCompatibilityConfig({ cfg }).config).toBe(cfg);
+    expect(
+      withImplicitLegacyWebhookMigration(false, () =>
+        migration.normalizeCompatibilityConfig({ cfg }),
+      ).config,
+    ).toBe(cfg);
+    const migrated = withImplicitLegacyWebhookMigration(true, () =>
+      migration.normalizeCompatibilityConfig({ cfg }),
+    );
+    expect(migrated.config.channels?.telegram).toEqual({
+      accounts: {
+        default: { legacyWebhook: { port: 8787, host: "127.0.0.1" } },
+        Inherited: {
+          webhookUrl: "https://example.com/hook",
+          legacyWebhook: { port: 8787, host: "127.0.0.1" },
+        },
+        disabled: { enabled: false },
+        explicit: { legacyWebhook: { port: 9000 } },
+        optedOut: { legacyWebhook: false },
+      },
+    });
+    expect(cfg.channels?.telegram?.accounts?.Inherited?.legacyWebhook).toBeUndefined();
+  });
+
+  it("preserves exact account precedence without merging aliases", () => {
+    const migration = createLegacyWebhookListenerDoctorContract({
+      channelKey: "telegram",
+      defaultPort: 8787,
+      implicitAccountIds: () => ["ops"],
+    });
+    const cfg = config({
+      accounts: {
+        Ops: { webhookUrl: "https://example.com/first" },
+        ops: { webhookUrl: "https://example.com/second" },
+      },
+    });
+    const migrated = withImplicitLegacyWebhookMigration(true, () =>
+      migration.normalizeCompatibilityConfig({ cfg }),
+    );
+    expect(migrated.config.channels?.telegram?.accounts).toEqual({
+      Ops: { webhookUrl: "https://example.com/first" },
+      ops: {
+        webhookUrl: "https://example.com/second",
+        legacyWebhook: { port: 8787 },
+      },
+    });
+    expect(cfg.channels?.telegram?.accounts).toEqual({
+      Ops: { webhookUrl: "https://example.com/first" },
+      ops: { webhookUrl: "https://example.com/second" },
+    });
+  });
+
+  it.each([false, { port: 9000 }])(
+    "preserves an inherited explicit listener setting %j",
+    (setting) => {
+      const migration = createLegacyWebhookListenerDoctorContract({
+        channelKey: "telegram",
+        defaultPort: 8787,
+        implicitAccountIds: () => ["secondary"],
+      });
+      const cfg = config({ legacyWebhook: setting, accounts: { secondary: {} } });
+      expect(
+        withImplicitLegacyWebhookMigration(true, () =>
+          migration.normalizeCompatibilityConfig({ cfg }),
+        ).config,
+      ).toBe(cfg);
+    },
+  );
+
   it("preserves explicit ports and inherited bind addresses without changing unrelated settings", () => {
     const cfg = config({
       webhookPort: 8787,

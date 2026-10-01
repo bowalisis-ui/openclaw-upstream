@@ -380,15 +380,23 @@ limits and timeout defaults. A shipped timeout profile can be preserved with
 `timeouts: { headers, request, socket }` in milliseconds. These are plugin
 registration contracts, not new operator configuration.
 
-The channel owns effective listener resolution: preserve its shipped default when
-`legacyWebhook` is omitted, use an explicit endpoint object when configured, and
-register no legacy listener when it is `false`. Resolve the same endpoint for
+The channel owns effective listener resolution: register a legacy listener only
+for an explicit `legacyWebhook` endpoint object. Omitted settings and `false`
+select Gateway-only ingress. Resolve the same endpoint for
 runtime routing and Doctor guidance. Plugin-owned Doctor contracts can compose
 `createLegacyWebhookListenerDoctorContract` from
 `openclaw/plugin-sdk/runtime-doctor-migrations` to preserve authored ports and
 inherited bind addresses through the normal backed-up config write. An explicit
 legacy host without a port uses the channel's shipped default port. Canonical
 `false` settings remain authoritative when Doctor removes retired keys.
+The optional `implicitAccountIds` callback selects enabled webhook accounts for
+the host's one-shot migration; return `undefined` as an entry for a channel that
+does not support accounts. The host supplies prior-operation evidence and owns
+completion. Ordinary normalization never materializes implicit endpoints.
+Automatic pins belong to existing accounts, including `accounts.default`, so
+accounts added later do not inherit them. Doctor backs up the config before
+persisting pins and records completion only after the write succeeds. Removing a
+completed pin does not recreate it on a later Doctor run or update.
 Return normal listener guidance in `runConfigSequence().infoNotes` so Doctor
 labels it as information. Keep actionable configuration problems in
 `warningNotes`; `changeNotes` describe applied repairs.

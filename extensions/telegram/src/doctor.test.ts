@@ -145,11 +145,11 @@ describe("telegram doctor", () => {
   });
 
   it.each([
-    { legacyWebhook: undefined, description: "legacy listener 127.0.0.1:8787" },
+    { legacyWebhook: undefined, description: "no legacy listener is configured" },
     { legacyWebhook: { port: 9000 }, description: "legacy listener 127.0.0.1:9000" },
     {
       legacyWebhook: false as const,
-      description: "legacyWebhook: false disables legacy forwarding for this account",
+      description: "no legacy listener is configured",
     },
   ])("describes the effective listener %j", async ({ legacyWebhook, description }) => {
     const cfg: OpenClawConfig = {
@@ -174,7 +174,7 @@ describe("telegram doctor", () => {
       },
     });
     expect(notes.infoNotes).toContainEqual(
-      expect.stringContaining("legacy listener 127.0.0.1:8787"),
+      expect.stringContaining("no legacy listener is configured"),
     );
     expect(notes.warningNotes).toEqual([]);
     expect(resolveCommandSecretRefsViaGatewayMock).not.toHaveBeenCalled();
@@ -706,6 +706,7 @@ describe("telegram doctor", () => {
           enabled: true,
           webhookUrl: "https://example.test/healthz",
           webhookPath: "/healthz",
+          legacyWebhook: { port: 8787 },
           accounts: {
             ops: {
               botToken: "123:abc",
@@ -774,7 +775,7 @@ describe("telegram doctor", () => {
       },
     });
     expect(notes.infoNotes).toContainEqual(
-      expect.stringContaining("legacy listener 127.0.0.1:8787"),
+      expect.stringContaining("no legacy listener is configured"),
     );
     expect(notes.warningNotes.join("\n")).not.toContain("reserved for Gateway probes");
   });

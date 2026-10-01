@@ -27,13 +27,17 @@ describe("Microsoft Teams Gateway webhook migration", () => {
   });
 
   it.each([
-    { setting: undefined, endpoint: { port: 3978 }, note: "compatibility port 3978" },
+    { setting: undefined, endpoint: undefined, note: "no compatibility listener is configured" },
     {
       setting: { port: 44978, host: "127.0.0.1" },
       endpoint: { port: 44978, host: "127.0.0.1" },
       note: "compatibility port 44978",
     },
-    { setting: false as const, endpoint: undefined, note: "compatibility listener is disabled" },
+    {
+      setting: false as const,
+      endpoint: undefined,
+      note: "no compatibility listener is configured",
+    },
   ])("keeps runtime and Doctor aligned for $setting", ({ setting, endpoint, note }) => {
     const cfg: OpenClawConfig = {
       gateway: { port: 19001 },
@@ -51,7 +55,9 @@ describe("Microsoft Teams Gateway webhook migration", () => {
     const message = notes.infoNotes?.join(" ");
     expect(message).toContain("19002/teams/events");
     expect(message).toContain(note);
-    expect(message).toContain("channels.msteams.legacyWebhook=false");
+    if (endpoint) {
+      expect(message).toContain("remove the channels.msteams.legacyWebhook pin");
+    }
   });
 
   it("keeps the canonical endpoint and removes an empty legacy webhook object", () => {
@@ -102,9 +108,7 @@ describe("Microsoft Teams Gateway webhook migration", () => {
       expect(warning).toContain(`${path}?tenant=one ${reason}`);
       expect(warning).toContain("18789/api/messages");
       expect(warning).toContain(
-        legacyWebhook === false
-          ? "cannot receive Teams callbacks"
-          : "Compatibility port 3978 continues",
+        legacyWebhook ? "Compatibility port 3978 continues" : "cannot receive Teams callbacks",
       );
     }
   });

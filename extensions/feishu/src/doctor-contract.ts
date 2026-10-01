@@ -12,6 +12,7 @@ import {
   hasLegacyAccountStreamingAliases,
   normalizeChannelConfigEntries,
 } from "openclaw/plugin-sdk/runtime-doctor-migrations";
+import { listFeishuAccountIds, mergeFeishuAccountConfig } from "./accounts.js";
 import { FeishuConfigSchema } from "./config-schema.js";
 import { DEFAULT_FEISHU_WEBHOOK_PATH, normalizeFeishuWebhookPath } from "./webhook-path.js";
 
@@ -19,6 +20,13 @@ const webhookListenerMigration = createLegacyWebhookListenerDoctorContract({
   channelKey: "feishu",
   defaultPort: 3000,
   defaultHost: "127.0.0.1",
+  implicitAccountIds: (cfg) =>
+    cfg.channels?.feishu?.enabled === false
+      ? []
+      : listFeishuAccountIds(cfg).filter((accountId) => {
+          const account = mergeFeishuAccountConfig(cfg, accountId);
+          return account.enabled !== false && account.connectionMode === "webhook";
+        }),
 });
 
 // Feishu's legacy boolean `streaming` gated streaming-card replies with an

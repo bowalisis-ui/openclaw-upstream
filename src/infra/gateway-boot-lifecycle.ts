@@ -16,6 +16,7 @@ import {
 } from "./kysely-sync.js";
 import { pathMayExistSync } from "./path-existence.js";
 import { GATEWAY_STARTUP_MAINTENANCE_REQUIRED_REASON } from "./startup-maintenance-required.js";
+import { prepareWebhookListenerMigrationInDatabase } from "./webhook-listener-migration-state.js";
 
 // Retain the released media-only tag while its bounded boot history expires.
 const maintenanceStartupReasons = [
@@ -214,6 +215,7 @@ export function recordGatewayBootStart(
   try {
     runOpenClawStateWriteTransaction(
       ({ db }) => {
+        prepareWebhookListenerMigrationInDatabase(db, env);
         const kysely = getNodeSqliteKysely<GatewayBootLifecycleDatabase>(db);
         executeSqliteQuerySync(
           db,
