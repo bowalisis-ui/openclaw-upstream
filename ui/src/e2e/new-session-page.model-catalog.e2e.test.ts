@@ -49,7 +49,7 @@ suite.define(() => {
         await modelSelect.click();
         await expect.poll(() => picker.getAttribute("open")).toBe("");
         await expect
-          .poll(() => modelSelect.evaluate((element) => element === document.activeElement))
+          .poll(() => search.evaluate((element) => element === document.activeElement))
           .toBe(true);
         await revealChatModelOption(firstModel);
         await revealChatModelOption(secondModel);
