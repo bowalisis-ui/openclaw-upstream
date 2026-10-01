@@ -12,6 +12,7 @@ import {
   type LegacyConfigMigrationContext,
   type LegacyConfigRule,
 } from "../../../config/legacy.shared.js";
+import { copyConfigResolutionFacts } from "../../../config/resolution-facts.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 
 function migrateAgentEntries(
@@ -47,6 +48,47 @@ function migrateAgentEntries(
   changes.push("Moved agents.list → keyed agents.entries.");
 }
 
+/** Writers preserve existing responsibilities; Doctor uses the retired marker's original owner. */
+export function retireLegacyAgentDefaultMarkers<T extends object>(raw: T) {
+  const agents = getRecord(getRecord(raw)?.agents);
+  const entries = getRecord(agents?.entries);
+  if (!agents || !entries) {
+    return undefined;
+  }
+  const roster: [string, Record<string, unknown>][] = [];
+  for (const [id, value] of Object.entries(entries)) {
+    const entry = getRecord(value);
+    if (!entry || (Object.hasOwn(entry, "default") && typeof entry.default !== "boolean")) {
+      return undefined;
+    }
+    roster.push([id, entry]);
+  }
+  const marked = roster.filter(([, entry]) => entry.default === true);
+  if (marked.length > 1 || (marked.length > 0 && agents.ownership === "explicit")) {
+    return undefined;
+  }
+  const changes: string[] = [];
+  const canonicalEntries = Object.fromEntries(
+    roster.map(([id, entry]): [string, Record<string, unknown>] => {
+      if (!Object.hasOwn(entry, "default")) {
+        return [id, entry];
+      }
+      const { default: _marker, ...canonical } = entry;
+      changes.push("Removed retired agents.entries default marker.");
+      return [id, canonical];
+    }),
+  );
+  const config =
+    changes.length > 0 ? { ...raw, agents: { ...agents, entries: canonicalEntries } } : raw;
+  copyConfigResolutionFacts(raw, config);
+  return {
+    config,
+    changes,
+    agentCount: roster.length,
+    legacyOwner: roster.length > 1 ? marked[0]?.[0] : undefined,
+  };
+}
+
 export const LEGACY_AGENT_ROSTER_RULES: LegacyConfigRule[] = [
   {
     path: ["agents", "list"],
@@ -77,27 +119,12 @@ export const LEGACY_CONFIG_MIGRATIONS_RUNTIME_ENTRIES: LegacyConfigMigrationSpec
     id: "runtime.agents-explicit-ownership",
     describe: "Persist canonical roster and per-surface ownership",
     apply: (raw, changes, context) => {
-      const agents = getRecord(raw.agents);
-      const entries = getRecord(agents?.entries);
-      if (!agents || !entries) {
+      const retired = retireLegacyAgentDefaultMarkers(raw);
+      if (!retired) {
         return;
       }
-      const roster = Object.entries(entries);
-      if (
-        roster.some(([, entry]) => {
-          const record = getRecord(entry);
-          return (
-            !record || (Object.hasOwn(record, "default") && typeof record.default !== "boolean")
-          );
-        })
-      ) {
-        return;
-      }
-      const marked = roster.filter(([, entry]) => getRecord(entry)?.default === true);
-      if (marked.length > 1 || (marked.length > 0 && agents.ownership === "explicit")) {
-        return;
-      }
-      const legacyOwner = roster.length > 1 ? marked[0]?.[0] : undefined;
+      Object.assign(raw, retired.config);
+      const { legacyOwner } = retired;
       if (legacyOwner) {
         const materialized = materializeLegacyDefaultAgentRoles(
           // SAFETY: Roster entries are records; the helper guards raw sections until later validation.
@@ -110,15 +137,8 @@ export const LEGACY_CONFIG_MIGRATIONS_RUNTIME_ENTRIES: LegacyConfigMigrationSpec
         changes.push("Preserved legacy per-surface agent ownership and workspace.");
       }
       const nextAgents = getRecord(raw.agents)!;
-      const nextEntries = getRecord(nextAgents.entries)!;
-      for (const entry of Object.values(nextEntries)) {
-        const record = getRecord(entry)!;
-        if (Object.hasOwn(record, "default")) {
-          delete record.default;
-          changes.push("Removed retired agents.entries default marker.");
-        }
-      }
-      if (roster.length < 2 || nextAgents.ownership !== undefined) {
+      changes.push(...retired.changes);
+      if (retired.agentCount < 2 || nextAgents.ownership !== undefined) {
         return;
       }
       // Recovery validates the registry's candidate before the later Doctor config flow.

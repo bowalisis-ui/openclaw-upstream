@@ -332,7 +332,7 @@ describe("runtime-config replacement during a turn", () => {
                 model: { primary: provider.primaryRef, fallbacks: [provider.fallbackRef] },
                 thinkingDefault: "low",
               },
-              entries: { main: { default: true } },
+              entries: { main: {} },
             },
             models: { mode: "merge", providers: { [PROVIDER_ID]: provider.config } },
             gateway: { auth: { mode: "token", token: TOKEN } },

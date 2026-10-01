@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { listAgentEntries, tryResolveDefaultAgentId } from "../agents/agent-scope-config.js";
+import { retireLegacyAgentDefaultMarkers } from "../commands/doctor/shared/legacy-config-migrations.runtime.entries.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { isRecord } from "../utils.js";
 import { pinSurvivorWorkspaceForRosterCollapse } from "./agent-workspace-roster-transition.js";
@@ -72,7 +73,9 @@ export function prepareConfigWriteTopology(
     explicitSetPaths: options.explicitSetPaths,
     explicitSetValueSource: options.explicitSetValueSource,
   });
-  let nextConfig = values.resolvedConfig;
+  // Check submitted ownership before this writer stamps the canonical fleet marker.
+  const retiredMarkers = retireLegacyAgentDefaultMarkers(values.resolvedConfig);
+  let nextConfig = retiredMarkers?.config ?? values.resolvedConfig;
   const retainedLegacyDefaultAgentId = resolveLegacyAgentRosterOwner(
     snapshot.sourceConfigBeforeMigrations ?? snapshot.parsed,
   );
@@ -216,7 +219,10 @@ export function prepareConfigWriteTopology(
     explicitSetPaths,
     explicitSetValueSource,
     persistCanonicalAgentRoster:
-      options.persistCanonicalAgentRoster === true || persistOwnership || stampOwnership,
+      options.persistCanonicalAgentRoster === true ||
+      persistOwnership ||
+      stampOwnership ||
+      (retiredMarkers?.changes.length ?? 0) > 0,
     preserveLegacyAgentRoster: Boolean(retainedLegacyDefaultAgentId) && !writesOwnershipTopology,
     cronOwner: persistOwnership
       ? retainedLegacyDefaultAgentId
