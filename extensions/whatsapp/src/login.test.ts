@@ -39,7 +39,7 @@ vi.mock("./auth-store.js", async () => {
 import type { waitForWaConnection } from "./session.js";
 let loginWeb: typeof import("./login.js").loginWeb;
 let loginWebWithPhoneCode: typeof import("./login.js").loginWebWithPhoneCode;
-let normalizeWhatsAppPairingPhoneNumber: typeof import("./login.js").normalizeWhatsAppPairingPhoneNumber;
+let normalizeWhatsAppPairingPhoneNumber: typeof import("./phone-code.js").normalizeWhatsAppPairingPhoneNumber;
 let createWaSocket: typeof import("./session.js").createWaSocket;
 let prepareWebAuthForLogin: typeof import("./auth-store.js").prepareWebAuthForLogin;
 let restoreCredsFromBackupIfNeeded: typeof import("./auth-store.js").restoreCredsFromBackupIfNeeded;
@@ -93,8 +93,8 @@ function startPersistenceTestLogin(
 
 describe("web login", () => {
   beforeAll(async () => {
-    ({ loginWeb, loginWebWithPhoneCode, normalizeWhatsAppPairingPhoneNumber } =
-      await import("./login.js"));
+    ({ normalizeWhatsAppPairingPhoneNumber } = await import("./phone-code.js"));
+    ({ loginWeb, loginWebWithPhoneCode } = await import("./login.js"));
     ({ createWaSocket } = await import("./session.js"));
     ({ prepareWebAuthForLogin, restoreCredsFromBackupIfNeeded } = await import("./auth-store.js"));
   });
