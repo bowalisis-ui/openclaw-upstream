@@ -296,15 +296,18 @@ COPY --from=runtime-assets --chown=node:node \
     /app/scripts/freebsd-service-inspect.mjs \
     /app/scripts/generate-kysely-types.mts \
     /app/scripts/install-cli.sh \
+    /app/scripts/install-policy.sh \
     /app/scripts/install.ps1 \
     /app/scripts/prepare-git-hooks.mjs \
     /app/scripts/prepare-native-protocol.mjs \
     /app/scripts/preinstall-package-manager-warning.mjs \
     /app/scripts/postinstall-bundled-plugins.mjs \
+    /app/scripts/postinstall-bun-cli-launcher.mjs \
     /app/scripts/runtime-postbuild-shared.mjs \
     /app/scripts/windows-cmd-helpers.mjs \
     ./scripts/
 COPY --from=runtime-assets --chown=node:node \
+    /app/scripts/lib/bun-cli-launcher.mjs \
     /app/scripts/lib/direct-run.mjs \
     /app/scripts/lib/freebsd-service-discovery.d.mts \
     /app/scripts/lib/freebsd-service-discovery.mjs \
