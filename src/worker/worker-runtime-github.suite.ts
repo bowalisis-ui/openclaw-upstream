@@ -2,14 +2,23 @@ import { createHash } from "node:crypto";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { expect, it, vi } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import type {
   WorkerHeartbeatResult,
   WorkerLiveEventParams,
   WorkerTranscriptCommitParams,
 } from "../../packages/gateway-protocol/src/schema/worker-admission.js";
 import type { WorkerInferenceStartParams } from "../../packages/gateway-protocol/src/schema/worker-inference.js";
-import { createDeferred } from "../../test/helpers/promise.js";
+import {
+  fixtureReceiptClientSource,
+  openFixtureReceiptChannel,
+  type FixtureReceiptChannel,
+} from "../../test/helpers/fixture-receipts.js";
+import {
+  awaitGateBeforeSettlement,
+  createDeferred,
+  withinTest,
+} from "../../test/helpers/promise.js";
 import { createOperationalRunInstanceRef } from "../agents/admitted-run-context.js";
 import { waitForExecScope } from "../agents/bash-process-registry.js";
 import * as githubIdentity from "../agents/github-tool-identity.js";
@@ -57,6 +66,14 @@ export function registerWorkerGitHubTests({
   waitForFast,
   sessionId: SESSION_ID,
 }: WorkerGitHubFixture) {
+  let receipts: FixtureReceiptChannel;
+  beforeAll(async () => {
+    receipts = await openFixtureReceiptChannel();
+  });
+  afterAll(async () => {
+    await receipts.close();
+  });
+
   // The probe uses a POSIX shell; Windows launches exec through PowerShell.
   it.skipIf(process.platform === "win32")(
     "binds the turn GitHub identity and checkout to real exec without publishing its token",
@@ -157,17 +174,32 @@ export function registerWorkerGitHubTests({
 
   it.skipIf(process.platform === "win32")(
     "prevents retained processes from reading a later turn's GitHub profile",
-    async () => {
+    async ({ signal }) => {
       const { gateway, launch, workspaceDir } = await setup({
         inferencePlans: ["background-tool", "text", "tool", "text"],
-        backgroundCommand: [
-          'printf "%s" "$GH_CONFIG_DIR" > retained-profile.txt',
-          "while [ ! -e retained-marker ]; do sleep 0.01; done",
-          '{ cat "$GH_CONFIG_DIR/hosts.yml"; printf "exit=%s\\n" "$?"; } > retained-read.tmp 2>&1',
-          "mv retained-read.tmp retained-read.txt",
-        ].join("; "),
+        backgroundCommand: `exec '${process.execPath.replaceAll("'", "'\\''")}' retained-profile.mjs`,
         execCommand: "printf turn-b-completed",
       });
+      const profilePath = path.join(workspaceDir, "retained-profile.txt");
+      await writeFile(
+        path.join(workspaceDir, "retained-profile.mjs"),
+        [
+          'import { execFile } from "node:child_process";',
+          'import { writeFileSync } from "node:fs";',
+          fixtureReceiptClientSource(receipts.endpoint),
+          `writeFileSync(${JSON.stringify(profilePath)}, process.env.GH_CONFIG_DIR);`,
+          `sendReceipt(${JSON.stringify(profilePath)}, "ready");`,
+          "await new Promise((resolve, reject) => {",
+          `  execFile("sh", ["-c", ${JSON.stringify(
+            [
+              "while [ ! -e retained-marker ]; do sleep 0.01; done",
+              '{ cat "$GH_CONFIG_DIR/hosts.yml"; printf "exit=%s\\n" "$?"; } > retained-read.tmp 2>&1',
+              "mv retained-read.tmp retained-read.txt",
+            ].join("; "),
+          )}], (error) => error ? reject(error) : resolve());`,
+          "});",
+        ].join("\n"),
+      );
       launch.assignment.github = {
         login: "worker-a",
         token: "worker-turn-a-token",
@@ -198,14 +230,13 @@ export function registerWorkerGitHubTests({
           result: { status: "completed" },
           retainWorker: true,
         });
-        const previousProfileDir = await waitForFast(async () => {
-          const profileDir = await readFile(
-            path.join(workspaceDir, "retained-profile.txt"),
-            "utf8",
-          );
-          expect(profileDir).not.toBe("");
-          return profileDir;
-        });
+        // A receipt can arrive after the exec settles; its durable file is written first.
+        await withinTest(
+          Promise.race([receipts.waitFor(profilePath, "ready"), waitForExecScope(scopeKey)]),
+          signal,
+        );
+        const previousProfileDir = await readFile(profilePath, "utf8");
+        expect(previousProfileDir).not.toBe("");
         const stateDir = process.env.OPENCLAW_STATE_DIR!;
         const next = structuredClone(launch);
         next.assignment.runId = "worker-next-run-2";
@@ -249,13 +280,21 @@ export function registerWorkerGitHubTests({
         expect(hosts).not.toContain("worker-a");
         expect(hosts).not.toContain(launch.assignment.github.token);
         await writeFile(path.join(workspaceDir, "retained-marker"), "read");
-        const retainedRead = await waitForFast(() =>
-          readFile(path.join(workspaceDir, "retained-read.txt"), "utf8"),
-        );
+        // idle-ready follows exec settlement and both profile disposals, including the shell's mv.
+        expect(
+          await withinTest(
+            awaitGateBeforeSettlement(
+              idleReady.promise,
+              command,
+              "worker command ended before the retained process became idle",
+            ),
+            signal,
+          ),
+        ).toBe(next.assignment.turnId);
+        const retainedRead = await readFile(path.join(workspaceDir, "retained-read.txt"), "utf8");
         expect(retainedRead).toContain(launch.assignment.github.token);
         expect(retainedRead).not.toContain(next.assignment.github.token);
         expect(retainedRead).toMatch(/exit=0/u);
-        expect(await idleReady.promise).toBe(next.assignment.turnId);
         await expect(stat(previousProfileDir)).rejects.toMatchObject({ code: "ENOENT" });
         await expect(stat(nextProfileDir)).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
