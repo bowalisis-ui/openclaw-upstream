@@ -4,43 +4,33 @@ import {
   readDeferredPluginMigrationCompletions,
   readDeferredPluginMigrations,
   recordDeferredPluginMigrationsInTransaction,
-  type DeferredPluginMigrationRecordInput,
 } from "../infra/deferred-plugin-migrations.js";
 import { runOpenClawStateWriteTransaction } from "../state/openclaw-state-db.js";
 import { assertOpenClawStateLeaseWorkerOwnedInTransaction } from "../state/openclaw-state-lease-worker.js";
-import type { OpenClawStateLeaseIdentity } from "../state/openclaw-state-lease.types.js";
-import type { WorkerOperationHandlers } from "../state/worker-operation-registry.js";
+import type { WorkerOperationHandlersFor } from "../state/worker-operation-registry.js";
 import {
   readPluginBindingApprovalsInDatabase,
   upsertPluginBindingApprovalInDatabase,
 } from "./conversation-binding-state.kernel.js";
-import type { PluginBindingApprovalEntry } from "./conversation-binding-state.types.js";
 import { publishPluginSourceAdmissionInDatabase } from "./installed-plugin-index-store-write.js";
 import {
   readHostedCatalogSnapshotInDatabase,
   writeHostedCatalogSnapshotInDatabase,
 } from "./official-external-plugin-catalog-snapshot-store.kernel.js";
 import { HostedCatalogSignedFeedMonotonicityError } from "./official-external-plugin-catalog-source.js";
-import type { HostedOfficialExternalPluginCatalogSnapshot } from "./official-external-plugin-catalog.types.js";
-import type { PluginSourceAdmissionPublication } from "./plugin-source-admission.types.js";
+import type { PluginRuntimeWorkerOperations } from "./state.worker-contract.js";
 
 export const pluginRuntimeOperations = {
-  "plugins.conversationBindingApprovals.read": (_input: undefined, { open }) =>
+  "plugins.conversationBindingApprovals.read": (_input, { open }) =>
     readPluginBindingApprovalsInDatabase(open().db),
-  "plugins.conversationBindingApprovals.upsert": (
-    input: PluginBindingApprovalEntry,
-    { open, stateOptions },
-  ) =>
+  "plugins.conversationBindingApprovals.upsert": (input, { open, stateOptions }) =>
     runOpenClawStateWriteTransaction(({ db }) => upsertPluginBindingApprovalInDatabase(db, input), {
       database: open(),
       ...stateOptions(),
     }),
-  "plugins.catalogSnapshot.read": (input: { url: string }, { open }) =>
+  "plugins.catalogSnapshot.read": (input, { open }) =>
     readHostedCatalogSnapshotInDatabase(open().db, input.url),
-  "plugins.catalogSnapshot.write": (
-    input: { snapshot: HostedOfficialExternalPluginCatalogSnapshot; now: number },
-    { open, stateOptions },
-  ) => {
+  "plugins.catalogSnapshot.write": (input, { open, stateOptions }) => {
     const options = { database: open(), ...stateOptions() };
     try {
       runOpenClawStateWriteTransaction(
@@ -55,20 +45,12 @@ export const pluginRuntimeOperations = {
       throw error;
     }
   },
-  "plugins.metadata.sourceAdmission.publish": (
-    input: PluginSourceAdmissionPublication,
-    { open, stateOptions },
-  ) =>
+  "plugins.metadata.sourceAdmission.publish": (input, { open, stateOptions }) =>
     runOpenClawStateWriteTransaction(
       ({ db }) => publishPluginSourceAdmissionInDatabase(db, input),
       { database: open(), ...stateOptions() },
     ),
-  "plugins.deferredMigrations.record": (
-    input: Omit<DeferredPluginMigrationRecordInput, "env"> & {
-      identity: OpenClawStateLeaseIdentity;
-    },
-    { open, stateOptions },
-  ) => {
+  "plugins.deferredMigrations.record": (input, { open, stateOptions }) => {
     const options = { database: open(), ...stateOptions() };
     try {
       return runOpenClawStateWriteTransaction(
@@ -91,14 +73,11 @@ export const pluginRuntimeOperations = {
       throw error;
     }
   },
-  "plugins.deferredMigrations.read": (
-    input: { artifactPreservingReadOnly: boolean },
-    { stateOptions },
-  ) =>
+  "plugins.deferredMigrations.read": (input, { stateOptions }) =>
     readDeferredPluginMigrations({
       ...stateOptions(),
       artifactPreservingReadOnly: input.artifactPreservingReadOnly,
     }),
-  "plugins.deferredMigrations.completions.read": (_input: undefined, { stateOptions }) =>
+  "plugins.deferredMigrations.completions.read": (_input, { stateOptions }) =>
     readDeferredPluginMigrationCompletions(stateOptions()),
-} satisfies WorkerOperationHandlers;
+} satisfies WorkerOperationHandlersFor<PluginRuntimeWorkerOperations>;

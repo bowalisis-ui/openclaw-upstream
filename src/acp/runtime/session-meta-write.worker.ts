@@ -14,7 +14,7 @@ import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabase,
 } from "../../state/openclaw-state-db.js";
-import type { WorkerOperationHandlers } from "../../state/worker-operation-registry.js";
+import type { WorkerOperationHandlersFor } from "../../state/worker-operation-registry.js";
 import type { AcpSessionControlConstraint } from "./session-meta-control.types.js";
 import { assertAcpSessionMutationEntry } from "./session-meta-entry.kernel.js";
 import {
@@ -35,13 +35,12 @@ import type {
   AcpSessionMutationPreparation,
   AcpSessionMutationPrepareInput,
 } from "./session-meta-write.types.js";
+import type { AcpSessionWriteOperations } from "./session-meta-write.worker-contract.js";
 
 export const acpSessionOperations = {
-  "acp.prepareMutation": (input: AcpSessionMutationPrepareInput, { open }) =>
-    prepareAcpSessionMutationInWorker(open(), input),
-  "acp.commitMutation": (input: AcpSessionMutationCommit & { nonce: string }, { open }) =>
-    commitAcpSessionMutationInWorker(open(), input),
-} satisfies WorkerOperationHandlers;
+  "acp.prepareMutation": (input, { open }) => prepareAcpSessionMutationInWorker(open(), input),
+  "acp.commitMutation": (input, { open }) => commitAcpSessionMutationInWorker(open(), input),
+} satisfies WorkerOperationHandlersFor<AcpSessionWriteOperations>;
 
 function readControlledAcpSessionMutation(
   database: OpenClawStateDatabase,

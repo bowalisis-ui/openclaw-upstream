@@ -1,4 +1,16 @@
-import type { WorkerOperations } from "../../state/worker-operation-registry.js";
-import type { acpSessionOperations } from "./session-meta-write.worker.js";
+import type {
+  AcpSessionMutationCommit,
+  AcpSessionMutationPreparation,
+  AcpSessionMutationPrepareInput,
+} from "./session-meta-write.types.js";
 
-export type AcpSessionWriteOperations = WorkerOperations<typeof acpSessionOperations>;
+export type AcpSessionWriteOperations = {
+  "acp.prepareMutation": {
+    input: AcpSessionMutationPrepareInput;
+    output: AcpSessionMutationPreparation;
+  };
+  "acp.commitMutation": {
+    input: AcpSessionMutationCommit & { nonce: string };
+    output: { nonce: string };
+  };
+};

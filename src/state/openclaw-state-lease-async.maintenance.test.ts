@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./openclaw-state-lease-worker-storage.js", () => ({
+  acquireLease: mocks.forbidden,
   createOpenClawStateLeaseWorkerStorage: mocks.createStorage,
   acquireLease: mocks.forbidden,
 }));

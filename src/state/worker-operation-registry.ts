@@ -22,13 +22,22 @@ export type WorkerOperations<Handlers extends WorkerOperationHandlers<never>> = 
   };
 };
 
+export type WorkerOperationHandlersFor<
+  Operations extends SqliteWorkerOperations,
+  Context = WorkerOperationContext,
+> = {
+  [Key in keyof Operations]: (
+    input: Operations[Key]["input"],
+    context: Context,
+  ) => Operations[Key]["output"];
+};
+
 type Namespace<Key> = Key extends `${infer Domain}.${string}` ? Domain : never;
 type DomainLoaders<Operations extends SqliteWorkerOperations, Context, Domains extends string> = {
   [Domain in Domains]: () => Promise<{
-    [Key in keyof Operations as Key extends Domain | `${Domain}.${string}` ? Key : never]: (
-      input: Operations[Key]["input"],
-      context: Context,
-    ) => Operations[Key]["output"];
+    [
+      Key in keyof Operations as Key extends Domain | `${Domain}.${string}` ? Key : never
+    ]: WorkerOperationHandlersFor<Operations, Context>[Key];
   }>;
 };
 
