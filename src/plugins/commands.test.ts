@@ -854,12 +854,7 @@ describe("registerPluginCommand", () => {
   it("rejects reserved ownership on non-reserved direct command registrations", () => {
     const result = registerPluginCommand(
       "demo-plugin",
-      {
-        name: "voice",
-        description: "Voice command",
-        ownership: "reserved",
-        handler: async () => ({ text: "ok" }),
-      },
+      createVoiceCommand({ ownership: "reserved" }),
       { allowReservedCommandNames: true },
     );
 
@@ -871,9 +866,7 @@ describe("registerPluginCommand", () => {
 
   it("does not expose owner status to normal plugin commands", async () => {
     let observedOwnerStatus: boolean | undefined;
-    registerPluginCommand("demo-plugin", {
-      name: "voice",
-      description: "Voice command",
+    registerVoiceCommandForTest({
       handler: async (ctx) => {
         observedOwnerStatus = ctx.senderIsOwner;
         return { text: "ok" };
@@ -918,9 +911,7 @@ describe("registerPluginCommand", () => {
 
   it("ignores owner status opt-in from direct plugin command registration", async () => {
     let observedOwnerStatus: boolean | undefined;
-    registerPluginCommand("demo-plugin", {
-      name: "voice",
-      description: "Voice command",
+    registerVoiceCommandForTest({
       exposeSenderIsOwner: true,
       handler: async (ctx) => {
         observedOwnerStatus = ctx.senderIsOwner;

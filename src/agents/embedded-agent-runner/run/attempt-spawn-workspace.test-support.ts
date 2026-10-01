@@ -1030,11 +1030,7 @@ export async function cleanupTempPaths(tempPaths: string[]) {
 
 export function createDefaultEmbeddedSession(params?: {
   initialMessages?: unknown[];
-  prompt?: (
-    session: MutableSession,
-    prompt: string,
-    options?: { images?: unknown[]; preflightResult?: (submitted: boolean) => void },
-  ) => Promise<void>;
+  prompt?: SessionPromptOverride;
 }): MutableSession {
   let activeToolNames: string[] = [];
   let promptPreparation: (() => Promise<void>) | undefined;

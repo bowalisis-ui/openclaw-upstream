@@ -8,7 +8,10 @@ import {
   type AdmittedRunContext,
 } from "../admitted-run-context.js";
 import { createModelGenerationFixture } from "../embedded-agent-runner/model.generation-scope.test-support.js";
-import type { EmbeddedRunAttemptParams } from "../embedded-agent-runner/run/types.js";
+import type {
+  EmbeddedRunAttemptParams,
+  EmbeddedRunAttemptResult,
+} from "../embedded-agent-runner/run/types.js";
 import { retainPreparedPluginRegistry } from "../prepared-model-runtime.plugin-lifetime.js";
 import { maybeCompactAgentHarnessSession as maybeCompactAgentHarnessSessionImpl } from "./compaction.js";
 
@@ -33,6 +36,24 @@ export function createHarnessAttemptParams(
     thinkLevel: "low",
     config,
   } as EmbeddedRunAttemptParams;
+}
+
+export function createHarnessAttemptResult(sessionIdUsed: string): EmbeddedRunAttemptResult {
+  return {
+    terminal: { kind: "ok" },
+    sessionIdUsed,
+    messagesSnapshot: [],
+    assistantTexts: [`${sessionIdUsed} ok`],
+    toolMetas: [],
+    lastAssistant: undefined,
+    didSendViaMessagingTool: false,
+    messagingToolSentTexts: [],
+    messagingToolSentMediaUrls: [],
+    messagingToolSentTargets: [],
+    cloudCodeAssistFormatError: false,
+    replayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
+    itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
+  };
 }
 
 export function createHarnessCompactionFixture(

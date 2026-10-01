@@ -19,6 +19,7 @@ import {
   createDoctorConfigFixture,
   createDoctorHealthFlowContext,
   createDoctorLintContext,
+  createDoctorLintFixture,
   createDoctorPrompterFixture,
   createGatewayWriterFixture,
   resolveDoctorHealthContributions,
@@ -669,18 +670,6 @@ function createDoctorContext({
   return createDoctorHealthFlowContext({
     configPath: "/tmp/fake-openclaw.json",
     prompter: createDoctorPrompterFixture(shouldRepair),
-    ...overrides,
-  });
-}
-
-function createDoctorLintFixture(
-  cfg: OpenClawConfig | Record<string, unknown> = {},
-  overrides: Omit<Parameters<typeof createDoctorLintContext>[0], "cfg"> = {},
-) {
-  return createDoctorLintContext({
-    cfg: cfg as OpenClawConfig,
-    mode: "lint",
-    runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
     ...overrides,
   });
 }

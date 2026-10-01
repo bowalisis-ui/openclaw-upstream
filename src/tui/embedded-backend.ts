@@ -177,10 +177,9 @@ function ensureEmbeddedHistoryRuntimePluginsLoaded(params: {
   sessionAgentId: string;
 }): { status: "warmed" } | { status: "failed"; error: string } {
   try {
-    const workspaceDir = resolveAgentWorkspaceDir(params.cfg, params.sessionAgentId);
     loadAgentRuntimePluginRegistryHandle({
       config: params.cfg,
-      workspaceDir,
+      workspaceDir: resolveAgentWorkspaceDir(params.cfg, params.sessionAgentId),
     });
     return { status: "warmed" };
   } catch (err) {

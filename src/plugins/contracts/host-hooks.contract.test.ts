@@ -132,11 +132,7 @@ function policyRegistry(...evaluators: PluginTrustedToolPolicyRegistration["eval
 function requireFirstCommandRegistration(
   registry: ReturnType<typeof createPluginRegistryFixture>["registry"]["registry"],
 ) {
-  const registration = registry.commands[0];
-  if (!registration) {
-    throw new Error("expected first plugin command registration");
-  }
-  return registration;
+  return expectDefined(registry.commands[0], "expected first plugin command registration");
 }
 
 function diagnosticSummaries(diagnostics: readonly unknown[]) {

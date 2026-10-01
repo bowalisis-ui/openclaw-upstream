@@ -17,6 +17,7 @@ import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths
 import {
   createPluginCliConfigIO,
   createPluginCliConfigSnapshot,
+  createPluginCliConfigSnapshotForWrite,
 } from "./plugins-cli-config.test-support.js";
 import type { CliMockOutputRuntime } from "./test-runtime-capture.js";
 
@@ -970,17 +971,9 @@ export function resetPluginsCliTestState() {
   readConfigFileSnapshotMock.mockImplementation(async () =>
     createPluginCliConfigSnapshot(getRuntimeConfig()),
   );
-  readConfigFileSnapshotForWriteMock.mockImplementation(async () => {
-    const snapshot = (await readConfigFileSnapshotMock()) as { path: string };
-    return {
-      snapshot,
-      writeOptions: {
-        assertConfigPathForWrite: () => {},
-        expectedConfigPath: snapshot.path,
-        ownedConfigPathForWrite: snapshot.path,
-      },
-    };
-  });
+  readConfigFileSnapshotForWriteMock.mockImplementation(async () =>
+    createPluginCliConfigSnapshotForWrite((await readConfigFileSnapshotMock()) as { path: string }),
+  );
   configWriteMock.mockResolvedValue(undefined);
   replaceConfigFileMock.mockImplementation(async (params) => {
     params.writeOptions?.assertConfigPathForWrite?.();

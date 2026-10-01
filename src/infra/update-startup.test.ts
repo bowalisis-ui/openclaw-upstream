@@ -440,22 +440,11 @@ describe("update-startup", () => {
     };
   }
 
-  function createBetaAutoUpdateConfig() {
+  function createUpdateConfig(channel: "beta" | "extended-stable", autoEnabled = false) {
     return {
       update: {
-        channel: "beta" as const,
-        auto: {
-          enabled: true,
-        },
-      },
-    };
-  }
-
-  function createExtendedStableConfig(params?: { autoEnabled?: boolean }) {
-    return {
-      update: {
-        channel: "extended-stable" as const,
-        ...(params?.autoEnabled ? { auto: { enabled: true } } : {}),
+        channel,
+        ...(autoEnabled ? { auto: { enabled: true } } : {}),
       },
     };
   }
@@ -463,7 +452,7 @@ describe("update-startup", () => {
   async function runExtendedStableUpdateCheck(
     params: Partial<Parameters<typeof runGatewayUpdateCheck>[0]> = {},
   ) {
-    await runGatewayUpdateCheck({ cfg: createExtendedStableConfig(), ...params });
+    await runGatewayUpdateCheck({ cfg: createUpdateConfig("extended-stable"), ...params });
   }
 
   async function seedExtendedStableAvailability(params?: {
@@ -626,14 +615,14 @@ describe("update-startup", () => {
     const log = { info: vi.fn() };
 
     await runExtendedStableUpdateCheck({
-      cfg: createExtendedStableConfig({ autoEnabled: true }),
+      cfg: createUpdateConfig("extended-stable", true),
       log,
       onUpdateAvailableChange,
       runAutoUpdate,
     });
     vi.setSystemTime(new Date("2026-01-18T11:00:00Z"));
     await runExtendedStableUpdateCheck({
-      cfg: createExtendedStableConfig({ autoEnabled: true }),
+      cfg: createUpdateConfig("extended-stable", true),
       log,
       onUpdateAvailableChange,
       runAutoUpdate,
@@ -1341,7 +1330,7 @@ describe("update-startup", () => {
     mockPackageUpdateStatus("beta", "2.0.0-beta.1");
     const applying = createDeferred<{ status: "handoff" }>();
     const runAutoUpdate = vi.fn(() => applying.promise);
-    let cfg: OpenClawConfig = createBetaAutoUpdateConfig();
+    let cfg: OpenClawConfig = createUpdateConfig("beta", true);
     const params = {
       getConfig: () => cfg,
       log: { info: vi.fn() },
@@ -1568,7 +1557,7 @@ describe("update-startup", () => {
       process.env.NODE_ENV = "production";
       const log = { info: vi.fn() };
       const stop = scheduleGatewayUpdateCheck({
-        cfg: createBetaAutoUpdateConfig(),
+        cfg: createUpdateConfig("beta", true),
         log,
         activeWorkInspectors: idleActiveWorkInspectors(),
       });
@@ -1623,7 +1612,7 @@ describe("update-startup", () => {
     );
     process.env.NODE_ENV = "production";
     const stop = scheduleGatewayUpdateCheck({
-      cfg: createBetaAutoUpdateConfig(),
+      cfg: createUpdateConfig("beta", true),
       activeWorkInspectors: idleActiveWorkInspectors(),
     });
     try {
@@ -1656,7 +1645,7 @@ describe("update-startup", () => {
     transferManagedServiceUpdateHandoffMock.mockReturnValueOnce(transferred.promise);
     process.env.NODE_ENV = "production";
     const stop = scheduleGatewayUpdateCheck({
-      cfg: createBetaAutoUpdateConfig(),
+      cfg: createUpdateConfig("beta", true),
       activeWorkInspectors: idleActiveWorkInspectors(),
     });
     try {
@@ -1771,7 +1760,7 @@ describe("update-startup", () => {
     const log = { info: vi.fn() };
 
     await runGatewayUpdateCheck({
-      cfg: { update: { ...createBetaAutoUpdateConfig().update, checkOnStart: false } },
+      cfg: { update: { ...createUpdateConfig("beta", true).update, checkOnStart: false } },
       runAutoUpdate,
       log,
     });
@@ -1795,7 +1784,7 @@ describe("update-startup", () => {
     const runAutoUpdate = createAutoUpdateSuccessMock();
 
     await runGatewayUpdateCheck({
-      cfg: createBetaAutoUpdateConfig(),
+      cfg: createUpdateConfig("beta", true),
       log,
       runAutoUpdate,
     });
@@ -1816,7 +1805,7 @@ describe("update-startup", () => {
     const runAutoUpdate = createAutoUpdateSuccessMock();
 
     await runGatewayUpdateCheck({
-      cfg: createBetaAutoUpdateConfig(),
+      cfg: createUpdateConfig("beta", true),
       log,
       runAutoUpdate,
     });
@@ -1833,7 +1822,7 @@ describe("update-startup", () => {
     process.env.OPENCLAW_PROFILE = "work";
     mockPackageInstallStatus();
     mockNpmChannelTag("beta", "2.0.0-beta.1");
-    await runAutoUpdateCheckWithDefaults({ cfg: createBetaAutoUpdateConfig() });
+    await runAutoUpdateCheckWithDefaults({ cfg: createUpdateConfig("beta", true) });
 
     expect(runCommandWithTimeout).not.toHaveBeenCalled();
     expect(startManagedServiceUpdateHandoffMock).not.toHaveBeenCalled();
@@ -1868,7 +1857,7 @@ describe("update-startup", () => {
     const terminalSentinels: Array<ReturnType<typeof readRestartSentinel>> = [];
 
     await runGatewayUpdateCheck({
-      cfg: createBetaAutoUpdateConfig(),
+      cfg: createUpdateConfig("beta", true),
       log,
       activeWorkInspectors: idleActiveWorkInspectors(),
       onUpdateScheduleChange: (schedule) => {
@@ -1918,7 +1907,7 @@ describe("update-startup", () => {
     });
 
     await runAutoUpdateCheckWithDefaults({
-      cfg: createBetaAutoUpdateConfig(),
+      cfg: createUpdateConfig("beta", true),
     });
 
     expect(scheduleGatewayRestartMock).not.toHaveBeenCalled();

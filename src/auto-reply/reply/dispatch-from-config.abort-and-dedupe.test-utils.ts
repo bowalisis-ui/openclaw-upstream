@@ -1686,21 +1686,7 @@ describe("dispatchReplyFromConfig", () => {
         AccountId: "default",
         SessionKey: "agent:main:signal:+15551230000",
       });
-      const replyResolver = vi.fn(async (_ctx: MsgContext, options?: GetReplyOptions) => {
-        await options?.onToolResult?.({
-          text: "Approval required.",
-          channelData: {
-            execApproval: {
-              approvalId: "12345678-1234-1234-1234-123456789012",
-              approvalSlug: "12345678",
-              approvalKind: "exec",
-              sessionKey: "agent:main:signal:+15551230000",
-              allowedDecisions: ["allow-once", "allow-always", "deny"],
-            },
-          },
-        });
-        return { text: "done" } as ReplyPayload;
-      });
+      const replyResolver = createNativeApprovalReplyResolver("signal");
 
       await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
 

@@ -101,6 +101,19 @@ const loadConfigMock = vi.fn<() => SessionsToolTestConfig>(() => ({
   tools: { agentToAgent: { enabled: false } },
 }));
 
+function mockSessionVisibility(
+  visibility: "self" | "tree" | "agent" | "all",
+  agentToAgent = false,
+) {
+  loadConfigMock.mockReturnValue({
+    session: { scope: "per-sender", mainKey: "main" },
+    tools: {
+      agentToAgent: { enabled: agentToAgent },
+      sessions: { visibility },
+    },
+  });
+}
+
 vi.mock("../../config/config.js", async () => {
   const actual =
     await vi.importActual<typeof import("../../config/config.js")>("../../config/config.js");
@@ -245,13 +258,7 @@ async function executeFireAndForgetA2AFrom(
   const { runSessionsSendA2AFlow } = await import("./sessions-send-tool.a2a.js");
   vi.mocked(runSessionsSendA2AFlow).mockClear();
   const targetSessionKey = "agent:other:discord:group:ops";
-  loadConfigMock.mockReturnValue({
-    session: { scope: "per-sender", mainKey: "main" },
-    tools: {
-      agentToAgent: { enabled: true },
-      sessions: { visibility: "all" },
-    },
-  });
+  mockSessionVisibility("all", true);
   callGatewayMock.mockImplementation(async (opts: unknown) => {
     const request = opts as { method?: string };
     if (request.method === "sessions.list") {
@@ -628,13 +635,7 @@ describe("sessions_list gating", () => {
   });
 
   it("keeps requester-owned cross-agent rows with tree visibility without a spawned lookup", async () => {
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: false },
-        sessions: { visibility: "tree" },
-      },
-    });
+    mockSessionVisibility("tree");
     callGatewayMock.mockResolvedValueOnce({
       path: "/tmp/sessions.json",
       sessions: [
@@ -657,13 +658,7 @@ describe("sessions_list gating", () => {
   });
 
   it("keeps requester-owned cross-agent rows with all visibility when a2a is disabled", async () => {
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: false },
-        sessions: { visibility: "all" },
-      },
-    });
+    mockSessionVisibility("all");
     callGatewayMock.mockResolvedValueOnce({
       path: "/tmp/sessions.json",
       sessions: [
@@ -687,13 +682,7 @@ describe("sessions_list gating", () => {
   });
 
   it("includes visibility metadata when session visibility is restricted", async () => {
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: true },
-        sessions: { visibility: "tree" },
-      },
-    });
+    mockSessionVisibility("tree", true);
 
     const result = await createMainSessionsListTool().execute("call1", {});
 
@@ -728,13 +717,7 @@ describe("sessions_list gating", () => {
 describe("sessions_list channel derivation", () => {
   beforeEach(() => {
     callGatewayMock.mockClear();
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: true },
-        sessions: { visibility: "all" },
-      },
-    });
+    mockSessionVisibility("all", true);
   });
 
   it("falls back to origin.provider when the legacy top-level channel field is missing", async () => {
@@ -1114,13 +1097,7 @@ describe("sessions_send gating", () => {
 
   it("rejects direct thread session targets before dispatching an agent run", async () => {
     setActivePluginRegistry(createSessionConversationTestRegistry());
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: false },
-        sessions: { visibility: "all" },
-      },
-    });
+    mockSessionVisibility("all");
     const threadSessionKey = "agent:main:slack:channel:C123:thread:1710000000.000100";
     const tool = createMainSessionsSendTool();
 
@@ -1141,13 +1118,7 @@ describe("sessions_send gating", () => {
   });
 
   it("rejects Telegram topic session targets before dispatching an agent run", async () => {
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: false },
-        sessions: { visibility: "all" },
-      },
-    });
+    mockSessionVisibility("all");
     const topicSessionKey = "agent:main:telegram:group:-100123:topic:77";
     facadeRuntimeMock.sessionKeyResolvers.set("telegram", ({ kind, rawId }) => {
       if (kind !== "group") {
@@ -1182,13 +1153,7 @@ describe("sessions_send gating", () => {
 
   it("rejects label targets that resolve to canonical thread sessions", async () => {
     setActivePluginRegistry(createSessionConversationTestRegistry());
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: false },
-        sessions: { visibility: "all" },
-      },
-    });
+    mockSessionVisibility("all");
     const threadSessionKey = "agent:main:discord:channel:123456:thread:987654";
     callGatewayMock.mockResolvedValueOnce({ key: threadSessionKey });
     const tool = createMainSessionsSendTool();
@@ -1212,13 +1177,7 @@ describe("sessions_send gating", () => {
 
   it("does not disclose a resolved thread session key from a sessionId target", async () => {
     setActivePluginRegistry(createSessionConversationTestRegistry());
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: false },
-        sessions: { visibility: "all" },
-      },
-    });
+    mockSessionVisibility("all");
     const threadSessionKey = "agent:other:discord:channel:123456:thread:987654";
     callGatewayMock.mockResolvedValueOnce({ key: threadSessionKey });
     const tool = createMainSessionsSendTool();
@@ -1599,13 +1558,7 @@ describe("sessions_send agent-main materialization provenance", () => {
   it("uses the trusted in-process creation stamp in the production assembly (no injected caller)", async () => {
     inProcessGatewayContextAvailable = true;
     inProcessCreationMock.mockClear();
-    loadConfigMock.mockReturnValue({
-      session: { scope: "per-sender", mainKey: "main" },
-      tools: {
-        agentToAgent: { enabled: false },
-        sessions: { visibility: "all" },
-      },
-    });
+    mockSessionVisibility("all");
     callGatewayMock.mockImplementation(async (opts: unknown) => {
       const request = opts as { method?: string };
       if (request.method === "sessions.resolve") {

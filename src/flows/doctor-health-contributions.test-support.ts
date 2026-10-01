@@ -33,6 +33,18 @@ export function createDoctorLintContext(
   return fixture as DoctorLintContext;
 }
 
+export function createDoctorLintFixture(
+  cfg: OpenClawConfig | Record<string, unknown> = {},
+  overrides: Omit<Parameters<typeof createDoctorLintContext>[0], "cfg"> = {},
+) {
+  return createDoctorLintContext({
+    cfg: cfg as OpenClawConfig,
+    mode: "lint",
+    runtime: { log: vi.fn(), error: vi.fn(), exit: vi.fn() },
+    ...overrides,
+  });
+}
+
 export function createDoctorPrompterFixture(shouldRepair = false): DoctorPrompter {
   return {
     confirm: vi.fn(async () => shouldRepair),

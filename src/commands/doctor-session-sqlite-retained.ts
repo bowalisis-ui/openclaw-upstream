@@ -15,13 +15,15 @@ import {
 } from "../infra/deferred-plugin-migrations.js";
 import {
   DeferredPluginSessionImportSchema,
+  type DeferredPluginSessionImport,
+} from "../infra/deferred-plugin-session-receipt-identity.js";
+import {
   hasDeferredPluginSessionImport,
   prepareSessionSourceVerification,
   readDeferredPluginSessionImport,
   readDeferredPluginSessionImportReceipt,
   rebuildDeferredPluginSessionSourceIndex,
   resolveVerifiedSessionSource,
-  type DeferredPluginSessionImport,
   type SessionImportSource,
 } from "../infra/deferred-plugin-session-sources.js";
 import { formatErrorMessage } from "../infra/errors.js";

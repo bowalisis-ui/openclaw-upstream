@@ -361,14 +361,20 @@ type MockGetApiKeyForModelParams = {
   profileId?: string;
   model?: { api?: string };
 };
-export const mockedGetApiKeyForModel = vi.fn<
-  (params?: MockGetApiKeyForModelParams) => Promise<ResolvedProviderAuth>
->(async ({ profileId }: MockGetApiKeyForModelParams = {}) => ({
-  apiKey: "test-key",
-  profileId: profileId ?? "test-profile",
-  source: "test",
-  mode: "api-key",
-}));
+async function createMockProviderAuth({
+  profileId,
+}: MockGetApiKeyForModelParams = {}): Promise<ResolvedProviderAuth> {
+  return {
+    apiKey: "test-key",
+    profileId: profileId ?? "test-profile",
+    source: "test",
+    mode: "api-key",
+  };
+}
+export const mockedGetApiKeyForModel =
+  vi.fn<(params?: MockGetApiKeyForModelParams) => Promise<ResolvedProviderAuth>>(
+    createMockProviderAuth,
+  );
 const mockedIsProfileInCooldown = vi.fn(
   (_store: unknown, _profileId: string, _now?: number, _modelId?: string) => false,
 );
@@ -596,14 +602,7 @@ function resetRunOverflowCompactionHarnessMocks(): void {
       `Model context window too small (${params.guard.tokens} tokens; source=${params.guard.source}). Minimum is 1000.`,
   );
   mockedGetApiKeyForModel.mockReset();
-  mockedGetApiKeyForModel.mockImplementation(
-    async ({ profileId }: MockGetApiKeyForModelParams = {}) => ({
-      apiKey: "test-key",
-      profileId: profileId ?? "test-profile",
-      source: "test",
-      mode: "api-key",
-    }),
-  );
+  mockedGetApiKeyForModel.mockImplementation(createMockProviderAuth);
   mockedIsProfileInCooldown.mockReset();
   mockedIsProfileInCooldown.mockReturnValue(false);
   mockedMarkAuthProfileFailure.mockReset();
@@ -670,14 +669,7 @@ export function resetSharedRunIntegrationHarnessMocks(): void {
   mockedFormatAssistantErrorText.mockReset();
   mockedFormatAssistantErrorText.mockReturnValue("");
   mockedGetApiKeyForModel.mockReset();
-  mockedGetApiKeyForModel.mockImplementation(
-    async ({ profileId }: MockGetApiKeyForModelParams = {}) => ({
-      apiKey: "test-key",
-      profileId: profileId ?? "test-profile",
-      source: "test",
-      mode: "api-key",
-    }),
-  );
+  mockedGetApiKeyForModel.mockImplementation(createMockProviderAuth);
   mockedGlobalHookRunner.hasHooks.mockReset();
   mockedGlobalHookRunner.hasHooks.mockReturnValue(false);
   mockedGlobalHookRunner.runBeforeAgentReply.mockReset();

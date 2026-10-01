@@ -3,6 +3,14 @@ import { Command } from "commander";
 import "../infra/runtime-process-entrypoints.js";
 import { registerCapabilityCli } from "./capability-cli.js";
 
+export function createIsomBrandBuffer(brand: "hevc" | "msf1"): Buffer {
+  const buffer = Buffer.alloc(24);
+  buffer.writeUInt32BE(buffer.length, 0);
+  buffer.write("ftyp", 4, "ascii");
+  buffer.write(brand, 8, "ascii");
+  return buffer;
+}
+
 export async function runCap(...argv: string[]): Promise<void> {
   const program = new Command();
   await registerCapabilityCli(program, ["node", "openclaw", ...argv]);

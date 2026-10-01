@@ -1,4 +1,22 @@
-import { expect, it, vi, type Mock } from "vitest";
+import { expect, it, vi, type Mock, type MockInstance } from "vitest";
+
+export async function withCliExitSpies(
+  run: (
+    errorSpy: MockInstance<typeof console.error>,
+    exitSpy: MockInstance<typeof process.exit>,
+  ) => Promise<void>,
+): Promise<void> {
+  const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
+    throw new Error(`exit:${String(code)}`);
+  });
+  try {
+    await run(errorSpy, exitSpy);
+  } finally {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+  }
+}
 
 export async function withCliTty(value: boolean, fn: () => Promise<void>): Promise<void> {
   const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");

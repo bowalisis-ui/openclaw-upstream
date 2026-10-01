@@ -8,6 +8,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { inspectLocalAudioSelection } from "../media-understanding/local-audio.js";
 import { registerCapabilityCli } from "./capability-cli.js";
 import {
+  createIsomBrandBuffer,
   runCap,
   runCapability,
   runCapabilityWithParentAgent,
@@ -17,14 +18,6 @@ import {
 const PNG_1X1_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yf7kAAAAASUVORK5CYII=";
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
-
-function createIsomBrandBuffer(brand: "hevc" | "msf1"): Buffer {
-  const buffer = Buffer.alloc(24);
-  buffer.writeUInt32BE(buffer.length, 0);
-  buffer.write("ftyp", 4, "ascii");
-  buffer.write(brand, 8, "ascii");
-  return buffer;
-}
 
 function primeOpenAiAuthProfile(mode: "api-key" | "token" = "api-key"): void {
   mocks.resolveApiKeyForProviderCore.mockResolvedValueOnce({

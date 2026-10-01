@@ -90,6 +90,7 @@ import {
 } from "./selection.js";
 import {
   createHarnessAttemptParams,
+  createHarnessAttemptResult as createAttemptResult,
   createHarnessCompactionFixture,
   privateHarnessParamCases,
   withOwnedHarnessGeneration,
@@ -290,24 +291,6 @@ afterEach(async () => {
 
 function createAttemptParams(config?: OpenClawConfig): EmbeddedRunAttemptParams {
   return createHarnessAttemptParams(selectionAdmittedRunContext, config);
-}
-
-function createAttemptResult(sessionIdUsed: string): EmbeddedRunAttemptResult {
-  return {
-    terminal: { kind: "ok" },
-    sessionIdUsed,
-    messagesSnapshot: [],
-    assistantTexts: [`${sessionIdUsed} ok`],
-    toolMetas: [],
-    lastAssistant: undefined,
-    didSendViaMessagingTool: false,
-    messagingToolSentTexts: [],
-    messagingToolSentMediaUrls: [],
-    messagingToolSentTargets: [],
-    cloudCodeAssistFormatError: false,
-    replayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
-    itemLifecycle: { startedCount: 0, completedCount: 0, activeCount: 0 },
-  };
 }
 
 function createTranscriptAnchor(

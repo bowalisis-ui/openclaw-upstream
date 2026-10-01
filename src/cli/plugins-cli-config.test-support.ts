@@ -8,6 +8,17 @@ export function createPluginCliConfigSnapshot(config: OpenClawConfig): ConfigFil
   return { ...snapshot, parsed: config, hash: "mock" };
 }
 
+export function createPluginCliConfigSnapshotForWrite(snapshot: { path: string }) {
+  return {
+    snapshot,
+    writeOptions: {
+      assertConfigPathForWrite: () => {},
+      expectedConfigPath: snapshot.path,
+      ownedConfigPathForWrite: snapshot.path,
+    },
+  };
+}
+
 export function createPluginCliConfigIO(params: {
   original: ConfigIO;
   configPath?: string;

@@ -1,6 +1,6 @@
 import type { SessionStoreTarget } from "../config/sessions/session-store-target.types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import type { DeferredPluginSessionImport } from "../infra/deferred-plugin-session-sources.js";
+import type { DeferredPluginSessionImport } from "../infra/deferred-plugin-session-receipt-identity.js";
 import {
   isSessionSqliteMigrationWarning,
   type DoctorSessionSqliteIssue,

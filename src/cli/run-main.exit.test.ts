@@ -3,17 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { CommanderError } from "commander";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-  type MockInstance,
-} from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { ConfigSnapshotReadOptions } from "../config/io.types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -29,7 +19,11 @@ import { captureEnv, withEnvAsync } from "../test-utils/env.js";
 import { ExpectedCliError } from "./failure-output.js";
 import { getGatewayRunRuntimeHooks } from "./gateway-cli/runtime-hooks.js";
 import type { RootHelpRenderOptions } from "./program/root-help.js";
-import { registerBareRootArgumentTests, withCliTty } from "./run-main.bare-root.test-support.js";
+import {
+  registerBareRootArgumentTests,
+  withCliExitSpies,
+  withCliTty,
+} from "./run-main.bare-root.test-support.js";
 import {
   makeProxyHandle,
   registerRunMainProxyExitTests,
@@ -444,24 +438,6 @@ vi.mock("../infra/net/proxy/proxy-lifecycle.js", () => ({
   startProxy: startProxyMock,
   stopProxy: stopProxyMock,
 }));
-
-async function withCliExitSpies(
-  run: (
-    errorSpy: MockInstance<typeof console.error>,
-    exitSpy: MockInstance<typeof process.exit>,
-  ) => Promise<void>,
-): Promise<void> {
-  const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
-    throw new Error(`exit:${String(code)}`);
-  });
-  try {
-    await run(errorSpy, exitSpy);
-  } finally {
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
-  }
-}
 
 async function runGatewayBeforeHook(opts: { reset?: boolean } = {}): Promise<void> {
   await addGatewayRunCommandMock.mock.calls[0]?.[1]?.beforeRun?.(opts);
