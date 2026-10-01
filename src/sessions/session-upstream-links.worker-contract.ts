@@ -1,5 +1,5 @@
 import type { SessionEntryCurrentSource } from "../config/sessions/session-entry-current.types.js";
-import type { SessionUpstreamJsonValue } from "../plugins/session-catalog.js";
+import type { SessionUpstreamJsonValue } from "../plugins/session-catalog.types.js";
 import type { SessionUpstreamLink } from "./session-upstream-links.kernel.js";
 
 export type SessionUpstreamSettlement =
