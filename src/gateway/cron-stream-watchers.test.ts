@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import type { CronJob } from "../cron/types.js";
+import { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { createProcessSupervisor } from "../process/supervisor/supervisor.js";
 import type {
   ManagedRun,
@@ -907,42 +908,47 @@ describe("cron stream watchers", () => {
 
   it("supervises a real Node line source and tears it down", async () => {
     vi.useRealTimers();
+    const scheduler = new GatewayScheduler();
     const supervisor = createProcessSupervisor();
     const fireBatch = vi.fn(async () => "fired" as const);
     const { watchers } = createCronStreamWatcherFixture({
+      scheduler,
       getProcessSupervisor: () => supervisor,
       minIntervalMs: 1,
       fireBatch,
     });
-    await watchers.reconcile(
-      [
-        job({
-          schedule: {
-            kind: "stream",
-            command: [
-              process.execPath,
-              "-e",
-              "console.log('live-line'); setInterval(() => {}, 1000)",
-            ],
-            batchMs: 50,
-          },
-        }),
-      ],
-      true,
-    );
-    await vi.waitFor(
-      () =>
-        expect(fireBatch).toHaveBeenCalledWith(
-          expect.any(Object),
-          "live-line",
-          expect.any(String),
-          expect.any(String),
-        ),
-      {
-        timeout: 3_000,
-      },
-    );
-    await watchers.stopAll("shutdown");
+    try {
+      await watchers.reconcile(
+        [
+          job({
+            schedule: {
+              kind: "stream",
+              command: [
+                process.execPath,
+                "-e",
+                "console.log('live-line'); setInterval(() => {}, 1000)",
+              ],
+              batchMs: 50,
+            },
+          }),
+        ],
+        true,
+      );
+      await vi.waitFor(
+        () =>
+          expect(fireBatch).toHaveBeenCalledWith(
+            expect.any(Object),
+            "live-line",
+            expect.any(String),
+            expect.any(String),
+          ),
+        {
+          timeout: 3_000,
+        },
+      );
+    } finally {
+      await Promise.all([watchers.stopAll("shutdown"), scheduler.stop()]);
+    }
     expect(watchers.activeJobIds()).toEqual([]);
   });
 });

@@ -50,7 +50,7 @@ import type { CronJob } from "../cron/types.js";
 import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { resolveMainScopedEventSessionKey } from "../infra/event-session-routing.js";
-import type { GatewayScheduler, GatewayScheduledJob } from "../infra/gateway-scheduler.js";
+import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import {
   resolveHeartbeatForWake,
   resolveHeartbeatTimeoutOverrideSeconds,
@@ -1203,7 +1203,7 @@ export function buildGatewayCronService(params: {
       } else {
         stopExitWatchers();
       }
-      stopSystemJobReconcileRetry();
+      stopSystemJobReconciliation();
       void stopStreamWatchers().catch((err: unknown) => {
         cronLogger.warn(
           { err: formatErrorMessage(err) },
@@ -1222,8 +1222,13 @@ export function buildGatewayCronService(params: {
   const stopAndDrainCron = async (preserveExitWatchers = false) => {
     stopCronLifecycle(preserveExitWatchers);
     await drainGatewayCron({
-      exitWatchersStop: exitWatchersStopPromise ?? Promise.resolve(),
-      streamWatchersStop: stopStreamWatchers(),
+      settlements: [
+        cron.waitForIdle(),
+        systemJobScopeDrain,
+        systemJobReconcileTail,
+        exitWatchersStopPromise ?? Promise.resolve(),
+        stopStreamWatchers(),
+      ],
       logger: cronLogger,
     });
   };
@@ -1231,22 +1236,26 @@ export function buildGatewayCronService(params: {
     await stopAndDrainCron();
   };
   // Serialize accepted-config convergence; newer requests and stop supersede this tail.
-  let systemJobReconcileEpoch = 0;
   let systemJobReconcileTail = Promise.resolve<GatewaySystemJobReconciliationResult>("converged");
-  let systemJobRetryTimer: GatewayScheduledJob | undefined;
-  const stopSystemJobReconcileRetry = () => {
-    // Also invalidate any in-flight pass so a post-stop retry cannot fire.
-    systemJobReconcileEpoch += 1;
-    systemJobRetryTimer?.cancel();
-    systemJobRetryTimer = undefined;
+  let systemJobScope = params.scheduler.scope();
+  let systemJobScopeDrain = Promise.resolve();
+  const stopSystemJobReconciliation = () => {
+    // A retry can retire its own scope; only external shutdown joins its callback.
+    systemJobScopeDrain = Promise.all([systemJobScopeDrain, systemJobScope.stop()]).then(
+      () => undefined,
+    );
   };
   const reconcileSystemJobs = (): Promise<GatewaySystemJobReconciliationResult> => {
-    stopSystemJobReconcileRetry();
-    const epoch = systemJobReconcileEpoch;
+    if (systemJobScope.signal.aborted) {
+      return Promise.resolve("superseded");
+    }
+    stopSystemJobReconciliation();
+    const scope = (systemJobScope = params.scheduler.scope());
+    const isCurrent = () => scope === systemJobScope && !scope.signal.aborted;
     const pass = async (): Promise<GatewaySystemJobReconciliationResult> => {
       const cfg = getRuntimeConfig();
       const assertCurrent = () => {
-        if (epoch !== systemJobReconcileEpoch || cfg !== getRuntimeConfig()) {
+        if (!isCurrent() || cfg !== getRuntimeConfig()) {
           throw new GatewaySystemJobReconciliationSupersededError();
         }
       };
@@ -1267,7 +1276,7 @@ export function buildGatewayCronService(params: {
           converged &&= ok;
         }
         if (!converged) {
-          systemJobRetryTimer = params.scheduler.schedule({
+          scope.schedule({
             id: `cron:${storePath}:system-jobs`,
             delayMs: 30_000,
             run: reconcileSystemJobs,
@@ -1280,7 +1289,7 @@ export function buildGatewayCronService(params: {
         }
         // A no-op accepted replacement may not request another pass. Finish
         // against its config; an explicit newer request or stop owns its own tail.
-        return epoch === systemJobReconcileEpoch ? await pass() : "superseded";
+        return isCurrent() ? await pass() : "superseded";
       }
     };
     systemJobReconcileTail = systemJobReconcileTail.then(pass, pass);
@@ -1317,6 +1326,9 @@ export function buildGatewayCronService(params: {
     await reconcileStreamWatchers();
     if (lifecycleChanged()) {
       return;
+    }
+    if (systemJobScope.signal.aborted) {
+      systemJobScope = params.scheduler.scope();
     }
     await reconcileSystemJobs();
     if (lifecycleChanged()) {
