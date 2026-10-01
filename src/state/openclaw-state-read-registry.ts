@@ -8,7 +8,7 @@ import {
 import { listRegistryWorktreesInDatabase } from "../agents/worktrees/registry-read.kernel.js";
 import { readWorktreeRunLeaseStateInDatabase } from "../agents/worktrees/run-lease-owner.js";
 import { getFleetCellInDatabase, listFleetCellsInDatabase } from "../fleet/registry.kernel.js";
-import { readPreparedPoolPresenceDemandInDatabase } from "../gateway/worker-environments/prepared-pool-presence-store.js";
+import { readPreparedPoolPresenceDemandInDatabase } from "../gateway/worker-environments/prepared-pool-presence-store.worker.js";
 import {
   readWorkerEnvironmentFacts,
   readWorkerEnvironmentPrunePage,

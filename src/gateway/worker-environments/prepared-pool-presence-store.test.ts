@@ -12,7 +12,7 @@ import {
 import {
   readPreparedPoolPresenceDemandInDatabase,
   writePreparedPoolPresenceDemandInDatabase,
-} from "./prepared-pool-presence-store.js";
+} from "./prepared-pool-presence-store.worker.js";
 import {
   readPreparedPoolPresenceDemand,
   writePreparedPoolPresenceDemand,

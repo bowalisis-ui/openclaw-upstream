@@ -9,7 +9,7 @@ import type { DoctorWorkerOperations } from "../commands/doctor-state.worker.js"
 import type { FleetRegistryWriteOperations } from "../fleet/registry.worker-contract.js";
 import type { ManagedImageRecordWorkerOperations } from "../gateway/managed-image-record-store.kernel.js";
 import type { OperatorApprovalWorkerOperations } from "../gateway/operator-approval-store.worker-contract.js";
-import type { PreparedPoolPresenceWorkerOperations } from "../gateway/worker-environments/prepared-pool-presence-runtime.js";
+import type { PreparedPoolPresenceWorkerOperations } from "../gateway/worker-environments/prepared-pool-presence.worker.js";
 import type { DeliveryQueueWorkerOperations } from "../infra/delivery-queue.worker-contract.js";
 import type { DevicePairingWorkerOperations } from "../infra/device-pairing-worker-contract.js";
 import type { ExecAuthorizationWorkerOperations } from "../infra/exec-approvals-authorization.worker-contract.js";
@@ -71,7 +71,7 @@ export type RegisteredStateWorkerOperations = WebPushWorkerOperations &
 
 export const stateWorkerRegistry = createWorkerOperationRegistry<RegisteredStateWorkerOperations>({
   preparedPoolPresence: () =>
-    import("../gateway/worker-environments/prepared-pool-presence-runtime.js").then(
+    import("../gateway/worker-environments/prepared-pool-presence.worker.js").then(
       (m) => m.preparedPoolPresenceOperations,
     ),
   projects: () =>

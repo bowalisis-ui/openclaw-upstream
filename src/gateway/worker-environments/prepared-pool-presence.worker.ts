@@ -4,7 +4,7 @@ import type {
   WorkerOperationHandlers,
   WorkerOperations,
 } from "../../state/worker-operation-registry.js";
-import { writePreparedPoolPresenceDemandInDatabase } from "./prepared-pool-presence-store.js";
+import { writePreparedPoolPresenceDemandInDatabase } from "./prepared-pool-presence-store.worker.js";
 import type { PreparedPoolPresenceDemand } from "./prepared-pool-presence.types.js";
 
 export const preparedPoolPresenceOperations = {
