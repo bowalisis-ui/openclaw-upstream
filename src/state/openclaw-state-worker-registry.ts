@@ -24,6 +24,7 @@ import type { ModelCatalogWorkerOperations } from "../model-catalog/remote-store
 import type { NodeWorkerJournalWorkerOperations } from "../node-host/node-worker-journal.worker-contract.js";
 import type { PluginBlobWorkerOperations } from "../plugin-state/plugin-blob-store.worker.js";
 import type { PluginRuntimeWorkerOperations } from "../plugins/state.worker-contract.js";
+import type { ProjectRegistryWorkerOperations } from "../projects/project-registry.worker-contract.js";
 import type { SkillUploadWorkerOperations } from "../skills/lifecycle/upload-store.worker-contract.js";
 import type {
   SkillWorkshopWorkerOperations,
@@ -36,6 +37,7 @@ import { createWorkerOperationRegistry } from "./worker-operation-registry.js";
 
 export type RegisteredStateWorkerOperations = WebPushWorkerOperations &
   PreparedPoolPresenceWorkerOperations &
+  ProjectRegistryWorkerOperations &
   ApnsRegistrationWorkerOperations &
   WorktreeWorkerOperations &
   FleetRegistryWriteOperations &
@@ -72,6 +74,8 @@ export const stateWorkerRegistry = createWorkerOperationRegistry<RegisteredState
     import("../gateway/worker-environments/prepared-pool-presence-runtime.js").then(
       (m) => m.preparedPoolPresenceOperations,
     ),
+  projects: () =>
+    import("../projects/project-registry.worker.js").then((m) => m.projectRegistryOperations),
   operatorApprovals: () =>
     import("../gateway/operator-approval-store.operations.js").then(
       (m) => m.operatorApprovalOperations,
