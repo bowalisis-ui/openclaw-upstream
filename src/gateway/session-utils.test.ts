@@ -2325,7 +2325,7 @@ describe("gateway session utils", () => {
     fs.writeFileSync(path.join(workspace, "avatar-link.png"), "avatar");
     const cfg = createSingleAgentAvatarConfig(workspace);
     if (kind === "data") {
-      cfg.agents!.list![0]!.identity!.avatar = dataUrl;
+      cfg.agents!.entries!.main!.identity!.avatar = dataUrl;
     }
     const browser = await listAgentsForGateway(cfg, undefined, { httpAvatarBasePath: "/control" });
     expect(browser.agents[0]?.identity?.avatarUrl).toMatch(

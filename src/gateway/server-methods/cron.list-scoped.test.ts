@@ -413,7 +413,7 @@ describe("cron.list scoped SQLite snapshots", () => {
         }
         await saveCronStore(storePath, store);
 
-        for (const client of [scopedClient(), null]) {
+        for (const client of [createCronCallerClient("ops"), null]) {
           const page = await listScoped(context, 0, "global", client);
           expect(page.total).toBe(1);
           expect(page.jobs.map((job) => job.id)).toEqual(["job-0000"]);

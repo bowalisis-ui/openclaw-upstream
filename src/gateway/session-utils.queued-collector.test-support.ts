@@ -254,6 +254,7 @@ export function useQueuedCollectorFixture() {
     expect(
       await createInitialSubagentSession({
         cfg: getRuntimeConfig(),
+        requesterAgentId: "main",
         targetAgentId: "main",
         childSessionKey,
         label: "Reserved collector",

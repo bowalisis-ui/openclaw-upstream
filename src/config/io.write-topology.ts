@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import { listAgentEntries, tryResolveDefaultAgentId } from "../agents/agent-scope-config.js";
-import { retireLegacyAgentDefaultMarkers } from "../commands/doctor/shared/legacy-config-migrations.runtime.entries.js";
+import {
+  LEGACY_AGENT_ROSTER_RULES,
+  retireLegacyAgentDefaultMarkers,
+} from "../commands/doctor/shared/legacy-config-migrations.runtime.entries.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { isRecord } from "../utils.js";
 import { pinSurvivorWorkspaceForRosterCollapse } from "./agent-workspace-roster-transition.js";
@@ -15,6 +18,7 @@ import type {
   ReadConfigFileSnapshotWithPluginMetadataResult,
 } from "./io.types.js";
 import { prepareConfigWriteValues } from "./io.write-prepare.js";
+import { findLegacyConfigRuleIssues } from "./legacy.js";
 import { resolveLegacyAgentRosterOwner } from "./legacy.roster.js";
 import type { OpenClawConfig } from "./types.js";
 import { materializeLegacyAgentOwnershipForActiveChannelsResult } from "./validation.js";
@@ -73,8 +77,15 @@ export function prepareConfigWriteTopology(
     explicitSetPaths: options.explicitSetPaths,
     explicitSetValueSource: options.explicitSetValueSource,
   });
-  // Check submitted ownership before this writer stamps the canonical fleet marker.
-  const retiredMarkers = retireLegacyAgentDefaultMarkers(values.resolvedConfig);
+  const sourceRosterIssues = findLegacyConfigRuleIssues(
+    snapshot.sourceConfigBeforeMigrations ?? snapshot.sourceConfig,
+    LEGACY_AGENT_ROSTER_RULES,
+  );
+  // Adapt newly submitted aliases; persisted markers must keep their provenance until Doctor repairs them.
+  const retiredMarkers =
+    sourceRosterIssues.length === 0
+      ? retireLegacyAgentDefaultMarkers(values.resolvedConfig)
+      : undefined;
   let nextConfig = retiredMarkers?.config ?? values.resolvedConfig;
   const retainedLegacyDefaultAgentId = resolveLegacyAgentRosterOwner(
     snapshot.sourceConfigBeforeMigrations ?? snapshot.parsed,

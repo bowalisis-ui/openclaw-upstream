@@ -162,11 +162,9 @@ it.each([false, true])(
         gateway: { mode: "local" },
         plugins: { enabled: false },
         agents: {
-          list: Object.entries(entries).map(([id, config]) => ({
-            id,
-            ...config,
-            ...(legacyDefault && id === "alpha" ? { default: true } : {}),
-          })),
+          list: Object.entries(entries).map(([id, config]) =>
+            Object.assign({ id }, config, legacyDefault && id === "alpha" ? { default: true } : {}),
+          ),
         },
         bindings,
       });

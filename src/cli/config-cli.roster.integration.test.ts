@@ -134,7 +134,7 @@ describe("config cli roster integration", () => {
     const raw = JSON.stringify({
       agents: {
         ownership: "explicit",
-        list: Object.entries(originalEntries).map(([id, entry]) => ({ id, ...entry })),
+        list: Object.entries(originalEntries).map(([id, entry]) => Object.assign({ id }, entry)),
       },
     });
     await withConfig(raw, async ({ configPath }) => {
