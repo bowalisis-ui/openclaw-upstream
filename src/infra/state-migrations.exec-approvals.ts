@@ -107,6 +107,7 @@ export function detectLegacyExecApprovals(params: {
   const sourcePresent = legacyMigrationSourceOrClaimMayExist(sourcePath, DOCTOR_CLAIM_SUFFIX);
   return {
     sourcePath,
+    preview: "- Exec approvals: normalize legacy policy into canonical SQLite state",
     hasLegacy:
       params.doctorOnlyStateMigrations === true &&
       (sourcePresent || hasLegacySqliteExecApprovals(env)),
