@@ -214,7 +214,7 @@ export function buildAgentContext(
   };
 }
 
-export function resolveModelLabel(model?: unknown): string {
+function resolveModelLabel(model?: unknown): string {
   if (!model) {
     return "-";
   }
