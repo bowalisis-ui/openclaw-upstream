@@ -41,6 +41,8 @@ export function prepareTranscriptRewriteSync(
   appendParentId: string | null,
   assertActive: () => void,
   loadedVersion: SessionTranscriptContextVersion | undefined,
+  admit?: (stage: "transaction" | "commit") => void,
+  preparation?: { messagesAlreadyRedacted: true },
 ): (
   entries: Array<SessionEntry | SessionLeafControl>,
   sources: ReadonlyMap<string, SessionEntry>,
@@ -74,15 +76,18 @@ export function prepareTranscriptRewriteSync(
         "Transcript rewrite must own its commit; run it outside the active transaction",
       );
     }
-    // Replays bypass hooks, but retain canonical storage redaction. No payload preparation under BEGIN.
-    for (const entry of entries) {
-      if (entry.type === "message") {
-        entry.message = redactTranscriptMessageForStorage(entry.message, {});
+    // Worker rewrites retain the host's prepared bytes; diagnostic redaction is not idempotent.
+    if (!preparation?.messagesAlreadyRedacted) {
+      for (const entry of entries) {
+        if (entry.type === "message") {
+          entry.message = redactTranscriptMessageForStorage(entry.message, {});
+        }
       }
     }
     let committedVersion: SessionTranscriptContextVersion;
     runOpenClawAgentWriteTransaction(
       (current) => {
+        admit?.("transaction");
         // Custody stages commit first; insert observers must also see the committed manager view.
         // The version is assigned before COMMIT; rollback discards this publication.
         if (!deferOpenClawAgentPostCommitPublication(current, () => adopt(committedVersion))) {
@@ -157,6 +162,7 @@ export function prepareTranscriptRewriteSync(
         assertActive();
         assertOwnedTranscriptWriteCommit(fencedScope);
         committedVersion = readTranscriptContextVersionInTransaction(current, resolved.sessionId);
+        admit?.("commit");
       },
       options,
       { operationLabel: "session.transcript.prepare-rewrite" },

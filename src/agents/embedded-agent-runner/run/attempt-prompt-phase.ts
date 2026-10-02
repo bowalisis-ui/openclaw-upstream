@@ -247,11 +247,11 @@ export async function runEmbeddedAttemptPromptPhase(
         modelId: attempt.modelId,
         provider: attempt.provider,
         sessionManager: {
-          appendCustomEntry: async (customType, data) => {
+          appendCustomEntryAsync: async (customType, data) => {
             await withOwnedTranscriptWrite(() =>
-              withSessionManagerWrite(sessionManager, () => {
+              withSessionManagerWrite(sessionManager, async () => {
                 runAbortController.signal.throwIfAborted();
-                sessionManager.appendCustomEntry(customType, data);
+                await sessionManager.appendCustomEntryAsync(customType, data);
               }),
             );
           },
@@ -450,10 +450,11 @@ export async function runEmbeddedAttemptPromptPhase(
         persistToolResultProjections: async () => {
           if (!isRawModelRun && toolResultPromptProjectionState.frozen.size > 0) {
             await withOwnedTranscriptWrite(() =>
-              withSessionManagerWrite(sessionManager, () => {
+              withSessionManagerWrite(sessionManager, async () => {
                 runAbortController.signal.throwIfAborted();
-                persistToolResultProjections(toolResultPromptProjectionState, (customType, data) =>
-                  sessionManager.appendCustomEntry(customType, data),
+                await persistToolResultProjections(
+                  toolResultPromptProjectionState,
+                  (customType, data) => sessionManager.appendCustomEntryAsync(customType, data),
                 );
               }),
             );
@@ -520,7 +521,7 @@ export async function runEmbeddedAttemptPromptPhase(
   if (pendingMidTurnPrecheckRequest) {
     await withOwnedTranscriptWrite(() =>
       withSessionManagerWrite(sessionManager, async () => {
-        removeTrailingMidTurnPrecheckAssistantError({ activeSession, sessionManager });
+        await removeTrailingMidTurnPrecheckAssistantError({ activeSession, sessionManager });
         const terminal = projectAgentRunAttemptTerminal(input.state.terminal);
         if (!promptState.preflightRecovery && terminal.promptErrorSource !== "precheck") {
           setFailure(null, null);

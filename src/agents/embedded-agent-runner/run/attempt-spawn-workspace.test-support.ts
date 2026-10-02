@@ -184,21 +184,21 @@ const hoisted = vi.hoisted((): AttemptBaseMocks => {
     getEntries: vi.fn(() => []),
     getBranch: vi.fn(() => []),
     getBoundaryCount: vi.fn(() => 0),
-    branch: vi.fn(),
-    resetLeaf: vi.fn(),
+    branchAsync: vi.fn(async () => undefined),
+    resetLeafAsync: vi.fn(async () => undefined),
     buildSessionContext: vi.fn<() => { messages: AgentMessage[] }>(() => ({ messages: [] })),
     appendThinkingLevelChange: vi.fn(),
     appendModelChange: vi.fn(),
-    appendCustomEntry: vi.fn(),
-    appendMessage: vi.fn(),
-    appendSessionInfo: vi.fn(),
-    appendLabelChange: vi.fn(),
+    appendCustomEntryAsync: vi.fn(async (..._args: unknown[]) => undefined),
+    appendMessageAsync: vi.fn(async (..._args: unknown[]) => undefined),
+    appendSessionInfoAsync: vi.fn(async (..._args: unknown[]) => undefined),
+    appendLabelChangeAsync: vi.fn(async (..._args: unknown[]) => undefined),
     flushPendingPersistence: vi.fn(),
-    flushPendingToolResults: vi.fn(),
+    flushPendingToolResultsAsync: vi.fn(async () => undefined),
     clearPendingToolResults: vi.fn(),
-    reloadPersistedTranscript: vi.fn(),
+    reloadPersistedTranscriptAsync: vi.fn(async () => undefined),
     clearNextUserMessagePersistenceSuppression: vi.fn(),
-    removeTrailingEntries: vi.fn(() => 0),
+    removeTrailingEntriesAsync: vi.fn(async () => 0),
   };
   return {
     spawnSubagentDirectMock,
@@ -674,17 +674,17 @@ vi.mock("../../transcript-policy.js", () => ({
 
 vi.mock("../cache-ttl.js", () => ({
   appendCacheTtlTimestamp: (
-    sessionManager: { appendCustomEntry?: (customType: string, data: unknown) => void },
+    sessionManager: { appendCustomEntryAsync?: (customType: string, data: unknown) => void },
     data: unknown,
-  ) => sessionManager.appendCustomEntry?.("openclaw.cache-ttl", data),
+  ) => sessionManager.appendCustomEntryAsync?.("openclaw.cache-ttl", data),
   isCacheTtlEligibleProvider: (provider?: string) => provider === "anthropic",
   readLastCacheTtlTimestamp: (
     sessionManager: {
-      appendCustomEntry?: { mock?: { calls?: unknown[][] } };
+      appendCustomEntryAsync?: { mock?: { calls?: unknown[][] } };
     },
     context?: { provider?: string; modelId?: string },
   ) => {
-    const calls = sessionManager.appendCustomEntry?.mock?.calls ?? [];
+    const calls = sessionManager.appendCustomEntryAsync?.mock?.calls ?? [];
     for (let index = calls.length - 1; index >= 0; index -= 1) {
       const [customType, data] = calls[index] ?? [];
       if (customType !== "openclaw.cache-ttl") {
@@ -1000,20 +1000,20 @@ export function resetEmbeddedAttemptHarness(
   hoisted.sessionManager.getEntries.mockReset().mockReturnValue([]);
   hoisted.sessionManager.getBranch.mockReset().mockReturnValue([]);
   hoisted.sessionManager.getBoundaryCount.mockReset().mockReturnValue(0);
-  hoisted.sessionManager.branch.mockReset();
-  hoisted.sessionManager.resetLeaf.mockReset();
+  hoisted.sessionManager.branchAsync.mockReset();
+  hoisted.sessionManager.resetLeafAsync.mockReset();
   hoisted.sessionManager.clearNextUserMessagePersistenceSuppression.mockReset();
   hoisted.sessionManager.buildSessionContext
     .mockReset()
     .mockReturnValue({ messages: params.sessionMessages ?? [] });
   hoisted.sessionManager.appendThinkingLevelChange.mockReset();
   hoisted.sessionManager.appendModelChange.mockReset();
-  hoisted.sessionManager.appendCustomEntry.mockReset();
-  hoisted.sessionManager.appendMessage.mockReset();
-  hoisted.sessionManager.appendSessionInfo.mockReset();
-  hoisted.sessionManager.appendLabelChange.mockReset();
+  hoisted.sessionManager.appendCustomEntryAsync.mockReset();
+  hoisted.sessionManager.appendMessageAsync.mockReset();
+  hoisted.sessionManager.appendSessionInfoAsync.mockReset();
+  hoisted.sessionManager.appendLabelChangeAsync.mockReset();
   hoisted.sessionManager.flushPendingPersistence.mockReset();
-  hoisted.sessionManager.reloadPersistedTranscript.mockReset();
+  hoisted.sessionManager.reloadPersistedTranscriptAsync.mockReset();
   if (params.subscribeImpl) {
     hoisted.subscribeEmbeddedAgentSessionMock.mockImplementation(params.subscribeImpl);
   }

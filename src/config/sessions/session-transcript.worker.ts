@@ -541,7 +541,12 @@ serveOwnedWorkerTasks(
               items: readSessionPreviewItemsReadOnly(request),
             };
           }
-          if (request.kind === "transcript-hydration" || request.kind === "current-turn-entry") {
+          if (request.kind === "transcript-maintenance" || request.kind === "current-turn-entry") {
+            const { readSessionTranscriptNavigationInWorker } =
+              await import("./session-transcript-navigation.worker.js");
+            return readSessionTranscriptNavigationInWorker(request);
+          }
+          if (request.kind === "transcript-hydration") {
             const { readOpenClawDatabaseQuarantineFailure } =
               await import("../../state/openclaw-quarantine-store.js");
             const quarantine = readOpenClawDatabaseQuarantineFailure(
@@ -553,17 +558,6 @@ serveOwnedWorkerTasks(
             );
             if (quarantine) {
               throw quarantine;
-            }
-            if (request.kind === "current-turn-entry") {
-              const { readSessionTranscriptCurrentTurnEntry } =
-                await import("./session-accessor.sqlite-current-turn.js");
-              return readSessionTranscriptCurrentTurnEntry(request.target, {
-                entryId: request.entryId,
-                version: request.version,
-                includeEntry: request.includeEntry,
-                readOnly: true,
-                resolvedScope: request.resolvedScope,
-              });
             }
             const { readSessionTranscriptBoundedActiveContextCore } =
               await import("./session-accessor.sqlite-active-context.js");

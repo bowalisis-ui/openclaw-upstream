@@ -102,7 +102,9 @@ async function createBuildRecoveryHarness(
     if (rejection === "handoff") {
       throw new StaleWorkerBuildError();
     }
-    const leafId = openSessionManager().appendMessage(
+    const leafId = await (
+      await openSessionManager()
+    ).appendMessageAsync(
       makeAgentAssistantMessage({
         content: [{ type: "text", text: "Continued on the replacement worker" }],
         timestamp: 51,
@@ -318,7 +320,9 @@ describe("worker turn launcher build recovery", () => {
     };
     const launchTurn = vi.fn<WorkerTurnTunnelHandle["launchTurn"]>(async (request) => {
       request.onDispatchReady?.();
-      const leafId = openSessionManager().appendMessage(
+      const leafId = await (
+        await openSessionManager()
+      ).appendMessageAsync(
         makeAgentAssistantMessage({
           content: [{ type: "text", text: "Ran on the refreshed worker" }],
           timestamp: 51,
@@ -629,7 +633,7 @@ describe("worker turn launcher build recovery", () => {
           expect(settled).toHaveProperty("value");
           expect(harness.launchTurn).toHaveBeenCalledOnce();
           expect(
-            openSessionManager()
+            (await openSessionManager())
               .buildSessionContext()
               .messages.filter((message) => message.role === "user"),
           ).toHaveLength(1);
@@ -691,7 +695,7 @@ describe("worker turn launcher build recovery", () => {
       expect(harness.launchTurn).toHaveBeenCalledTimes(2);
       expect(harness.onUserMessagePersisted).toHaveBeenCalledOnce();
       expect(
-        openSessionManager()
+        (await openSessionManager())
           .buildSessionContext()
           .messages.filter((message) => message.role === "user"),
       ).toHaveLength(1);
@@ -723,7 +727,7 @@ describe("worker turn launcher build recovery", () => {
       expect(harness.environments.destroy).not.toHaveBeenCalled();
       expect(harness.runLocal).not.toHaveBeenCalled();
       expect(
-        openSessionManager()
+        (await openSessionManager())
           .buildSessionContext()
           .messages.filter((message) => message.role === "user"),
       ).toHaveLength(1);
@@ -744,7 +748,7 @@ describe("worker turn launcher build recovery", () => {
       );
       expect(harness.runLocal).not.toHaveBeenCalled();
       expect(
-        openSessionManager()
+        (await openSessionManager())
           .buildSessionContext()
           .messages.filter((message) => message.role === "user"),
       ).toHaveLength(1);

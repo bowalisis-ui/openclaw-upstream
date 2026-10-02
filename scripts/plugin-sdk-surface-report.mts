@@ -185,8 +185,8 @@ export function readPluginSdkSurfaceBudgets(env: NodeJS.ProcessEnv = process.env
     ),
     publicExports: readPluginSdkSurfaceBudgetEnv(
       "OPENCLAW_PLUGIN_SDK_MAX_PUBLIC_EXPORTS",
-      // +1: createChannelSecretContract consolidates seven channel secret contracts (approved by Peter, 2026-10-01).
-      3758,
+      // +4: owner-approved replay V2 types on core and plugin-entry (2026-10-01).
+      3762,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(

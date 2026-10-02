@@ -84,6 +84,10 @@ import type {
   SessionStoreTargetReadResult,
 } from "./session-store-target-inventory.js";
 import type {
+  SessionTranscriptMaintenanceRead,
+  SessionTranscriptMaintenanceFacts,
+} from "./session-transcript-maintenance-read.js";
+import type {
   SessionTranscriptSearchParams,
   SessionTranscriptSearchResult,
 } from "./session-transcript-search.types.js";
@@ -230,6 +234,11 @@ type SessionTranscriptHydrationWorkerInput = {
   limits?: { maxBytes: number; maxEvents: number };
   admission?: UserTurnTranscriptAdmissionReceipt;
 };
+
+type SessionTranscriptMaintenanceWorkerInput = Omit<
+  SessionTranscriptHydrationWorkerInput,
+  "kind" | "limits"
+> & { kind: "transcript-maintenance"; request: SessionTranscriptMaintenanceRead };
 
 type SessionTranscriptCurrentTurnEntryWorkerInput = Omit<
   SessionTranscriptHydrationWorkerInput,
@@ -493,6 +502,7 @@ export type SessionHistoryWorkerInput =
   | SessionArchivePresenceWorkerInput
   | SessionColdMetadataWorkerInput
   | SessionTranscriptHydrationWorkerInput
+  | SessionTranscriptMaintenanceWorkerInput
   | SessionTranscriptCurrentTurnEntryWorkerInput
   | SessionTranscriptHistoryWorkerInput
   | SessionPreviewWorkerInput
@@ -550,6 +560,7 @@ export type SessionTranscriptWorkerValues = {
   "transcript-match": { kind: "transcript-match"; result: { event: TranscriptEvent } | undefined };
   "cold-metadata": SessionColdMetadataWorkerResult;
   "transcript-hydration": SessionTranscriptHydrationWorkerResult;
+  "transcript-maintenance": SessionTranscriptMaintenanceFacts;
   "current-turn-entry": SessionTranscriptCurrentTurnEntryRead;
   "sqlite-target": { target: ResolvedSqliteStoreTarget };
   "branch-summaries": SessionBranchSummaryReadResult;
@@ -689,6 +700,7 @@ export type SessionHistoryWorkerDatabase = {
     PreparedSessionTranscriptHydration
   >;
   readCurrentTurnEntry: CancellableSessionHistoryReader<SessionTranscriptCurrentTurnEntryWorkerInput>;
+  readMaintenance: CancellableSessionHistoryReader<SessionTranscriptMaintenanceWorkerInput>;
   readExactEntries: (
     input: SessionExactEntriesWorkerRequest,
     signal?: AbortSignal,

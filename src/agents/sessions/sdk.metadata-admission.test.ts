@@ -17,6 +17,9 @@ import { hasModelFallbackStop } from "../failover-error.js";
 import { testModel } from "./agent-session-loop-correctness.test-support.js";
 import { createResourceLoader } from "./agent-session-loop-resource-loader.test-support.js";
 import { AuthStorage } from "./auth-storage.js";
+import { createEventBus } from "./event-bus.js";
+import { loadExtensionFromFactory } from "./extensions/loader.js";
+import type { ExtensionAPI } from "./extensions/types.js";
 import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
 import { createAgentSession } from "./sdk.js";
@@ -331,6 +334,141 @@ it.each([
         if (outcome.status === "fulfilled") {
           outcome.value.session.dispose();
         }
+      }
+    });
+  },
+);
+
+async function createPersistenceExtensionSession(
+  manager: SessionManager,
+  cwd: string,
+  agentDir: string,
+) {
+  const resourceLoader = createResourceLoader();
+  const extensions = resourceLoader.getExtensions();
+  let loadedApi: ExtensionAPI | undefined;
+  extensions.extensions.push(
+    await loadExtensionFromFactory(
+      (api) => {
+        loadedApi = api;
+      },
+      cwd,
+      createEventBus(),
+      extensions.runtime,
+    ),
+  );
+  const authStorage = AuthStorage.inMemory();
+  const { session } = await createAgentSession({
+    cwd,
+    agentDir,
+    model: testModel,
+    noTools: "all",
+    authStorage,
+    modelRegistry: ModelRegistry.inMemory(authStorage),
+    sessionManager: manager,
+    settingsManager: SettingsManager.inMemory(),
+    resourceLoader,
+  });
+  if (!loadedApi) {
+    throw new Error("Extension API was not loaded");
+  }
+  return { session, api: loadedApi, runtime: extensions.runtime };
+}
+
+it("awaits extension entry, name, and label persistence before publishing their results", async () => {
+  await withOpenClawTestState({ label: "extension-awaited-persistence" }, async (state) => {
+    const target = {
+      agentId: "main",
+      sessionId: "extension-awaited",
+      sessionKey: "agent:main:extension-awaited",
+      storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
+    };
+    await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+    const manager = await SessionManager.openAsync(target, state.workspaceDir);
+    const { session, api } = await createPersistenceExtensionSession(
+      manager,
+      state.workspaceDir,
+      state.agentDir("main"),
+    );
+    try {
+      const changes: string[] = [];
+      session.subscribe((event) => {
+        if (event.type === "session_info_changed") {
+          changes.push(event.name ?? "");
+          expect(manager.getSessionName()).toBe(event.name);
+        }
+      });
+      const id = await api.appendEntryAsync("extension-state", { count: 1 });
+      await api.setSessionNameAsync("Awaited name");
+      await api.setLabelAsync(id, "bookmark");
+      expect(manager.getEntry(id)).toMatchObject({
+        type: "custom",
+        customType: "extension-state",
+        data: { count: 1 },
+      });
+      expect(manager.getLabel(id)).toBe("bookmark");
+      expect(changes).toEqual(["Awaited name"]);
+      const reopened = await SessionManager.openAsync(target, state.workspaceDir);
+      expect(reopened.getEntry(id)).toEqual(manager.getEntry(id));
+      expect(reopened.getSessionName()).toBe("Awaited name");
+      expect(reopened.getLabel(id)).toBe("bookmark");
+    } finally {
+      session.dispose();
+    }
+  });
+});
+
+it.each(["persistent", "detached"] as const)(
+  "rejects a queued %s extension persistence capability closed before admission",
+  async (storage) => {
+    await withOpenClawTestState({ label: "extension-persistence-revoked" }, async (state) => {
+      const target = {
+        agentId: "main",
+        sessionId: "extension-revoked",
+        sessionKey: "agent:main:extension-revoked",
+        storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
+      };
+      if (storage === "persistent") {
+        await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+      }
+      const manager =
+        storage === "persistent"
+          ? await SessionManager.openAsync(target, state.workspaceDir)
+          : SessionManager.inMemory(state.workspaceDir);
+      const { session, api, runtime } = await createPersistenceExtensionSession(
+        manager,
+        state.workspaceDir,
+        state.agentDir("main"),
+      );
+      const before = manager.getEntries();
+      const persistedBefore =
+        storage === "persistent" ? await loadTranscriptEvents(target) : undefined;
+      const entered = createDeferredCore();
+      const release = createDeferredCore();
+      const writer = writeAdmission.withSessionManagerWrite(manager, async () => {
+        entered.resolve();
+        await release.promise;
+      });
+      await entered.promise;
+      const pending = api.appendEntryAsync("revoked-state", { count: 1 });
+      const rejected = expect(pending).rejects.toThrow("extension owner closed");
+      runtime.invalidate("extension owner closed");
+      release.resolve();
+      try {
+        await writer;
+        await rejected;
+        expect(manager.getEntries()).toEqual(before);
+        if (storage === "persistent") {
+          expect(await loadTranscriptEvents(target)).toEqual(persistedBefore);
+        }
+        await expect(api.setSessionNameAsync("stale")).rejects.toThrow("extension owner closed");
+        await expect(api.setLabelAsync("missing", "stale")).rejects.toThrow(
+          "extension owner closed",
+        );
+      } finally {
+        release.resolve();
+        await writer;
+        session.dispose();
       }
     });
   },

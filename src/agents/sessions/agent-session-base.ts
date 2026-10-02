@@ -381,7 +381,7 @@ export abstract class AgentSessionBase {
       if (event.message.role === "custom") {
         const message = event.message;
         await withSessionManagerWrite(this.sessionManager, () =>
-          this.sessionManager.appendCustomMessageEntry(
+          this.sessionManager.appendCustomMessageEntryAsync(
             message.customType,
             message.content,
             message.display,

@@ -43,7 +43,7 @@ import {
   type InternalSessionEntry as SessionEntry,
 } from "../../config/sessions.js";
 import {
-  persistCompactionBoundaryWithSessionEntrySync,
+  persistCompactionBoundaryWithSessionEntryAsync,
   readSessionTranscriptActiveStats,
   updateSessionEntry,
   withRecentSessionTranscriptActiveEvents,
@@ -978,9 +978,8 @@ export async function runSessionCompactionIfNeeded(params: {
               typeof activeTranscriptBytes === "number" &&
               typeof maxActiveTranscriptBytes === "number"
                 ? {
-                    withCompactionPersistence: (prepared) => {
-                      assertActive();
-                      const committed = persistCompactionBoundaryWithSessionEntrySync(
+                    withCompactionPersistenceAsync: async (prepared) => {
+                      const committed = await persistCompactionBoundaryWithSessionEntryAsync(
                         {
                           ...compactionTarget,
                           expectedLifecycleRevision: expectedSession.lifecycleRevision,
@@ -995,6 +994,7 @@ export async function runSessionCompactionIfNeeded(params: {
                             maxBytes: maxActiveTranscriptBytes,
                           },
                         },
+                        assertActive,
                       );
                       hostAccountingCommitted = true;
                       return committed;
