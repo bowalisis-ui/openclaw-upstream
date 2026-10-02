@@ -1,5 +1,6 @@
 // These consumers need the host-owned SQLite broker, which runs in forked processes.
 export const databaseWorkerCoreTestFiles = [
+  "src/auto-reply/reply/conversation-turn-capture.test.ts",
   "src/status/status-plugin-health.runtime.test.ts",
   "src/status/status-plugin-health.installed.test.ts",
   "src/agents/tool-schema-quarantine.test.ts",
@@ -170,6 +171,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/agents/bash-tools.process.finished-retention.test.ts",
   "src/agents/bash-tools.test.ts",
   "src/agents/code-mode.bridge.host-denial.test.ts",
+  "src/agents/code-mode.bridge.lifecycle.test.ts",
   "src/agents/command/session-store.snooze.test.ts",
   "src/agents/command/session-store.test.ts",
   "src/agents/core-coding-tools.exec-workdir.test.ts",
@@ -382,6 +384,8 @@ export const databaseWorkerCoreTestFiles = [
   "src/agents/sessions/session-manager-target-capture.test.ts",
   "src/agents/sessions/sdk.metadata-cwd.test.ts",
   "src/agents/sessions/sdk.metadata-admission.test.ts",
+  "src/agents/embedded-agent-runner/run/attempt-phase-lifecycle.test.ts",
+  "src/agents/embedded-agent-runner/run/attempt-prompt-phase.admission.test.ts",
   "src/agents/embedded-agent-runner/run/attempt-prompt-submit.retention.test.ts",
   "src/agents/embedded-agent-runner/run/attempt-prompt-submit.steering.test.ts",
   "src/agents/embedded-agent-runner/run/attempt-session-replay.test.ts",
@@ -553,6 +557,8 @@ export const databaseWorkerCoreTestFiles = [
   "src/state/openclaw-agent-worker-store.test.ts",
   "src/state/openclaw-agent-db.integrity-lease.test.ts",
   "src/state/openclaw-agent-execution.integrity.test.ts",
+  "src/state/openclaw-agent-execution-incognito.test.ts",
+  "src/state/openclaw-agent-execution-incognito.sessions.test.ts",
   "src/state/openclaw-agent-execution.creation-witness.test.ts",
   "src/state/openclaw-agent-execution.close-wedge.test.ts",
   "src/state/openclaw-agent-execution-cleanup.test.ts",
