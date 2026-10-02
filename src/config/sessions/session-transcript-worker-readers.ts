@@ -53,6 +53,12 @@ export function createSessionHistoryWorkerReaders(
       );
   }
   return {
+    readLifecycleArtifactPlan: reader(
+      "lifecycle-artifact-plan",
+      "lifecycle artifact plan",
+      (input) => ({ kind: "lifecycle-artifact-plan", ...input }),
+      (value) => value,
+    ),
     prewarm: reader(
       "prewarm",
       "prewarm acknowledgement",
