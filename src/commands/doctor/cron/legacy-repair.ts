@@ -119,9 +119,9 @@ export async function loadLegacyCronRepairState(params: {
 }): Promise<LegacyCronRepairState | null> {
   const storePath =
     params.storePath ?? resolveCronJobsStorePath(readLegacyCronStorePath(params.cfg), params.env);
+  await assertCronStateSchemaSupportedAsync(params.env);
   assertNoRetiredStateFiles("Cron state", await listRetiredCronStateFiles(storePath));
   const legacyQuarantine = await loadLegacyCronQuarantineForMigration(storePath);
-  await assertCronStateSchemaSupportedAsync(params.env);
   if (params.onlyIfLegacyDetected && !legacyQuarantine) {
     return null;
   }
@@ -205,6 +205,7 @@ export async function applyLegacyCronStoreRepair(params: {
   blockedModelIdentities?: ReadonlySet<LegacyCodexModelIdentity>;
   recoverQuarantinedScheduleJobs?: boolean;
 }): Promise<LegacyCronRepairResult> {
+  assertCronStateSchemaSupported();
   assertNoRetiredStateFiles("Cron state", await listRetiredCronStateFiles(params.state.storePath));
   assertCronStateSchemaSupported();
   const { state } = params;

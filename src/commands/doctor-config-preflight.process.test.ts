@@ -492,6 +492,7 @@ describe("Doctor repair followed by gateway readiness", () => {
 
       const loaded = await loadCronJobsStoreWithConfigJobsReadOnly(storePath, env);
       expect(loaded.store.jobs.map((entry) => entry.id)).toContain("valid-job");
+      // SQLite config decoding quarantines the trigger before Doctor validates runtime state.
       expect(
         (await loadCronQuarantinedJobs(storePath, env)).map((entry) => ({
           sourceIndex: entry.sourceIndex,
@@ -499,8 +500,8 @@ describe("Doctor repair followed by gateway readiness", () => {
           id: entry.job?.id,
         })),
       ).toEqual([
-        { sourceIndex: 1, reason: "invalid-state", id: "invalid-state-job" },
         { sourceIndex: 2, reason: "invalid-trigger", id: "invalid-trigger-job" },
+        { sourceIndex: 1, reason: "invalid-state", id: "invalid-state-job" },
       ]);
       expect(fs.existsSync(storePath)).toBe(false);
     } finally {
