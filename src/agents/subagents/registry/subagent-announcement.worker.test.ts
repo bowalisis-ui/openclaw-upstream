@@ -4,6 +4,7 @@ import { useSubagentControlFixture } from "./subagent-control.test-support.js";
 import { rename } from "node:fs/promises";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
+import { awaitGateBeforeSettlement, withinTest } from "../../../../test/helpers/promise.js";
 import { observeHostDataSql } from "../../../../test/helpers/sqlite-statement-execution-counter.js";
 import { getRuntimeConfig } from "../../../config/config.js";
 import { captureGatewayOperatorRunAuthority } from "../../../gateway/operator-run-authority.js";
@@ -31,6 +32,7 @@ import { setTestEnvValue } from "../../../test-utils/env.js";
 import { loadAgentRuntimePluginRegistryHandle } from "../../runtime-plugins.js";
 import * as announceCleanup from "./subagent-registry-lifecycle-announce-cleanup.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
+import * as registryPersistence from "./subagent-registry-persistence.js";
 import {
   getSubagentRegistryPublicationRevision,
   subscribeSubagentRunChanges,
@@ -585,9 +587,9 @@ it.each(["current", "revoked", "source switched", "yielded"] as const)(
   },
 );
 
-it.each([false, true])(
-  "publishes registered suspended-delivery retirement only for its original row (successor: %s)",
-  async (replace) => {
+it.for([false, true])(
+  "fences suspended-retirement cleanup after acknowledged publication (successor: %s)",
+  async (replace, { signal }) => {
     const run = await registerCompletion("suspended-retirement", {
       cleanup: "delete",
       holdForRequester: true,
@@ -626,6 +628,42 @@ it.each([false, true])(
     client.internal = { operatorRunAuthority: source.authority };
     const ready = createDeferredCore();
     const release = createDeferredCore();
+    const published = createDeferredCore();
+    const resumeRetirement = createDeferredCore();
+    const releaseGates = () => {
+      release.resolve();
+      resumeRetirement.resolve();
+    };
+    signal.addEventListener("abort", releaseGates, { once: true });
+    let publicationHeld = false;
+    const persist = vi.mocked(registryState.persistSubagentRunsToDiskAsyncOrThrow);
+    persist.mockImplementation(async (...args) => {
+      const retiring = replace && !publicationHeld && args[2].retireRunIds?.includes(run.runId);
+      if (retiring) {
+        publicationHeld = true;
+      }
+      await nativeState.persistSubagentRunsToDiskAsyncOrThrow(...args);
+      if (retiring) {
+        // ACK, publication, and pending-write ownership have all settled.
+        published.resolve();
+        await resumeRetirement.promise;
+      }
+    });
+    let startingSuccessor = false;
+    let successorWaits = 0;
+    let successorPending: Promise<void> | undefined;
+    let registering: Promise<void> | undefined;
+    const waitForPending = registryPersistence.waitForPendingSubagentRegistryWrites;
+    const waiting = vi
+      .spyOn(registryPersistence, "waitForPendingSubagentRegistryWrites")
+      .mockImplementation((...args) => {
+        const pending = waitForPending(...args);
+        if (startingSuccessor && args[0].includes(run.runId)) {
+          successorWaits += 1;
+          successorPending = pending;
+        }
+        return pending;
+      });
     let held = false;
     const worker = vi
       .spyOn(stateWorker, "runOpenClawStateWorkerOperation")
@@ -656,32 +694,57 @@ it.each([false, true])(
     );
     let successor = entry;
     try {
-      await Promise.race([
-        ready.promise,
-        outcome.then(() => {
-          throw new Error("Registered retirement omitted its acknowledgement boundary");
-        }),
-      ]);
+      await withinTest(
+        awaitGateBeforeSettlement(
+          ready.promise,
+          outcome,
+          "Registered retirement omitted its acknowledgement boundary",
+        ),
+        signal,
+      );
       expect(subagentRuns.get(run.runId)).toBe(entry);
       expect(entry.delivery?.status).toBe("suspended");
       expect(loadSubagentRegistryFromSqlite().has(run.runId)).toBe(false);
       expect(ended).not.toHaveBeenCalled();
       if (replace) {
         // Retaining this real source before the gate avoids queueing another reader behind it.
-        await withPluginRuntimeGatewayRequestScope(
-          { client, context, resolveGatewayContext, isWebchatConnect: () => false },
-          () =>
-            registerSubagentRun({
-              runId: run.runId,
-              childSessionKey: run.childSessionKey,
-              requesterSessionKey: "agent:main:main",
-              requesterAgentId: "main",
-              requesterDisplayKey: "main",
-              task: "live retirement successor",
-              cleanup: "keep",
-              expectsCompletionMessage: true,
-            }),
+        startingSuccessor = true;
+        try {
+          registering = Promise.resolve(
+            withPluginRuntimeGatewayRequestScope(
+              { client, context, resolveGatewayContext, isWebchatConnect: () => false },
+              () =>
+                registerSubagentRun({
+                  runId: run.runId,
+                  childSessionKey: run.childSessionKey,
+                  requesterSessionKey: "agent:main:main",
+                  requesterAgentId: "main",
+                  requesterDisplayKey: "main",
+                  task: "live retirement successor",
+                  cleanup: "keep",
+                  expectsCompletionMessage: true,
+                }),
+            ),
+          );
+        } finally {
+          startingSuccessor = false;
+        }
+        void registering.catch(() => {});
+        expect(successorWaits).toBe(1);
+        expect(successorPending).toBeDefined();
+        expect(subagentRuns.get(run.runId)).toBe(entry);
+        expect(loadSubagentRegistryFromSqlite().has(run.runId)).toBe(false);
+        expect(ended).not.toHaveBeenCalled();
+        release.resolve();
+        await withinTest(
+          awaitGateBeforeSettlement(
+            published.promise,
+            outcome,
+            "Registered retirement omitted its settled publication boundary",
+          ),
+          signal,
         );
+        await withinTest(registering, signal);
         successor = subagentRuns.get(run.runId)!;
         expect(successor).not.toBe(entry);
         expect(loadSubagentRegistryFromSqlite().get(run.runId)?.task).toBe(
@@ -689,13 +752,13 @@ it.each([false, true])(
         );
       }
       const publicationRevision = getSubagentRegistryPublicationRevision();
-      release.resolve();
-      const result = await outcome;
+      releaseGates();
+      const result = await withinTest(outcome, signal);
       await fixture.settle();
       if (replace) {
         expect(result).toMatchObject({
           completed: false,
-          error: { outcome: "committed", publication: "superseded" },
+          error: { message: "Subagent cleanup owner changed after publication." },
         });
         expect(subagentRuns.get(run.runId)).toBe(successor);
         expect(loadSubagentRegistryFromSqlite().get(run.runId)?.task).toBe(
@@ -716,9 +779,12 @@ it.each([false, true])(
         expect(ended).toHaveBeenCalledOnce();
       }
     } finally {
-      release.resolve();
-      await outcome;
+      releaseGates();
+      await Promise.allSettled([sweeping, registering]);
       worker.mockRestore();
+      waiting.mockRestore();
+      persist.mockImplementation(nativeState.persistSubagentRunsToDiskAsyncOrThrow);
+      signal.removeEventListener("abort", releaseGates);
       source.release();
     }
   },
