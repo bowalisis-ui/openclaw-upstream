@@ -3,6 +3,7 @@ import path from "node:path";
 import type { WatchSubscription } from "@openclaw/fs-safe/watch";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { createDeferredCore } from "../../shared/deferred.js";
 import { loadWorkspaceSkills } from "../loading/workspace-skill-loader.js";
 import { resolveWorkspaceSkillSourcePlan } from "../loading/workspace-skill-sources.js";
 import { writeSkill } from "../test-support/e2e-test-helpers.js";
@@ -234,28 +235,30 @@ it.each(["directory", "blocking file"] as const)(
     }
     const owner = await import("./refresh-observation-source.js");
     const plan = vi.mocked(owner.skillsObservationScope).getMockImplementation()!;
-    let replaced = false;
+    const replaced = createDeferredCore();
+    let planned: ReturnType<typeof plan> | undefined;
     vi.mocked(owner.skillsObservationScope).mockImplementation((...args) => {
-      const work = plan(...args).then(async (scope) => {
-        if (path.resolve(args[1].path) === root && !replaced) {
-          replaced = true;
-          await fs.rm(root, { recursive: true });
-          if (kind === "directory") {
-            await fs.symlink(target, root, linkType);
-          }
-          await writeSkill({
-            dir: path.join(root, "guide"),
-            name: "guide",
-            description: "At startup",
-          });
-        }
+      if (planned || path.resolve(args[1].path) !== root) {
+        return plan(...args);
+      }
+      // The companion <root>/skills target plans through this root. Hold only the
+      // root's scope so that read settles before the replacement and first scan.
+      planned = plan(...args).then(async (scope) => {
+        await replaced.promise;
         return scope;
       });
-      planning.push(work);
-      return work;
+      return planned;
     });
     await ensure(config);
-    expect(replaced).toBe(true);
+    expect(planned).toBeDefined();
+    await fs.rm(root, { recursive: true });
+    if (kind === "directory") {
+      await fs.symlink(target, root, linkType);
+    }
+    await writeSkill({ dir: path.join(root, "guide"), name: "guide", description: "At startup" });
+    replaced.resolve();
+    planning.push(planned!);
+    await ready();
     expect(read(config)).toEqual(["At startup"]);
     await writeSkill({
       dir: path.join(root, "guide"),
