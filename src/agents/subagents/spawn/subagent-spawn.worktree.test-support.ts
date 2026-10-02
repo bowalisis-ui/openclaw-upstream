@@ -182,7 +182,10 @@ export function registerManagedWorktreeSpawnCases(options: {
             : { expectsCompletionMessage: false }),
         })();
         const spawned = await withinTest(spawn, signal);
-        expect(spawned.details).toMatchObject({ status: "accepted", context: "isolated" });
+        expect(spawned.details, JSON.stringify(spawned)).toMatchObject({
+          status: "accepted",
+          context: "isolated",
+        });
         const details = expectDefined(
           normalizeAcceptedSessionSpawnResult(spawned),
           "accepted spawn",

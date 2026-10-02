@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { SubsystemLogger } from "../logging/subsystem.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import {
@@ -429,8 +430,9 @@ vi.mock("./embedded-agent-runner/model.static-catalog.js", async (importOriginal
 }));
 
 vi.mock("../logging/subsystem.js", () => ({
-  createSubsystemLogger: () => {
-    const logger = {
+  createSubsystemLogger: (subsystem: string) => {
+    const logger: SubsystemLogger = {
+      subsystem,
       child: () => logger,
       isEnabled: () => false,
       trace: vi.fn(),
@@ -438,6 +440,8 @@ vi.mock("../logging/subsystem.js", () => ({
       error: vi.fn(),
       info: vi.fn(),
       warn: preparedModelRuntimeMocks.warn,
+      fatal: vi.fn(),
+      raw: vi.fn(),
     };
     return logger;
   },
