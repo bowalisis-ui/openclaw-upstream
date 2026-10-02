@@ -1,4 +1,5 @@
 import { html, type TemplateResult } from "lit";
+import type { MarkdownFileLinkTarget } from "../../../components/markdown-file-links.ts";
 import type { ChatPageHost } from "../chat-state-host.ts";
 import { selectedChatSessionRow } from "../chat-state-route.ts";
 import type { ChatProps } from "../chat-view.ts";
@@ -43,7 +44,7 @@ export function renderChatDetailSlot(params: {
     .embedSandboxMode=${host.embedSandboxMode}
     .allowExternalEmbedUrls=${host.allowExternalEmbedUrls}
     .githubContext=${{ githubRepo: params.chat.githubRepo, githubRepositories: params.chat.githubRepositories }}
-    .onOpenWorkspaceFile=${(target: { path: string; line?: number | null }) =>
+    .onOpenWorkspaceFile=${(target: MarkdownFileLinkTarget) =>
       openSessionWorkspaceFile(host, target)}
     .onOpenSessionLink=${params.chat.onOpenSessionLink}
     .onRevealInWorkspace=${(path: string) => {
