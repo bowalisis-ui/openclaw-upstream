@@ -11,6 +11,11 @@ import {
 import { QaSuiteInfraError, QaSuiteScenarioSkipError } from "./errors.js";
 import { resolveQaLiveTurnTimeoutMs as liveTurnTimeoutMs } from "./live-timeout.js";
 import {
+  getQaNativeWorkspaceBehavior,
+  readQaNativeWorkspaceBehaviorId,
+  type QaNativeWorkspaceBehavior,
+} from "./native-workspace-behavior.js";
+import {
   qaMockRequestCursorUrl,
   qaMockRequestsAfterUrl,
   readQaMockRequestCursor,
@@ -275,6 +280,48 @@ function describeRuntimePatchArguments(args: unknown): string {
           };
         })
       : undefined,
+  });
+}
+
+function matchesNativeWorkspaceArguments(params: {
+  args: unknown;
+  behavior: QaNativeWorkspaceBehavior;
+  phase: "happy" | "failure";
+  workspaceDir: string;
+}) {
+  if (!isRecord(params.args)) {
+    return false;
+  }
+  const expectedArgs =
+    params.phase === "happy" ? params.behavior.happyArgs : params.behavior.failureArgs;
+  if (params.behavior.nativeToolName === "bash") {
+    return params.args.command === expectedArgs.cmd;
+  }
+  if (params.args.input === expectedArgs.input) {
+    return true;
+  }
+  const expectedFile =
+    params.phase === "happy"
+      ? params.behavior.happyMutation?.path
+      : params.behavior.failureSentinel?.path;
+  const changes = params.args.changes;
+  if (!expectedFile || !Array.isArray(changes) || changes.length !== 1 || !isRecord(changes[0])) {
+    return false;
+  }
+  const kind = changes[0].kind;
+  return (
+    canonicalRuntimePatchPath(params.workspaceDir, String(changes[0].path ?? "")) ===
+      canonicalRuntimePatchPath(params.workspaceDir, expectedFile) &&
+    (isRecord(kind) ? kind.type : kind) === "update"
+  );
+}
+
+async function readOptionalUtf8(filePath: string) {
+  return fs.readFile(filePath, "utf8").catch((error: unknown) => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
   });
 }
 
@@ -570,6 +617,185 @@ export async function runRuntimeToolFixture(
   const forcedCodexNativeWorkspace =
     env.gateway.runtimeEnv.OPENCLAW_QA_FORCE_RUNTIME === "codex" &&
     metadata.expectedLayer === "codex-native-workspace";
+  const nativeWorkspaceBehaviorId = readQaNativeWorkspaceBehaviorId(config.nativeWorkspaceBehavior);
+  const nativeWorkspaceBehavior = nativeWorkspaceBehaviorId
+    ? getQaNativeWorkspaceBehavior(nativeWorkspaceBehaviorId)
+    : undefined;
+  if (forcedCodexNativeWorkspace && nativeWorkspaceBehavior) {
+    if (!metadata.required) {
+      throw fixtureError(
+        new Error(`codex-native ${nativeWorkspaceBehavior.id} behavior must be required coverage`),
+      );
+    }
+    for (const seed of nativeWorkspaceBehavior.seedFiles ?? []) {
+      const seedPath = path.resolve(env.gateway.workspaceDir, seed.path);
+      await runFixtureOperation(async () => {
+        await fs.mkdir(path.dirname(seedPath), { recursive: true });
+        await fs.writeFile(seedPath, seed.contents, "utf8");
+      });
+    }
+    const nativeHappyPrompt = [
+      `tool search qa check target=${nativeWorkspaceBehavior.providerToolName}`,
+      `native-workspace-behavior=${nativeWorkspaceBehavior.id}.`,
+      `Call ${nativeWorkspaceBehavior.providerToolName} exactly once with these exact arguments: ${JSON.stringify(nativeWorkspaceBehavior.happyArgs)}.`,
+      "Wait for its result, then summarize the actual outcome.",
+    ].join(" ");
+    const nativeFailurePrompt = [
+      `tool search qa failure target=${nativeWorkspaceBehavior.providerToolName}`,
+      `native-workspace-behavior=${nativeWorkspaceBehavior.id}.`,
+      `Call ${nativeWorkspaceBehavior.providerToolName} exactly once with these exact arguments: ${JSON.stringify(nativeWorkspaceBehavior.failureArgs)}.`,
+      "Wait for its failed result, then summarize the actual outcome.",
+    ].join(" ");
+
+    await runFixtureOperation(() =>
+      deps.runAgentPrompt(env, {
+        sessionKey: happySessionKey,
+        message: nativeHappyPrompt,
+        timeoutMs: liveTurnTimeoutMs(env, 45_000),
+        transcriptToolName: nativeWorkspaceBehavior.nativeToolName,
+        requireSuccessfulTranscriptToolResult: true,
+      }),
+    );
+    if (nativeWorkspaceBehavior.happyMutation) {
+      const mutation = nativeWorkspaceBehavior.happyMutation;
+      const contents = await runFixtureOperation(() =>
+        readOptionalUtf8(path.resolve(env.gateway.workspaceDir, mutation.path)),
+      );
+      if (contents !== mutation.contents) {
+        throw fixtureError(
+          new Error(
+            `expected codex-native ${nativeWorkspaceBehavior.id} to write ${mutation.path} with exact contents`,
+          ),
+        );
+      }
+    }
+
+    const failureSentinel = nativeWorkspaceBehavior.failureSentinel;
+    const failureSentinelPath = failureSentinel
+      ? path.resolve(env.gateway.workspaceDir, failureSentinel.path)
+      : undefined;
+    if (failureSentinelPath && failureSentinel) {
+      await runFixtureOperation(() =>
+        fs.writeFile(failureSentinelPath, failureSentinel.contents, {
+          encoding: "utf8",
+          flag: "wx",
+        }),
+      );
+    }
+    try {
+      await runFixtureOperation(() =>
+        deps.runAgentPrompt(env, {
+          sessionKey: failureSessionKey,
+          message: nativeFailurePrompt,
+          timeoutMs: liveTurnTimeoutMs(env, 45_000),
+          transcriptToolName: nativeWorkspaceBehavior.nativeToolName,
+        }),
+      );
+      if (failureSentinelPath && failureSentinel) {
+        const contents = await runFixtureOperation(() => readOptionalUtf8(failureSentinelPath));
+        if (contents !== failureSentinel.contents) {
+          throw fixtureError(
+            new Error(
+              `codex-native ${nativeWorkspaceBehavior.id} modified or removed its outside-workspace sentinel`,
+            ),
+          );
+        }
+      }
+    } finally {
+      if (failureSentinelPath) {
+        await fs.rm(failureSentinelPath, { force: true });
+      }
+    }
+
+    const happyEvidence = await runFixtureOperation(() =>
+      readLiveToolEvidence({
+        env,
+        sessionKey: happySessionKey,
+        toolName: nativeWorkspaceBehavior.nativeToolName,
+      }),
+    );
+    if (!happyEvidence.outputRequest || happyEvidence.outputRequest.hardFailure) {
+      failFixture(
+        happyEvidence.plannedRequest
+          ? `expected successful codex-native ${nativeWorkspaceBehavior.id} result`
+          : `expected codex-native ${nativeWorkspaceBehavior.id} call receipt`,
+      );
+    }
+    if (
+      !matchesNativeWorkspaceArguments({
+        args: happyEvidence.executedRequest?.args,
+        behavior: nativeWorkspaceBehavior,
+        phase: "happy",
+        workspaceDir: env.gateway.workspaceDir,
+      })
+    ) {
+      throw fixtureError(
+        new Error(
+          `codex-native ${nativeWorkspaceBehavior.id} happy receipt had unexpected arguments`,
+        ),
+      );
+    }
+    if (
+      nativeWorkspaceBehavior.happyOutputMarker &&
+      !happyEvidence.outputRequest.text.includes(nativeWorkspaceBehavior.happyOutputMarker)
+    ) {
+      throw fixtureError(
+        new Error(
+          `codex-native ${nativeWorkspaceBehavior.id} happy result omitted its output marker`,
+        ),
+      );
+    }
+
+    const failureEvidence = await runFixtureOperation(() =>
+      readLiveToolEvidence({
+        env,
+        sessionKey: failureSessionKey,
+        toolName: nativeWorkspaceBehavior.nativeToolName,
+      }),
+    );
+    if (!failureEvidence.failureOutputRequest) {
+      failFixture(
+        failureEvidence.plannedRequest
+          ? `expected failed codex-native ${nativeWorkspaceBehavior.id} result`
+          : `expected codex-native ${nativeWorkspaceBehavior.id} failure call receipt`,
+      );
+    }
+    if (
+      !matchesNativeWorkspaceArguments({
+        args: failureEvidence.executedRequest?.args,
+        behavior: nativeWorkspaceBehavior,
+        phase: "failure",
+        workspaceDir: env.gateway.workspaceDir,
+      })
+    ) {
+      throw fixtureError(
+        new Error(
+          `codex-native ${nativeWorkspaceBehavior.id} failure receipt had unexpected arguments`,
+        ),
+      );
+    }
+    if (
+      nativeWorkspaceBehavior.failureOutputMarker &&
+      !failureEvidence.failureOutputRequest.text.includes(
+        nativeWorkspaceBehavior.failureOutputMarker,
+      )
+    ) {
+      throw fixtureError(
+        new Error(
+          `codex-native ${nativeWorkspaceBehavior.id} failure result omitted its output marker`,
+        ),
+      );
+    }
+    if (
+      nativeWorkspaceBehavior.nativeToolName === "apply_patch" &&
+      !isWorkspaceBoundaryFailureToolOutput(failureEvidence.failureOutputRequest.text)
+    ) {
+      throw fixtureError(
+        new Error("expected codex-native edit failure to explicitly reject the workspace boundary"),
+      );
+    }
+    return withSessionDetails(`codex-native ${nativeWorkspaceBehavior.id} behavior passed`);
+  }
   // Effective tool discovery may advertise the native name. The forced
   // runtime and scenario owner, not inventory absence, decide who executes it.
   const dynamicExposureIntentionallyExcluded = forcedCodexNativeWorkspace && !tools.has(toolName);
