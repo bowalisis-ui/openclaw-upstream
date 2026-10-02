@@ -8,7 +8,6 @@ import {
 import {
   buildSessionEntry,
   listSessionTranscriptCorpusEntriesForAgent,
-  loadArchivedSessions,
   readTranscriptStatsBatchReadOnlySync,
   sessionPathForFile,
   sessionPathForSessionIdentity,
@@ -22,7 +21,6 @@ import {
   type MemorySyncParams,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
-import { resolveStorePath } from "openclaw/plugin-sdk/session-store-paths";
 import { listMemorySessionTombstones } from "../memory-entry-origins.js";
 import { runInMemoryBackgroundContext } from "./background-context.js";
 import { shouldSyncSessionsForReindex } from "./manager-session-reindex.js";
@@ -76,15 +74,6 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
       includeContentRevision: false,
       readOnly,
     });
-    const archivedSessions = new Map(
-      loadArchivedSessions({
-        agentId: this.agentId,
-        storePath: resolveStorePath(this.cfg.session?.store, { agentId: this.agentId }),
-        sessionIds: entries
-          .filter((entry) => entry.artifactKind === "archive-artifact")
-          .map((entry) => entry.sessionId),
-      }).map((archive) => [archive.archiveName, archive]),
-    );
     const forgottenSessions = new Set(
       (
         await listMemorySessionTombstones({
@@ -94,9 +83,8 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
       ).map((entry) => entry.sessionId),
     );
     return entries.filter((entry) => {
-      const archive = archivedSessions.get(path.basename(entry.sessionFile));
       const archivedSessionKey =
-        archive?.sessionId === entry.sessionId ? archive.sessionKey : undefined;
+        entry.artifactKind === "archive-artifact" ? entry.sessionKey : undefined;
       return (
         !forgottenSessions.has(entry.sessionId) &&
         isMemorySessionIndexable(entry, archivedSessionKey)

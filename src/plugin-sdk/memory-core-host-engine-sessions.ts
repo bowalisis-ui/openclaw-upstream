@@ -9,6 +9,7 @@ import type { SessionParticipantIdentity } from "../config/sessions/session-part
 import { normalizeAgentId } from "../routing/session-key.js";
 
 export { loadArchivedSessions };
+export { listSessionTranscriptArchivesInWorker as loadArchivedSessionsAsync } from "../config/sessions/session-transcript-inventory-runtime.js";
 
 export {
   buildSessionEntry,

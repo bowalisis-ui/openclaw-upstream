@@ -65,6 +65,18 @@ export function createSessionHistoryWorkerReaders(
       (input) => ({ kind: "session-pending-archives", ...input }),
       (value) => value.pending,
     ),
+    readArchiveInventory: reader(
+      "session-archive-inventory",
+      "archive inventory",
+      (input) => ({ kind: "session-archive-inventory", ...input }),
+      (value) => value.archives,
+    ),
+    readCorpusInventory: reader(
+      "session-corpus-inventory",
+      "corpus inventory",
+      (input) => ({ kind: "session-corpus-inventory", ...input }),
+      (value) => value.entries,
+    ),
     readArchivePresence: reader(
       "session-archive-presence",
       "archive presence",
