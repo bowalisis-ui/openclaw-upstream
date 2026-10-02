@@ -149,6 +149,13 @@ describe("ui package vitest config", () => {
           projectOrder: { native: string[]; actual: string[] };
         };
       };
+      const nodeFiles = new Set([
+        "ui/src/components/desktop/desktop-mobile-keyboard.test.ts",
+        "ui/src/pages/chat/chat-pane-retention.test.ts",
+        "ui/src/pages/chat/chat-thread-retention.test.ts",
+        "ui/src/pages/chat/session-snapshot-store.test.ts",
+        "ui/src/pages/usage/usage-page-retention.test.ts",
+      ]);
       expect(report.discovered.length).toBeGreaterThan(1000);
       expect(report.rows).toHaveLength(4);
       expect(report.empty).toEqual({ modules: 0, errors: 0 });
@@ -212,7 +219,7 @@ describe("ui package vitest config", () => {
           .toSorted(),
       ).toEqual(report.discovered);
       for (const row of report.rows) {
-        expect(row.receipts).toHaveLength(3);
+        expect(row.receipts).toHaveLength(4);
         for (const { requestId, value } of row.receipts) {
           expect(value).toEqual({
             version: 1,
@@ -225,10 +232,13 @@ describe("ui package vitest config", () => {
           expect(value.files.toSorted()).toEqual(row.original);
         }
         const compatible = row.selected["bun-compatible"]!;
-        expect(compatible).toEqual([{ runtime: "bun", files: row.original }]);
+        expect(compatible.map((selection) => selection.runtime)).toEqual(["node", "bun"]);
+        expect(compatible[0]!.files).toEqual(row.original.filter((file) => nodeFiles.has(file)));
+        expect(compatible[1]!.files).toEqual(row.original.filter((file) => !nodeFiles.has(file)));
+        expect(compatible.flatMap((selection) => selection.files).toSorted()).toEqual(row.original);
         expect(row.selected.dual).toEqual([
           { runtime: "node", files: row.original },
-          compatible[0],
+          compatible[1],
         ]);
       }
     }));
