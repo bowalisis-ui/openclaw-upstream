@@ -457,7 +457,7 @@ describe("Doctor repair followed by gateway readiness", () => {
         .filter((name) => name.startsWith("openclaw.sqlite.doctor-cron-") && name.endsWith(".bak"));
       expect(backupNames.length).toBeGreaterThan(0);
       const backup = new DatabaseSync(
-        path.join(path.dirname(databasePath), backupNames.sort()[0]!),
+        path.join(path.dirname(databasePath), backupNames.toSorted()[0]!),
         {
           readOnly: true,
         },

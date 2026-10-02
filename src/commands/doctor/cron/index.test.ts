@@ -93,11 +93,11 @@ function createCurrentCronJob(overrides: StoredJob = {}) {
 }
 
 async function writeCronStore(jobs: StoredJob[]) {
-  await writeCurrentCronStore(
-    jobs.map((job, index) =>
-      createCurrentCronJob({ id: String(job.id ?? job.jobId ?? `raw-${index}`) }),
-    ),
-  );
+  const ids = jobs.map((job, index) => {
+    const id = job.id ?? job.jobId;
+    return typeof id === "string" || typeof id === "number" ? String(id) : `raw-${index}`;
+  });
+  await writeCurrentCronStore(ids.map((id) => createCurrentCronJob({ id })));
   const db = openOpenClawStateDatabase().db;
   for (const [index, job] of jobs.entries()) {
     db.prepare(
@@ -106,7 +106,7 @@ async function writeCronStore(jobs: StoredJob[]) {
       JSON.stringify(job),
       JSON.stringify(job.state ?? {}),
       cronStoreKey(storePath),
-      String(job.id ?? job.jobId ?? `raw-${index}`),
+      ids[index],
     );
   }
 }
@@ -839,5 +839,3 @@ describe("maybeRepairLegacyCronStore", () => {
     expectNoteContaining("later health checks will continue");
   });
 });
-
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
