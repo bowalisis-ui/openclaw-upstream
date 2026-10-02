@@ -50,7 +50,14 @@ describe("explicit repository move to Gateway", () => {
       await withOpenClawTestState(
         {
           label: "repository-materialize-identity",
-          env: { GH_TOKEN: "synthetic-legacy-token", GITHUB_TOKEN: undefined },
+          env: {
+            GH_TOKEN: "synthetic-legacy-token",
+            GITHUB_TOKEN: undefined,
+            GH_ENTERPRISE_TOKEN:
+              scenario === "enterprise" ? "synthetic-enterprise-token" : undefined,
+            GITHUB_ENTERPRISE_TOKEN: undefined,
+            GH_HOST: scenario === "enterprise" ? "ghe.example.test" : undefined,
+          },
         },
         async (state) => {
           const systemProfileId = "ghp_11111111111111111111111111111111";
@@ -71,7 +78,9 @@ describe("explicit repository move to Gateway", () => {
           };
           const config: OpenClawConfig = {
             ...cfg,
-            tools: { github: { profileId: systemProfileId } },
+            ...(scenario === "enterprise"
+              ? {}
+              : { tools: { github: { profileId: systemProfileId } } }),
             agents: {
               entries: {
                 main: {
@@ -179,7 +188,10 @@ describe("explicit repository move to Gateway", () => {
             } else {
               await expect(operation).rejects.toBe(cloneFailure);
             }
-            const token = `synthetic-${scenario === "agent" ? "agent" : "system"}-token`;
+            const token =
+              scenario === "enterprise"
+                ? "synthetic-enterprise-token"
+                : `synthetic-${scenario === "agent" ? "agent" : "system"}-token`;
             expect(verify).toHaveBeenCalledWith(token, {
               apiBaseUrl:
                 scenario === "enterprise"
