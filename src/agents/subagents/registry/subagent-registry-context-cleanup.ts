@@ -21,7 +21,7 @@ import { safeRemoveAttachmentsDir } from "./subagent-registry-helpers.js";
 import {
   buildSafeLifecycleErrorMeta,
   maskLifecycleIdentifier,
-} from "./subagent-registry-lifecycle-delivery.js";
+} from "./subagent-registry-lifecycle-log.js";
 import { getCurrentSubagentRunOwner, subagentRuns } from "./subagent-registry-memory.js";
 import {
   assertSubagentRegistryWriteOutcomeKnown,
