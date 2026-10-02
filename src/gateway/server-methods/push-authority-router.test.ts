@@ -45,8 +45,8 @@ vi.mock("../../state/user-channel-identity-operations.js", async (importOriginal
   prepareUserProfileSelectionAuthority: vi.fn(),
 }));
 vi.mock("../../state/user-preferences.js", () => ({
-  getUserPreferences: vi.fn(),
-  setUserPreferences: vi.fn(),
+  getCanonicalUserPreferences: vi.fn(),
+  setCanonicalUserPreferences: vi.fn(),
 }));
 vi.mock("../session-sharing.js", async () => ({
   // Web Push has no session target; keep unrelated session storage outside this router control.
