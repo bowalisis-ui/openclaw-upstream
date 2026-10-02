@@ -14,6 +14,7 @@ import {
   withPluginRuntimeGatewayRequestScope,
 } from "../plugins/runtime/gateway-request-scope.js";
 import { createPluginRuntime } from "../plugins/runtime/index.js";
+import { resolvePluginServiceScheduler } from "../plugins/service-scheduler-binding.js";
 import { createPluginRecord } from "../plugins/status.test-helpers.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import {
@@ -76,7 +77,7 @@ it.each([true, false])(
     const plugin = instance.wrap(
       createTestPlugin({
         startAccount: async (account) => {
-          account.scheduler.schedule({ id: "startup", delayMs: 1, run: observe });
+          resolvePluginServiceScheduler().schedule({ id: "startup", delayMs: 1, run: observe });
           started.resolve(account);
           await new Promise<void>((resolve) => {
             account.abortSignal.addEventListener("abort", () => resolve(), { once: true });

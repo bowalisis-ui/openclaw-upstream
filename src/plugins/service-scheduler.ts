@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import { runInDetachedAsyncContext } from "../shared/async-work-scope.js";
+import { withPluginServiceScheduler } from "./service-scheduler-binding.js";
 import type { PluginServiceSchedulerV1 } from "./service-scheduler.types.js";
 
 export type PluginServiceSchedulerOwner = {
@@ -51,7 +52,10 @@ export function createPluginServiceScheduler(
           owner.schedule({
             ...params,
             id: `${prefix}${params.id}`,
-            run: runOwned ? () => runOwned(params.run) : params.run,
+            run: () =>
+              withPluginServiceScheduler(scope, () =>
+                runOwned ? runOwned(params.run) : params.run(),
+              ),
           });
         return runOwned ? runInDetachedAsyncContext(schedule) : schedule();
       },

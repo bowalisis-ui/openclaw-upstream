@@ -27,6 +27,7 @@ import { createPluginServiceCronGetter, type PluginServiceCronHost } from "./ser
 import { createPluginServiceDiagnostics } from "./service-diagnostics.js";
 import { createPluginServiceHealthReporter } from "./service-health.js";
 import { createPluginServiceNodeInvoker } from "./service-nodes.js";
+import { withPluginServiceScheduler } from "./service-scheduler-binding.js";
 import { createPluginServiceSchedulerRunner } from "./service-scheduler-context.js";
 import {
   createPluginServiceScheduler,
@@ -576,7 +577,9 @@ async function startPreparedPluginServices({
         ? () =>
             runServiceCleanup(() => {
               try {
-                const result = service.stop?.(serviceContext);
+                const result = withPluginServiceScheduler(scheduling.scheduler, () =>
+                  service.stop?.(serviceContext),
+                );
                 const completion = resolvePluginReturnPromise(result);
                 if (!completion) {
                   return result;
@@ -613,7 +616,8 @@ async function startPreparedPluginServices({
         ownedService.startup = settled.promise;
         try {
           ownedService.startupConsumer = instance?.retainConsumer();
-          const start = () => service.start(serviceContext);
+          const start = () =>
+            withPluginServiceScheduler(scheduling.scheduler, () => service.start(serviceContext));
           // Reload may originate in an RPC or tool; background work captures
           // service-owned Gateway/worker context, never that caller's authority.
           await runOutsideOperatorToolGatewayAuthority(() =>

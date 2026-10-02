@@ -24,6 +24,7 @@ import {
   withPluginRuntimeGatewayRequestScope,
 } from "./runtime/gateway-request-scope.js";
 import { createPluginRuntime } from "./runtime/index.js";
+import { resolvePluginServiceScheduler } from "./service-scheduler-binding.js";
 import type { PluginServiceSchedulerV1 } from "./service-scheduler.types.js";
 import { startPluginServices } from "./services.js";
 import { createPluginRecord } from "./status.test-helpers.js";
@@ -73,7 +74,7 @@ it("owns service callbacks after startup and reload callers finish", async () =>
       id: "scheduled-context",
       start({ scheduler }) {
         scopes.push(scheduler);
-        scheduler.schedule({ id: "startup", delayMs: 1, run: observe });
+        resolvePluginServiceScheduler().schedule({ id: "startup", delayMs: 1, run: observe });
       },
     },
   });

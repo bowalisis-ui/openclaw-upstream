@@ -60,6 +60,7 @@ import type { PluginRegistry } from "../plugins/registry.js";
 import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
 import { runOutsidePluginRuntimeGenerationScope } from "../plugins/runtime/generation-scope.js";
 import type { PluginRuntimeChannel } from "../plugins/runtime/types-channel.js";
+import { withPluginServiceScheduler } from "../plugins/service-scheduler-binding.js";
 import type { PluginServiceSchedulerV1 } from "../plugins/service-scheduler.types.js";
 import { runOutsideGatewayRootWorkAdmission } from "../process/gateway-work-admission.js";
 import { normalizeOptionalAccountId } from "../routing/account-id.js";
@@ -930,7 +931,10 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
               };
               startAccountTask = withPluginHttpRouteRegistry(
                 registry,
-                () => runChannelAccountMonitor(registry, registration?.pluginId, runStartAccount),
+                () =>
+                  withPluginServiceScheduler(accountContext.scheduler, () =>
+                    runChannelAccountMonitor(registry, registration?.pluginId, runStartAccount),
+                  ),
                 capabilityLease,
               );
             });

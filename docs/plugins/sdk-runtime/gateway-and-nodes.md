@@ -69,6 +69,19 @@ optional scheduler field and continue to work unchanged. The host supplies the
 same capability to both versions and joins scheduled work before retiring an
 account. Bundled plugin timer migrations can adopt it independently.
 
+Published factories whose older parameter contracts did not accept a scheduler
+use `resolvePluginServiceScheduler` from `openclaw/plugin-sdk/runtime` in their
+version 1 adapter, then delegate to their version 2 implementation. The resolver
+accepts an explicit handle or borrows the currently bound service, account, or
+executable CLI lifetime. It rejects missing or closed owners and never creates a
+root scheduler. New factories require the handle explicitly.
+
+CLI callbacks retain the scheduling owner captured when their command is
+registered. Timed callbacks run in the same plugin instance without inheriting
+the initiating request or operator authority. A command that serves a runtime
+must remain pending until that runtime closes; returning from the action lets
+the executable retire and join its scheduler before releasing the plugin.
+
 One-shot diagnostics exporters borrow the existing CLI SDK host scheduler. When
 export is enabled without that host, startup reports a clear error; the agent
 command reports the diagnostic failure and continues. Exporter shutdown retires

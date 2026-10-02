@@ -10,6 +10,7 @@ import {
 import { withPluginHttpRouteRegistry } from "../plugins/http-registry.js";
 import { getPluginValueInstance, runPluginCleanup } from "../plugins/plugin-instance-scope.js";
 import type { PluginRegistry } from "../plugins/registry.js";
+import { withPluginServiceScheduler } from "../plugins/service-scheduler-binding.js";
 import { createPluginServiceSchedulerRunner } from "../plugins/service-scheduler-context.js";
 import { createPluginServiceScheduler } from "../plugins/service-scheduler.js";
 import type { PluginServiceSchedulerV1 } from "../plugins/service-scheduler.types.js";
@@ -95,7 +96,9 @@ export async function runChannelAccountStop(params: {
         params.lease.assertActive("account cleanup");
         // The owner cancels transport and flushes admitted delivery before its work can join.
         const cleanup = Promise.resolve().then(() =>
-          run({ ...context, setStatus: params.setStatus }),
+          withPluginServiceScheduler(context.scheduler, () =>
+            run({ ...context, setStatus: params.setStatus }),
+          ),
         );
         const scheduled = context.scheduler.stop();
         await cleanup.finally(() => scheduled);
