@@ -162,13 +162,22 @@ serveOwnedWorkerTasks(
         const { readMemorySessionTargets } = await import("./session-memory-targets.js");
         return {
           kind: request.kind,
-          targets: readMemorySessionTargets(request.params, request.continuation),
+          targets: readMemorySessionTargets(
+            { ...request.params, env: cloneEnvWithPlatformSemantics(request.params.env) },
+            request.continuation,
+          ),
         };
       }
       if (request.kind === "session-archive-inventory") {
         const { listSessionTranscriptArchivesReadOnly } =
           await import("./session-accessor.sqlite-history.js");
-        return { kind: request.kind, archives: listSessionTranscriptArchivesReadOnly(request) };
+        return {
+          kind: request.kind,
+          archives: listSessionTranscriptArchivesReadOnly({
+            ...request,
+            env: cloneEnvWithPlatformSemantics(request.env ?? process.env),
+          }),
+        };
       }
       if (request.kind === "session-corpus-inventory") {
         const { readSessionTranscriptCorpusInventory } =
@@ -176,7 +185,7 @@ serveOwnedWorkerTasks(
         return {
           kind: request.kind,
           entries: readSessionTranscriptCorpusInventory(
-            request.scope,
+            { ...request.scope, env: cloneEnvWithPlatformSemantics(request.scope.env) },
             request.options,
             request.artifacts,
             request.database.path,
