@@ -1,6 +1,8 @@
 import type { UserTurnTranscriptAdmissionReceipt } from "../../sessions/user-turn-transcript.types.js";
-import type { SessionTranscriptContextVersion } from "./session-accessor.sqlite-contract.js";
-import type { ResolvedTranscriptReadScope } from "./session-accessor.sqlite-scope.js";
+import type {
+  ResolvedTranscriptReadScope,
+  SessionTranscriptContextVersion,
+} from "./session-accessor.sqlite-contract.js";
 import type { SessionTranscriptRuntimeTarget } from "./session-accessor.types.js";
 
 export type SessionTranscriptCurrentTurnEntryRequest = {
