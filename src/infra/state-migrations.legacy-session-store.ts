@@ -3,8 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { normalizePersistedSessionEntryShape } from "../commands/doctor/shared/session-entry-shape.js";
+import {
+  migrateLegacySessionEntryState,
+  normalizePersistedSessionEntryShape,
+} from "../commands/doctor/shared/session-entry-shape.js";
 import { normalizeRestartRecoveryEntryFields } from "../config/sessions/restart-recovery-state.js";
+import { hasLegacySessionProviderState } from "../config/sessions/session-entry-state-format.js";
 import {
   ensureSessionStorePromptBlobsForPersistence,
   hydrateSessionStoreSkillPromptRefs,
@@ -480,6 +484,10 @@ export function normalizeLegacySessionEntryDelivery(
   entry: Record<string, unknown>,
 ): Record<string, unknown>;
 export function normalizeLegacySessionEntryDelivery(entry: SessionEntry | Record<string, unknown>) {
+  assertSupportedSessionStoreEntry(entry);
+  if (isRecord(entry) && hasLegacySessionProviderState(entry)) {
+    entry = migrateLegacySessionEntryState(entry);
+  }
   const legacy = entry as LegacySessionDeliveryEntry;
   const hasLegacyFields = LEGACY_SESSION_DELIVERY_KEYS.some((key) => key in legacy);
   if (isCanonicalSessionDeliveryState(entry.delivery) && !hasLegacyFields) {
