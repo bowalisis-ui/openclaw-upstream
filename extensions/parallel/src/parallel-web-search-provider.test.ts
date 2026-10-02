@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
+import "openclaw/plugin-sdk/compiled-subprocess-testing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cancelTrackedTextResponse,
@@ -148,7 +149,6 @@ describe.each(["paid", "free"] as const)("Parallel %s cache policy", (transport)
     expect(cached).toEqual({ ...first, cached: true });
   });
 });
-
 describe("Parallel shared cache policy", () => {
   it.each([0, 1])(
     "honors the current %i-minute TTL after populating at 15 minutes",
