@@ -4,7 +4,9 @@ import { SESSION_OWNER_COLUMN_DEFINITIONS } from "../../state/openclaw-agent-db-
 import {
   runOpenClawAgentWriteTransaction,
   type OpenClawAgentDatabase,
+  type OpenClawAgentDatabaseOptions,
 } from "../../state/openclaw-agent-db.js";
+import { isIncognitoOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.paths.js";
 import { ensureColumn } from "../../state/openclaw-state-db-schema-helpers.js";
 import type { SessionAccessScope } from "./session-accessor.sqlite-contract.js";
 import {
@@ -13,6 +15,7 @@ import {
 } from "./session-accessor.sqlite-entry-cache.js";
 import { readSessionEntryInstanceId } from "./session-accessor.sqlite-entry-identity.js";
 import { readExactSessionEntryRow } from "./session-accessor.sqlite-entry-read.js";
+import { readIncognitoSessionEntryCurrent } from "./session-accessor.sqlite-incognito-sharing.js";
 import { hasSqliteSessionOwnerColumns } from "./session-accessor.sqlite-owner-projection.js";
 import {
   getSessionKysely,
@@ -41,8 +44,11 @@ export function sessionMetadataExpectedEntryMatches(
   database: OpenClawAgentDatabase,
   sessionKey: string,
   expectedEntry: SessionMetadataExpectedEntry,
+  options: OpenClawAgentDatabaseOptions,
 ): boolean {
-  const entry = readExactSessionEntryRow(database, sessionKey, "list")?.entry;
+  const entry = isIncognitoOpenClawAgentSqlitePath(database.path, options)
+    ? readIncognitoSessionEntryCurrent(database.db, sessionKey)
+    : readExactSessionEntryRow(database, sessionKey, "list")?.entry;
   return (
     entry !== undefined &&
     isDeepStrictEqual(metadataAuthorityEntry(entry), metadataAuthorityEntry(expectedEntry))
@@ -131,13 +137,20 @@ export function assignSessionOwner(
       params.assertCurrent?.();
       if (
         params.expectedSessionId !== undefined &&
-        readSessionEntryInstanceId(database, resolved.sessionKey) !== params.expectedSessionId
+        (isIncognitoOpenClawAgentSqlitePath(database.path, options)
+          ? readIncognitoSessionEntryCurrent(database.db, resolved.sessionKey)?.sessionId
+          : readSessionEntryInstanceId(database, resolved.sessionKey)) !== params.expectedSessionId
       ) {
         throw new Error("session changed before owner assignment");
       }
       if (
         params.expectedEntry &&
-        !sessionMetadataExpectedEntryMatches(database, resolved.sessionKey, params.expectedEntry)
+        !sessionMetadataExpectedEntryMatches(
+          database,
+          resolved.sessionKey,
+          params.expectedEntry,
+          options,
+        )
       ) {
         throw new Error("session ownership changed before owner assignment");
       }

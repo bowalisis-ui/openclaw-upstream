@@ -34,8 +34,12 @@ function assertSuggestionExpectedEntry(
   database: OpenClawAgentDatabase,
   sessionKey: string,
   expectedEntry: SessionMetadataExpectedEntry | undefined,
+  options: OpenClawAgentDatabaseOptions,
 ): void {
-  if (expectedEntry && !sessionMetadataExpectedEntryMatches(database, sessionKey, expectedEntry)) {
+  if (
+    expectedEntry &&
+    !sessionMetadataExpectedEntryMatches(database, sessionKey, expectedEntry, options)
+  ) {
     throw new SessionWorkStartInvalidatedError("session changed before suggestion mutation");
   }
 }
@@ -70,7 +74,7 @@ export function addSessionSuggestion(
   };
   runOpenClawAgentWriteTransaction(
     (database) => {
-      assertSuggestionExpectedEntry(database, sessionKey, params.expectedEntry);
+      assertSuggestionExpectedEntry(database, sessionKey, params.expectedEntry, options);
       return addSessionSuggestionInDatabase(database, sessionKey, {
         suggestion,
         expectedSessionId: params.expectedSessionId,
@@ -102,7 +106,7 @@ export function claimSessionSuggestionDispatch(
   const sessionKey = resolveSqliteScope(scope).sessionKey;
   return runOpenClawAgentWriteTransaction(
     (database) => {
-      assertSuggestionExpectedEntry(database, sessionKey, params.expectedEntry);
+      assertSuggestionExpectedEntry(database, sessionKey, params.expectedEntry, options);
       return claimSessionSuggestionDispatchInDatabase(database, sessionKey, params);
     },
     options,
@@ -133,7 +137,7 @@ export function finalizeSessionSuggestionClaim(
   const sessionKey = resolveSqliteScope(scope).sessionKey;
   return runOpenClawAgentWriteTransaction(
     (database) => {
-      assertSuggestionExpectedEntry(database, sessionKey, params.expectedEntry);
+      assertSuggestionExpectedEntry(database, sessionKey, params.expectedEntry, options);
       return finalizeSessionSuggestionClaimInDatabase(database, sessionKey, params);
     },
     options,
