@@ -131,7 +131,7 @@ function selectConversationRowsInWorker(
   );
 }
 
-function pinConversationDatabaseScope(input: ConversationRegistryScope) {
+export function pinConversationDatabaseScope(input: ConversationRegistryScope) {
   const env = { ...(input.env ?? process.env) };
   env.OPENCLAW_STATE_DIR = resolveStateDir(env);
   const options =
