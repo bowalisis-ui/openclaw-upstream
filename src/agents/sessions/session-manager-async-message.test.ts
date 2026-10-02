@@ -272,7 +272,8 @@ it.each([false, true])(
         }),
         "Expected pending input custody",
       );
-    const sources = [await stage("first")];
+    const firstSource = await stage("first");
+    const sources = [firstSource];
     if (collected) {
       sources.push(await stage("second"));
     }
@@ -281,12 +282,14 @@ it.each([false, true])(
           bindSessionPendingInputSources(sources, user("aggregate")),
           "Expected aggregate custody",
         )
-      : sources[0];
+      : firstSource;
     const beforeFreshMessageCommit = vi.fn(() => {
       throw new Error("Accepted input must retain its original admission");
     });
     try {
-      await expect(manager.appendMessageAsync(sources[0].message)).rejects.toThrow("admitted turn");
+      await expect(manager.appendMessageAsync(firstSource.message)).rejects.toThrow(
+        "admitted turn",
+      );
       const committed = await receipt.run(() =>
         manager.appendMessageWithTranscriptAnchorAsync(receipt.message, {
           beforeFreshMessageCommit,

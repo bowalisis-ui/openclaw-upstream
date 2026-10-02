@@ -55,11 +55,10 @@ describe("awaited compaction persistence", () => {
     });
     await upsertSessionEntryCore(replacement, { sessionId: replacement.sessionId, updatedAt: 1 });
     const manager = await SessionManager.openAsync(scope, dir);
-    const keptId = await manager.appendMessageAsync({
-      role: "user",
-      content: "keep",
-      timestamp: 1,
-    });
+    const keptId = expectDefined(
+      await manager.appendMessageAsync({ role: "user", content: "keep", timestamp: 1 }),
+      "Compaction fixture must append its retained user entry",
+    );
     let committed: CommittedCompactionAppend | undefined;
     const pending = withSessionCompactionPersistenceAsync(
       manager,
@@ -97,11 +96,10 @@ describe("awaited compaction persistence", () => {
 
   it("rejects a detached manager's accounting hook without appending a boundary", async () => {
     const manager = SessionManager.inMemory();
-    const keptId = await manager.appendMessageAsync({
-      role: "user",
-      content: "keep",
-      timestamp: 1,
-    });
+    const keptId = expectDefined(
+      await manager.appendMessageAsync({ role: "user", content: "keep", timestamp: 1 }),
+      "Compaction fixture must append its retained user entry",
+    );
     const before = manager.getEntries();
     const persist = vi.fn<CompactionAppendPersistenceAsync>();
     await expect(
@@ -131,11 +129,10 @@ describe("awaited compaction persistence", () => {
         compactionCount: 0,
       });
       const manager = await SessionManager.openAsync(scope, dir);
-      const keptId = await manager.appendMessageAsync({
-        role: "user",
-        content: "keep",
-        timestamp: 1,
-      });
+      const keptId = expectDefined(
+        await manager.appendMessageAsync({ role: "user", content: "keep", timestamp: 1 }),
+        "Compaction fixture must append its retained user entry",
+      );
       const original = loadSessionEntry(scope)!;
       expect(original.activeWriterRunId).toBeUndefined();
       const expectedOwner = {
@@ -236,11 +233,10 @@ describe("awaited compaction persistence", () => {
         ...(incognito ? { incognito: true as const } : {}),
       });
       const manager = await SessionManager.openAsync(scope, dir);
-      const keptId = await manager.appendMessageAsync({
-        role: "user",
-        content: "keep",
-        timestamp: 1,
-      });
+      const keptId = expectDefined(
+        await manager.appendMessageAsync({ role: "user", content: "keep", timestamp: 1 }),
+        "Compaction fixture must append its retained user entry",
+      );
       const latch = { activeBytes: 2048, sessionId: scope.sessionId, maxBytes: 1024 };
       const database = openOpenClawAgentDatabase(
         toDatabaseOptions(resolveSqliteTranscriptScope(scope)),
@@ -346,11 +342,10 @@ describe("persistCompactionBoundaryWithSessionEntrySync", () => {
         updatedAt: 1,
       });
       const manager = await SessionManager.openAsync(scope, dir);
-      const keptId = await manager.appendMessageAsync({
-        role: "user",
-        content: "keep",
-        timestamp: 1,
-      });
+      const keptId = expectDefined(
+        await manager.appendMessageAsync({ role: "user", content: "keep", timestamp: 1 }),
+        "Compaction fixture must append its retained user entry",
+      );
       const before = loadTranscriptEventsSync(scope);
 
       let entryRows = 0;
@@ -426,11 +421,10 @@ describe("persistCompactionBoundaryWithSessionEntrySync", () => {
       updatedAt: 1,
     });
     const manager = await SessionManager.openAsync(scope, dir);
-    const keptId = await manager.appendMessageAsync({
-      role: "user",
-      content: "keep",
-      timestamp: 1,
-    });
+    const keptId = expectDefined(
+      await manager.appendMessageAsync({ role: "user", content: "keep", timestamp: 1 }),
+      "Compaction fixture must append its retained user entry",
+    );
     const before = loadTranscriptEventsSync(scope);
 
     expect(() =>
@@ -483,11 +477,10 @@ describe("persistCompactionBoundaryWithSessionEntrySync", () => {
       updatedAt: 1,
     });
     const manager = await SessionManager.openAsync(scope, dir);
-    const keptId = await manager.appendMessageAsync({
-      role: "user",
-      content: "keep",
-      timestamp: 1,
-    });
+    const keptId = expectDefined(
+      await manager.appendMessageAsync({ role: "user", content: "keep", timestamp: 1 }),
+      "Compaction fixture must append its retained user entry",
+    );
     const before = loadTranscriptEventsSync(scope);
     const ownerClosed = new Error("compaction owner closed");
 

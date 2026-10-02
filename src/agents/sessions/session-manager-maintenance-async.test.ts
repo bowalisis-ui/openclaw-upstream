@@ -40,7 +40,7 @@ async function openSession(lifecycleRevision?: string) {
 }
 
 async function appendUser(manager: SessionManager, text: string): Promise<string> {
-  return (await manager.appendMessageWithTranscriptAnchorAsync(makeUserMessage(text))).entryId;
+  return (await manager.appendMessageWithTranscriptAnchorAsync(makeUserMessage(text, 1))).entryId;
 }
 
 it("settles queued suffix removals in order and publishes the committed branch", async () => {

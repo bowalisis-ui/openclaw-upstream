@@ -112,10 +112,11 @@ describe("released agent-sessions SDK static append", () => {
         idempotencyKey: "static-parity:custom",
       };
       const first = SdkSessionManager.appendMessageToTranscript(target, custom);
-      const next = await SdkSessionManager.appendMessageToTranscriptAsync(target, {
+      const nextCustom = {
         ...custom,
         idempotencyKey: "static-parity:next",
-      });
+      };
+      const next = await SdkSessionManager.appendMessageToTranscriptAsync(target, nextCustom);
       const beforeReplay = await loadTranscriptEvents(target);
       expect(beforeReplay.slice(-2)).toMatchObject([
         { id: first, parentId: null },
