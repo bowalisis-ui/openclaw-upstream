@@ -341,7 +341,6 @@ export async function prepareHtmlPreviewAssets(
       text: `<style${attrs}>${content}</style>`,
     });
   }
-  const deferredScripts: { start: number; text: string }[] = [];
   for (const { node, ref } of scripts) {
     const asset = loaded.get(ref);
     const loc = node.sourceCodeLocation;
@@ -355,22 +354,29 @@ export async function prepareHtmlPreviewAssets(
         (attr) =>
           attr.name === "async" || (attr.name === "type" && attr.value.toLowerCase() === "module"),
       );
-    const attrs = retainedAttributes(source, node, [
-      "src",
-      "integrity",
-      "crossorigin",
-      ...(deferred ? ["defer"] : []),
-    ]);
-    const content = decodeText(asset).replace(/<\/script/gi, "<\\/script");
     if (deferred) {
-      // Inline classic scripts ignore defer, so run them after all authored document content.
-      deferredScripts.push({
+      const payload = JSON.stringify({
+        attributes: node.attrs
+          .filter(
+            (attr) =>
+              !["src", "defer", "async", "type", "integrity", "crossorigin"].includes(attr.name),
+          )
+          .map((attr) => [attr.name, attr.value]),
+        code: decodeText(asset),
+      })
+        .replaceAll("<", "\\u003c")
+        .replaceAll("\u2028", "\\u2028")
+        .replaceAll("\u2029", "\\u2029");
+      // Modules share the post-parse queue; the inserted classic keeps global/sloppy semantics.
+      edits.push({
         start: loc.startOffset,
-        text: `<script${attrs}>${content}</script>`,
+        end: loc.endOffset,
+        text: `<script type="module">const {attributes,code}=${payload};const script=document.createElement("script");for(const [name,value] of attributes)script.setAttribute(name,value);script.textContent=code;(document.head??document.documentElement).appendChild(script);</script>`,
       });
-      edits.push({ start: loc.startOffset, end: loc.endOffset, text: "" });
       continue;
     }
+    const attrs = retainedAttributes(source, node, ["src", "integrity", "crossorigin"]);
+    const content = decodeText(asset).replace(/<\/script/gi, "<\\/script");
     edits.push({
       start: loc.startTag.startOffset,
       end: loc.startTag.endOffset,
@@ -382,13 +388,5 @@ export async function prepareHtmlPreviewAssets(
       text: content,
     });
   }
-  return {
-    html:
-      applyEdits(source, edits) +
-      deferredScripts
-        .toSorted((a, b) => a.start - b.start)
-        .map((script) => script.text)
-        .join(""),
-    omitted: omitted.size,
-  };
+  return { html: applyEdits(source, edits), omitted: omitted.size };
 }

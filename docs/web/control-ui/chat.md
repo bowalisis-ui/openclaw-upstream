@@ -504,6 +504,8 @@ fonts are not loaded. Documents with an authored `<base href>` keep all their
 original references. Missing, denied, unsupported, or oversized assets remain
 unchanged and produce a compact notice in the preview toolbar. Attachment HTML
 previews have no session folder and do not load relative assets.
+Loaded classic scripts with `defer` run after parsing, in document order with
+non-async module scripts, while retaining classic script globals.
 
 Authored in-page HTML links such as `href="#section"` scroll within the preview, including
 in `strict` mode. This leaves the original file and **Source** unchanged; authored

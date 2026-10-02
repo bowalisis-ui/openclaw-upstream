@@ -55,9 +55,9 @@ describe("session file HTML assets", () => {
     });
   });
 
-  it("appends deferred classic scripts in source order while keeping other scripts in place", async () => {
+  it("keeps deferred classic trampolines in place among module and other scripts", async () => {
     const source =
-      '<!doctype html><html><head><script defer src="first.js" nonce="preview" integrity="hash" crossorigin="anonymous" data-label="first"></script><script type="module" defer src="module.js"></script><script async src="async.js"></script><script async defer src="async-defer.js"></script><script src="blocking.js"></script></head><body><p>App</p><script defer src="second.js"></script></body></html><!-- authored tail -->';
+      '<!doctype html><html><head><script type="text/javascript" defer src="first.js" nonce="preview" integrity="hash" crossorigin="anonymous" data-label="first"></script><script type="module" defer src="module.js"></script><script async src="async.js"></script><script async defer src="async-defer.js"></script><script src="blocking.js"></script></head><body><p>App</p><script defer src="second.js"></script></body></html><!-- authored tail -->';
     const refs = [
       "first.js",
       "module.js",
@@ -68,10 +68,48 @@ describe("session file HTML assets", () => {
     ];
     const fetch = reader(refs.map((ref) => asset(ref, "text/javascript", `run("${ref}");`)));
 
-    expect(await prepareHtmlPreviewAssets(source, true, fetch)).toEqual({
-      html: '<!doctype html><html><head><script type="module" defer>run("module.js");</script><script async>run("async.js");</script><script async defer>run("async-defer.js");</script><script>run("blocking.js");</script></head><body><p>App</p></body></html><!-- authored tail --><script nonce="preview" data-label="first">run("first.js");</script><script>run("second.js");</script>',
-      omitted: 0,
-    });
+    const result = await prepareHtmlPreviewAssets(source, true, fetch);
+    expect(result.omitted).toBe(0);
+    const scripts = [...result.html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)];
+    expect(scripts.map((script) => script[1])).toEqual([
+      ' type="module"',
+      ' type="module" defer',
+      " async",
+      " async defer",
+      "",
+      ' type="module"',
+    ]);
+    expect(result.html.match(/[\w-]+\.js/g)).toEqual(refs);
+    expect(result.html).toMatch(/^<!doctype html><html><head><script type="module">/);
+    expect(result.html).toContain('</head><body><p>App</p><script type="module">');
+    expect(result.html).toMatch(/<\/script><\/body><\/html><!-- authored tail -->$/);
+    expect(scripts[0]![2]).toContain('["nonce","preview"]');
+    expect(scripts[0]![2]).toContain('["data-label","first"]');
+    expect(result.html).not.toMatch(/integrity|crossorigin|text\/javascript/);
+    expect(scripts.slice(1, 5).map((script) => script[2])).toEqual([
+      'run("module.js");',
+      'run("async.js");',
+      'run("async-defer.js");',
+      'run("blocking.js");',
+    ]);
+  });
+
+  it("safely embeds script terminators and line separators in deferred code and attributes", async () => {
+    const source = '<script defer src="run.js" data-label="&lt;/script&gt;"></script><p>After</p>';
+    const code = 'window.label = "</script><script>unexpected()</script><!--\u2028\u2029";';
+    const result = await prepareHtmlPreviewAssets(
+      source,
+      true,
+      reader([asset("run.js", "text/javascript", code)]),
+    );
+    expect(result.omitted).toBe(0);
+    expect(result.html.match(/<\/?script\b/gi)).toEqual(["<script", "</script"]);
+    expect(result.html).toContain(
+      String.raw`\u003c/script>\u003cscript>unexpected()\u003c/script>\u003c!--\u2028\u2029`,
+    );
+    expect(result.html).toContain(String.raw`["data-label","\u003c/script>"]`);
+    expect(result.html).not.toMatch(/[\u2028\u2029]/);
+    expect(result.html).toMatch(/<\/script><p>After<\/p>$/);
   });
 
   it("handles media srcsets and inline CSS while preserving remote URLs, fonts, CSS strings and comments", async () => {

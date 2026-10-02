@@ -9,7 +9,6 @@ import {
   computeInlineScriptHashes,
 } from "../../../src/gateway/control-ui-csp.js";
 import { createSandboxHostHttpServer } from "../../../src/gateway/mcp-app-sandbox-http.js";
-import { prepareHtmlPreviewAssets } from "../pages/chat/components/chat-html-preview-assets.ts";
 import {
   createControlUiMockBootstrapConfig,
   defaultControlUiFeatureMethods,
@@ -52,42 +51,100 @@ async function listen(server: Server): Promise<number> {
 }
 
 suite.define(() => {
-  it("runs deferred file scripts after the body while keeping blocking scripts in the head", async () => {
-    const scripts: Record<string, string> = {
+  it("keeps deferred classic and module file scripts in document order in the sandbox", async (test) => {
+    const scripts = {
       "blocking.js":
         'document.documentElement.dataset.blockingSawApp = String(Boolean(document.querySelector("#app")));',
-      "first.js":
-        'const app = document.querySelector("#app"); if (app) app.textContent = "initialized";',
-      "second.js":
-        'const output = document.querySelector("#app"); if (output) output.textContent += " in order";',
+      "setup.js": 'window.previewState = "ready";',
+      "render.js":
+        'var previewApp = document.querySelector("#app"); function previewSuffix() { return this === window ? " in order" : " strict"; } previewApp.textContent = window.previewState + " " + String(Boolean(document.querySelector("#app")));',
+      "after.js": "previewApp.textContent += (0, window.previewSuffix)();",
     };
-    const prepared = await prepareHtmlPreviewAssets(
-      '<!doctype html><html><head><script src="blocking.js"></script><script defer src="first.js"></script><script defer src="second.js"></script></head><body><div id="app">waiting</div></body></html>',
-      true,
-      async (refs) => ({
-        assets: refs.map((ref) => ({
-          ref,
-          mimeType: "text/javascript",
-          content: Buffer.from(scripts[ref]!).toString("base64"),
-        })),
-      }),
-    );
-    await suite.withPage({}, async ({ page }) => {
-      const result = await page.evaluate(async (html) => {
-        const frame = document.createElement("iframe");
-        const loaded = new Promise<void>((resolve) => {
-          frame.addEventListener("load", () => resolve(), { once: true });
-        });
-        frame.srcdoc = html;
-        document.body.append(frame);
-        await loaded;
-        const preview = frame.contentDocument!;
-        return {
-          blockingSawApp: preview.documentElement.dataset.blockingSawApp,
-          appText: preview.querySelector("#app")?.textContent,
-        };
-      }, prepared.html);
-      expect(result).toEqual({ blockingSawApp: "false", appText: "initialized in order" });
+    const html =
+      '<!doctype html><html><head><script src="blocking.js"></script><script type="module" src="setup.js"></script><script defer src="render.js"></script><script defer src="after.js"></script></head><body><div id="app">waiting</div></body></html>';
+    let sandbox: Server | undefined;
+    await suite.runScenario(test, {
+      run: async () => {
+        sandbox = createSandboxHostHttpServer();
+        const sandboxPort = await listen(sandbox);
+        await suite.withPage(
+          { serviceWorkers: "block", permissions: ["local-network-access"] },
+          async ({ page }) => {
+            const gateway = await installMockGateway(page, {
+              workspace: "/workspace",
+              featureMethods: [
+                ...defaultControlUiFeatureMethods,
+                "canvas.document.preview",
+                "sessions.files.assets",
+              ],
+              historyMessages: [
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "Open [page](page.html)." }],
+                },
+              ],
+              methodResponses: {
+                "sessions.files.get": {
+                  root: "/workspace",
+                  sessionKey: "agent:main:main",
+                  file: {
+                    name: "page.html",
+                    path: "page.html",
+                    workspacePath: "page.html",
+                    content: html,
+                    contentEncoding: "utf8",
+                    hash: "a".repeat(64),
+                    kind: "read",
+                    missing: false,
+                    previewKind: "text",
+                    mimeType: "text/html",
+                    size: Buffer.byteLength(html),
+                  },
+                },
+                "canvas.document.preview": {
+                  html,
+                  sandboxUrl: buildSandboxHostPath({ blockDescendantFrames: true }),
+                  sandboxPort,
+                  sandboxOrigin: `http://127.0.0.1:${sandboxPort}`,
+                },
+                "sessions.files.assets": {
+                  assets: Object.entries(scripts).map(([ref, code]) => ({
+                    ref,
+                    mimeType: "text/javascript",
+                    content: Buffer.from(code).toString("base64"),
+                  })),
+                },
+              },
+            });
+            await page.goto(`${suite.server.baseUrl}chat`);
+            await gateway.waitForRequest("chat.startup");
+            await page.locator('a.markdown-file-link[data-file-path="page.html"]').click();
+            const panel = page.locator("openclaw-chat-detail-panel:visible");
+            const outer = panel.locator(".chat-html-preview__frame");
+            await outer.waitFor();
+            const document = outer.contentFrame().frameLocator("iframe");
+            await document.locator("#app").waitFor();
+            await panel
+              .locator("openclaw-chat-html-preview [role=status]")
+              .waitFor({ state: "hidden" });
+            expect(await gateway.getRequests("sessions.files.assets")).toMatchObject([
+              { params: { path: "page.html", refs: Object.keys(scripts) } },
+            ]);
+            expect(await document.locator("html").getAttribute("data-blocking-saw-app")).toBe(
+              "false",
+            );
+            expect(await document.locator("#app").textContent()).toBe("ready true in order");
+          },
+        );
+      },
+      close: async () => {
+        if (sandbox) {
+          sandbox.closeAllConnections();
+          await new Promise<void>((resolve, reject) => {
+            sandbox!.close((error) => (error ? reject(error) : resolve()));
+          });
+        }
+      },
     });
   });
 
