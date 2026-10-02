@@ -6,8 +6,8 @@ import {
   getConversationDeliveryOperation,
 } from "../config/sessions/conversation-delivery-store.js";
 import {
-  resolveConversation,
-  resolveConversationRegistryScope,
+  readConversation,
+  prepareConversationRegistryScope,
   runConversationDatabaseWrite,
   type ConversationRecord,
   type ConversationRegistryScope,
@@ -202,7 +202,7 @@ async function ensureConversationContextBinding(params: {
     },
     binding,
   );
-  const bound = resolveConversation(params.scope, params.conversation.conversationRef);
+  const bound = await readConversation(params.scope, params.conversation.conversationRef);
   if (!bound || !hasConversationSessionBinding(bound)) {
     throw new Error(
       `Conversation ${params.conversation.conversationRef} could not create its local context binding`,
@@ -223,7 +223,7 @@ export async function runGatewayConversationTurn(params: {
   message: string;
   timeoutMs: number;
 }): Promise<ConversationTurnResult> {
-  const scope = resolveConversationRegistryScope(params);
+  const scope = await prepareConversationRegistryScope(params);
   const binding = captureOutboundSessionBinding({
     cfg: params.config,
     scope,
@@ -247,7 +247,7 @@ export async function runGatewayConversationTurn(params: {
     throw error;
   }
 
-  const discoveredConversation = resolveConversation(scope, params.conversationRef);
+  const discoveredConversation = await readConversation(scope, params.conversationRef);
   if (!discoveredConversation) {
     throw new ConversationInputError(
       `Conversation not found: ${params.conversationRef} (use conversations_list)`,

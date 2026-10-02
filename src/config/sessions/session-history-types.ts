@@ -10,7 +10,7 @@ import type {
   SessionTranscriptReader,
 } from "../../gateway/session-transcript-read-kernel.js";
 import type { AgentHistoryActivity } from "../../infra/agent-activity-events.js";
-import type { ConversationRecord } from "./conversation-registry.js";
+import type { ConversationRecord } from "./conversation-registry.types.js";
 import type {
   SessionTranscriptBoundedMessageTailOptions,
   SessionTranscriptBoundedMessageTailPage,
