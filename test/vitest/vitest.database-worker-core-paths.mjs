@@ -1,5 +1,6 @@
 // These consumers need the host-owned SQLite broker, which runs in forked processes.
 export const databaseWorkerCoreTestFiles = [
+  "src/infra/restart-sentinel.update-result.test.ts",
   "src/auto-reply/reply/conversation-turn-capture.test.ts",
   "src/status/status-plugin-health.runtime.test.ts",
   "src/status/status-plugin-health.installed.test.ts",
@@ -913,6 +914,7 @@ const databaseWorkerCoreTestFileSet = new Set(databaseWorkerCoreTestFiles);
 
 // Preserve watch admission for consumers previously inferred into fast lanes.
 export const databaseWorkerCoreFormerFastKinds = new Map([
+  ["src/infra/restart-sentinel.update-result.test.ts", "unitFast"],
   ["src/commands/doctor-maintenance.session-workers.test.ts", "unitFast"],
   ["src/commands/doctor-session-canonical-keys.completions.test.ts", "unitFast"],
   ["src/plugins/installed-plugin-index-store.availability.test.ts", "unitFast"],

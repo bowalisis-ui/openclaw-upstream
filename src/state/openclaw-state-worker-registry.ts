@@ -23,6 +23,7 @@ import type { CurrentConversationBindingWorkerOperations } from "../infra/outbou
 import type { PromotionWorkerOperations } from "../infra/promotions-feed.worker.js";
 import type { ApnsRegistrationWorkerOperations } from "../infra/push-apns-store.worker-contract.js";
 import type { WebPushWorkerOperations } from "../infra/push-web-store.worker-contract.js";
+import type { RestartSentinelWorkerOperations } from "../infra/restart-sentinel.worker-contract.js";
 import type { SessionDeliveryWorkerOperations } from "../infra/session-delivery-queue.worker.js";
 import type { LegacyMcpOAuthWorkerOperations } from "../infra/state-migrations.mcp-oauth.worker.js";
 import type { TelemetryWorkerOperations } from "../infra/telemetry-store.worker.js";
@@ -43,6 +44,7 @@ import type { UserProfileWorkerOperations } from "./user-profiles.worker.js";
 import { createWorkerOperationRegistry } from "./worker-operation-registry.js";
 
 export type RegisteredStateWorkerOperations = ClawProvenanceWriteOperations &
+  RestartSentinelWorkerOperations &
   WebPushWorkerOperations &
   ProjectRegistryWorkerOperations &
   ApnsRegistrationWorkerOperations &
@@ -84,6 +86,8 @@ export type RegisteredStateWorkerOperations = ClawProvenanceWriteOperations &
   UserProfileWorkerOperations;
 
 export const stateWorkerRegistry = createWorkerOperationRegistry<RegisteredStateWorkerOperations>({
+  restartSentinel: () =>
+    import("../infra/restart-sentinel.worker.js").then((m) => m.restartSentinelOperations),
   clawProvenance: () =>
     import("../claws/provenance-write.worker.js").then((m) => m.clawProvenanceOperations),
   projects: () =>

@@ -3,7 +3,7 @@ import "../../test-utils/prepare-compiled-subprocesses.js";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdateScheduleState } from "../../../packages/gateway-protocol/src/index.js";
-import { createDeferred } from "../../../test/helpers/promise.js";
+import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { RespawnSupervisor } from "../../infra/supervisor-markers.js";
 import type { UpdateCampaignController } from "../../infra/update-campaign.js";
@@ -753,6 +753,30 @@ describe("update.run campaign ownership", () => {
       "update.run failed; adopted campaign cleared",
       expect.anything(),
     );
+  });
+
+  it("does not publish a retired campaign after a delayed sentinel write", async () => {
+    startManagedServiceUpdateHandoffMock.mockRejectedValueOnce(new Error("entrypoint unavailable"));
+    const started = createDeferred();
+    const release = createDeferred();
+    writeRestartSentinelMock.mockImplementationOnce(async () => {
+      started.resolve();
+      await release.promise;
+    });
+    const operation = invokeUpdateRun();
+    try {
+      await awaitGateBeforeSettlement(
+        started.promise,
+        operation,
+        "Update did not reach sentinel persistence",
+      );
+      currentCampaignId = "campaign-2";
+    } finally {
+      release.resolve();
+      await operation;
+    }
+    expect(recordLatestUpdateRestartSentinelMock).not.toHaveBeenCalled();
+    expect(clearCampaignMock).not.toHaveBeenCalled();
   });
 
   it("keeps the adopted campaign while a foreground update is accepted", async () => {

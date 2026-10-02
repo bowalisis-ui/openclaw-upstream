@@ -107,6 +107,10 @@ import {
   isStateDiagnosticCommand,
   readStateDiagnosticCommand,
 } from "./openclaw-state-read-diagnostics.js";
+import {
+  prepareRegisteredStateRead,
+  stateReadWorkerRegistry,
+} from "./openclaw-state-read-operation-registry.js";
 import { readStateRegistryCommand } from "./openclaw-state-read-registry.js";
 import type {
   OpenClawStateReadReply,
@@ -134,7 +138,7 @@ import {
 import { readUserProfileAvatarCommand } from "./user-profiles-internal.js";
 
 serveOwnedWorkerTasks(
-  (input): OpenClawStateReadReply => {
+  prepareRegisteredStateRead((input): OpenClawStateReadReply => {
     let sourceAdmitted: true | undefined;
     let nativeCleanupFailure: OpenClawStateReadReply["nativeCleanupFailure"];
     try {
@@ -153,7 +157,7 @@ serveOwnedWorkerTasks(
             },
           );
         }
-        const { command } = input;
+        const command = { input: undefined, ...input.command };
         if (command.type === "admit") {
           return { ok: true, type: "admit" };
         }
@@ -213,6 +217,9 @@ serveOwnedWorkerTasks(
         const result = withOpenClawStateReadOnlyLocation(
           ({ db }): OpenClawStateReadResult => {
             sourceAdmitted = true;
+            if (stateReadWorkerRegistry.has(command)) {
+              return stateReadWorkerRegistry.execute(command, db);
+            }
             if (command.type === "doctor.gatewayOwnerLease.read") {
               return { type: command.type, lease: readGatewayOwnerLeaseFromDatabase(db) };
             }
@@ -687,6 +694,6 @@ serveOwnedWorkerTasks(
         ...(nativeCleanupFailure ? { nativeCleanupFailure } : {}),
       };
     }
-  },
+  }),
   { closeResource: closeRetainedOpenClawStateReadConnections },
 );

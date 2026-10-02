@@ -30,6 +30,11 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
       (input.command.mode === "pending" || input.command.mode === "unfinished")) ||
       input.command.type === "acpSessions.list" ||
       input.command.type === "backup.runs" ||
+      ((input.command.type === "restartSentinel.current" ||
+        input.command.type === "restartSentinel.snapshot" ||
+        input.command.type === "restartSentinel.installReceipt") &&
+        "input" in input.command &&
+        input.command.input === undefined) ||
       (input.command.type === "acpSessions.metadata" &&
         Array.isArray(input.command.entries) &&
         input.command.entries.length <= 64 &&
