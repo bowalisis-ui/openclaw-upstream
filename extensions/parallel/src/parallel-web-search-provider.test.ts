@@ -149,6 +149,7 @@ describe.each(["paid", "free"] as const)("Parallel %s cache policy", (transport)
     expect(cached).toEqual({ ...first, cached: true });
   });
 });
+
 describe("Parallel shared cache policy", () => {
   it.each([0, 1])(
     "honors the current %i-minute TTL after populating at 15 minutes",
