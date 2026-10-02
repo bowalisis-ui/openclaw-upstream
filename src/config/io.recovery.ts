@@ -64,6 +64,7 @@ async function persistPrefixedConfigRecovery(params: {
 export async function recoverConfigFromJsonRootSuffixWithContext(
   context: ConfigIoContext,
   snapshot: ConfigFileSnapshot,
+  assertRecoveryCandidate?: (config: unknown) => void,
 ): Promise<boolean> {
   if (resolveIsConfigReadOnly(context.deps.env)) {
     return false;
@@ -75,6 +76,7 @@ export async function recoverConfigFromJsonRootSuffixWithContext(
   if (!suffixRecovery) {
     return false;
   }
+  assertRecoveryCandidate?.(suffixRecovery.parsed);
   let resolved: unknown;
   try {
     resolved = resolveConfigIncludesForRead(
@@ -90,6 +92,7 @@ export async function recoverConfigFromJsonRootSuffixWithContext(
     context.deps.env,
     context.deps.lowerPrecedenceEnv,
   );
+  assertRecoveryCandidate?.(resolution.resolvedConfigRaw);
   const validated = validateConfigObjectWithPlugins(resolution.resolvedConfigRaw, {
     ...context.pathResolution,
     sourceRaw: suffixRecovery.parsed,
