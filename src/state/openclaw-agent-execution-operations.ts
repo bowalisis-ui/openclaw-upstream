@@ -95,10 +95,10 @@ export async function loadAgentReplacementOperations() {
             });
           }
         });
-        const publication = kernel.prepareSessionEntryReplacementPublication(result);
+        const publication = kernel.prepareSessionEntryReplacementPublication(result, current);
         deferSqliteWorkerCommitReceipt(current.db, publication);
         context.admit("commit", publication);
-        return result;
+        return { ...result, publication };
       }),
   } satisfies Handlers;
 }
