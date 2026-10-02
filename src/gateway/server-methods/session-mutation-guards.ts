@@ -73,10 +73,7 @@ function bindRequestMutationAuthority(
   });
 }
 
-/** Reads revalidate live request authority without consuming an opaque mutation commit guard. */
-export function assertGatewayRequestReadAuthorityCurrent(
-  options: Pick<RequestMutationOptions, "signal" | "client" | "hasCurrentClientAuthority">,
-): void {
+function assertRequestAuthorityCurrent(options: RequestMutationOptions): void {
   options.signal?.throwIfAborted();
   const acceptedSource = readAcceptedGatewayDeviceSourceAuthority(
     options.hasCurrentClientAuthority,
@@ -87,10 +84,6 @@ export function assertGatewayRequestReadAuthorityCurrent(
   ) {
     throw new Error("Gateway requester authority changed");
   }
-}
-
-function assertRequestAuthorityCurrent(options: RequestMutationOptions): void {
-  assertGatewayRequestReadAuthorityCurrent(options);
   options.sessionMutationCommitGuard?.();
 }
 

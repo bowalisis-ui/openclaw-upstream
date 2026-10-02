@@ -70,7 +70,6 @@ describe("session file turn authority", () => {
         ]) {
           scenario.client.connect.scopes = scenario.scopes;
           const respond = vi.fn();
-          const sessionMutationCommitGuard = vi.fn();
           await handleGatewayRequest({
             req: {
               type: "req",
@@ -83,9 +82,7 @@ describe("session file turn authority", () => {
             respond,
             isWebchatConnect: () => false,
             extraHandlers: sessionsFilesHandlers,
-            sessionMutationCommitGuard,
           });
-          expect(sessionMutationCommitGuard).not.toHaveBeenCalled();
           expect(respond).toHaveBeenCalledOnce();
           expect(respond.mock.calls[0]?.[0]).toBe(scenario.allowed);
           if (scenario.allowed) {
