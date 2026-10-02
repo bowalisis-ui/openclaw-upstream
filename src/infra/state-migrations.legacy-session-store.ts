@@ -475,7 +475,11 @@ function mergeExternalOverInternal(
 }
 
 /** Canonicalizes file-era delivery fields before doctor imports a row into SQLite. */
-export function normalizeLegacySessionEntryDelivery(entry: SessionEntry): SessionEntry {
+export function normalizeLegacySessionEntryDelivery(entry: SessionEntry): SessionEntry;
+export function normalizeLegacySessionEntryDelivery(
+  entry: Record<string, unknown>,
+): Record<string, unknown>;
+export function normalizeLegacySessionEntryDelivery(entry: SessionEntry | Record<string, unknown>) {
   const legacy = entry as LegacySessionDeliveryEntry;
   const hasLegacyFields = LEGACY_SESSION_DELIVERY_KEYS.some((key) => key in legacy);
   if (isCanonicalSessionDeliveryState(entry.delivery) && !hasLegacyFields) {
