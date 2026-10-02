@@ -2555,12 +2555,12 @@ describe("gateway session utils", () => {
         agents: {
           defaults: {
             model: {
-              primary: "projected-model",
+              primary: "sol-projection",
               fallbacks: ["openai/gpt-5.6-luna"],
             },
             models: {
               "openai/gpt-5.6-sol": {
-                alias: "projected-model",
+                alias: "sol-projection",
                 agentRuntime: { id: "codex" },
               },
             },
