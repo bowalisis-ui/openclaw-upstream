@@ -237,8 +237,12 @@ suite.define(() => {
             animations: "disabled",
           });
           const effort = composer.locator("[data-chat-thinking-select]");
-          await expect.poll(() => effort.isVisible()).toBe(true);
-          expect(await effort.getAttribute("aria-disabled")).toBe("false");
+          await expect
+            .poll(async () => ({
+              visible: await effort.isVisible(),
+              disabled: await effort.getAttribute("aria-disabled"),
+            }))
+            .toEqual({ visible: true, disabled: "false" });
           await effort.click();
           await expect
             .poll(() => composer.locator("[data-chat-thinking-slider]").isEnabled())

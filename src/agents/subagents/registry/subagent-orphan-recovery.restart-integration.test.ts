@@ -5,7 +5,7 @@ import { describe, expect, it, onTestFinished, vi } from "vitest";
 // Preserve module setup before modules that consume it.
 // oxfmt-ignore
 import { makeRestartRecoveryRun as makeRunRecord, useSubagentRestartRecoveryFixture } from "./subagent-restart-recovery.test-support.js";
-import { createDeferred } from "../../../../test/helpers/promise.js";
+import { createDeferred, withinTest } from "../../../../test/helpers/promise.js";
 import { cleanupBrowserSessionsForLifecycleEnd } from "../../../browser-lifecycle-cleanup.js";
 import { getRuntimeConfig } from "../../../config/config.js";
 import { resolveSessionStorePathCore } from "../../../config/sessions.js";
@@ -28,6 +28,7 @@ import {
   registerAgentRunContext,
 } from "../../../infra/agent-run-registry.js";
 import { acquireGatewayLock } from "../../../infra/gateway-lock.js";
+import * as gatewayWorkAdmission from "../../../process/gateway-work-admission.js";
 import {
   getActiveGatewayRootWorkCount,
   markGatewayRestartDraining,
@@ -219,7 +220,7 @@ describe("subagent orphan recovery — faithful restart path", () => {
     }
   });
 
-  it.each([
+  it.for([
     ["restart", "lifecycle then wait", "interrupted", undefined],
     ["restart", "wait only", "interrupted", undefined],
     ["restart", "retired wait", "running", undefined],
@@ -233,7 +234,7 @@ describe("subagent orphan recovery — faithful restart path", () => {
     ["aborted", "restart then user cancel", "terminal", undefined],
   ] as const)(
     "preserves %s through %s as %s (timeout: %s)",
-    async (stopReason, source, expected, timeoutPhase) => {
+    async ([stopReason, source, expected, timeoutPhase], { signal }) => {
       const runId = "live-restart-child";
       const childSessionKey = "agent:main:subagent:live-restart-child";
       const startedAt = Date.now();
@@ -326,13 +327,45 @@ describe("subagent orphan recovery — faithful restart path", () => {
           }
           if (source === "retired wait retry") {
             vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-            oldWait.reject(new Error("gateway request timeout"));
-            await vi.advanceTimersByTimeAsync(0);
-            expect(vi.getTimerCount()).toBeGreaterThan(0);
-            rotateAgentEventLifecycleGeneration();
-            await vi.advanceTimersByTimeAsync(1_000);
-            expect(waitRequests.filter((id) => id === runId)).toHaveLength(1);
-            vi.useRealTimers();
+            const waitReleased = createDeferred();
+            const retain = gatewayWorkAdmission.retainGatewayRootWorkAdmissionContinuation;
+            let observedContinuations = 0;
+            const observation = vi
+              .spyOn(gatewayWorkAdmission, "retainGatewayRootWorkAdmissionContinuation")
+              .mockImplementation(() => {
+                const release = retain();
+                const ownsTestRoot =
+                  gatewayWorkAdmission
+                    .getActiveGatewayRootWorkHolders()
+                    .includes("test:admitted-agent") &&
+                  !gatewayWorkAdmission
+                    .getActiveGatewayRootWorkHolders({ excludeCurrent: true })
+                    .includes("test:admitted-agent");
+                if (!release || !ownsTestRoot) {
+                  return release;
+                }
+                observedContinuations += 1;
+                return () => {
+                  try {
+                    release();
+                  } finally {
+                    waitReleased.resolve();
+                  }
+                };
+              });
+            try {
+              oldWait.reject(new Error("gateway request timeout"));
+              // The wait releases its continuation after real reads and retry scheduling.
+              await withinTest(waitReleased.promise, signal);
+              expect(observedContinuations).toBe(1);
+              expect(vi.getTimerCount()).toBeGreaterThan(0);
+              rotateAgentEventLifecycleGeneration();
+              await vi.advanceTimersByTimeAsync(1_000);
+              expect(waitRequests.filter((id) => id === runId)).toHaveLength(1);
+            } finally {
+              observation.mockRestore();
+              vi.useRealTimers();
+            }
           } else if (source === "restart then rejected wait") {
             oldWait.reject(
               new Error(
