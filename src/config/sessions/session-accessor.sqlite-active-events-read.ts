@@ -8,8 +8,6 @@ import {
   selectMessagePayload,
   selectMessageRows,
   type CurrentTranscriptProjection,
-  type SessionTranscriptBoundedMessageTailOptions,
-  type SessionTranscriptBoundedMessageTailPage,
 } from "./session-accessor.sqlite-projection-read.js";
 import {
   hasOversizedVisibleMessages,
@@ -18,6 +16,10 @@ import {
   resolveTranscriptBoundaryWindow,
 } from "./session-accessor.sqlite-reset-window.js";
 import { MAX_VISIBLE_MESSAGE_MAX_MESSAGES } from "./session-accessor.sqlite-visible-cursor.js";
+import type {
+  SessionTranscriptBoundedMessageTailOptions,
+  SessionTranscriptBoundedMessageTailPage,
+} from "./session-history-types.js";
 import { transcriptEventJsonSql } from "./transcript-payload.js";
 
 /** Runs repeatable newest-first visits synchronously inside one context-tail snapshot. */
