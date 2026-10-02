@@ -46,6 +46,7 @@ export type SessionStoreTargetReadResult =
     };
 
 export type SessionStoreTargetInventoryRequest = {
+  selection?: "configured";
   config: OpenClawConfig;
   legacyDefaultAgentId?: string;
   agentIds: string[];
