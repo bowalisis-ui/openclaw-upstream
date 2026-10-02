@@ -31,7 +31,8 @@ untouched so Doctor can report and persist the repair.
 ## Retention policy
 
 OpenClaw supports migrations from formats written by shipped releases on or after
-July 1, 2026. Retain a transform whenever a release in that window can still write
+July 1, 2026. Publication date governs, including older-version extended-stable
+releases. Retain a transform whenever a release in that window can still write
 its input format. A supported release that preserves a legacy
 format when rewriting existing data also counts as a writer. A format last
 written before the cutoff may be retired only with a clear refusal naming an
@@ -44,6 +45,13 @@ backup and verification flow. Runtime readers consume canonical state.
 OpenClaw `v2026.9.7` can still write ownerless and mode-less cron jobs, and its
 migration/import writers can preserve null, `deliver`, or mixed-case delivery
 modes. Those cron repairs remain supported; this change retires no cron format.
+
+Doctor refuses pre-July JSON delivery queue files and leaves them unchanged.
+Upgrade through `2026.9.7` and run its `openclaw doctor --fix` before retrying.
+Current SQLite queues remain supported. Updates driven by `2026.9.7` check these
+original files before stopping the running Gateway. The same early check reports
+the existing recovery guidance for a retired `plugins/installs.json` index. See
+[state migration recovery](/gateway/doctor/state-and-sessions).
 
 Doctor refuses these retired inputs:
 
