@@ -103,7 +103,7 @@ let stateDir = "";
 let runtimeConfig: OpenClawConfig;
 let settleRootWork: ReturnType<typeof observeRootWork>;
 
-async function writeTestConfig() {
+async function writeTestConfig(maxChildrenPerAgent?: number) {
   const config = {
     logging: { audit: { enabled: true, executionIdentity: true } },
     tools: { swarm: { enabled: true, maxConcurrent: 1 } },
@@ -113,6 +113,7 @@ async function writeTestConfig() {
         workspace: stateDir,
         systemAgent: { agentId: "main" },
         model: { primary: "custom/test-model" },
+        ...(maxChildrenPerAgent !== undefined ? { subagents: { maxChildrenPerAgent } } : {}),
       },
       entries: { main: { workspace: stateDir } },
     },
@@ -201,7 +202,13 @@ afterEach(async ({ task }) => {
   await cleanupPreparedModelRuntimeHarness(state, task.result?.state === "fail");
 });
 
-async function createBoundParent(operatorAuthority?: AdmittedRunOperatorAuthority) {
+async function createBoundParent(
+  operatorAuthority?: AdmittedRunOperatorAuthority,
+  maxChildrenPerAgent?: number,
+) {
+  if (maxChildrenPerAgent !== undefined) {
+    runtimeConfig = await writeTestConfig(maxChildrenPerAgent);
+  }
   return await createSpawnBoundaryParent({
     stateDir,
     parentSessionKey,

@@ -29,7 +29,7 @@ import {
   bindSubagentSpawnCleanup,
   cleanupFailedSpawnBeforeAgentStart,
   cleanupProvisionalSession,
-  terminateAcceptedCollectorRun,
+  terminateFailedRegistrationRun,
 } from "./subagent-spawn-cleanup.js";
 import { createCollectorLaunchCallbacks } from "./subagent-spawn-collector.js";
 import {
@@ -209,8 +209,11 @@ export async function spawnSubagentDirect(
     const ownsCleanup = () => canCleanupCreatedSession?.() ?? provisionalCleanupOpen;
     const ownsAcceptedRun = () =>
       ownsCleanup() || (!params.collect && canAbortRegisteredRun?.() === true);
+    const cleanupContext = gatewayContextResolver?.();
     const cleanupOwner =
-      operatorAuthority && gatewayContextResolver
+      gatewayContextResolver &&
+      (operatorAuthority ||
+        (!params.collect && cleanupContext && cleanupContext.localEmbedded !== true))
         ? bindSubagentSpawnCleanup({
             childSessionKey,
             resolveGatewayContext: gatewayContextResolver,
@@ -450,6 +453,7 @@ export async function spawnSubagentDirect(
       });
     type SubagentBackendState = { contextEnginePreparation?: PreparedContextEngineSubagentSpawn };
     let registrationRequired = true;
+    let acceptedRunCleanupError: string | undefined;
     const adapter: SpawnBackendAdapter<SubagentBackendState> = {
       async initialize() {
         const result =
@@ -486,22 +490,20 @@ export async function spawnSubagentDirect(
           await cleanupFailedSpawn();
           return;
         }
-        // A failed required registration stops its accepted run while uncertain
-        // or retained registry data still forbids deleting the session.
         if (
           phase === "register" &&
           acceptedChildRunId &&
           registrationRequired &&
           isAbortCurrent()
         ) {
-          const deleteSessionOnMiss = isCleanupCurrent();
-          await terminateAcceptedCollectorRun({
+          acceptedRunCleanupError = await terminateFailedRegistrationRun({
             childSessionKey,
             gatewayRunId: acceptedChildRunId,
             ...provisionalSessionIdentity,
-            isCurrent: deleteSessionOnMiss ? isCleanupCurrent : isAbortCurrent,
-            sessionCleanup: deleteSessionOnMiss ? "delete-on-abort-miss" : "preserve",
-            ...(cleanupOwner ? { callGateway: cleanupOwner.callGateway } : {}),
+            isCleanupCurrent,
+            isAbortCurrent,
+            cleanupOwner,
+            retainAdmission: params.collect ? undefined : admissionReservation?.retain,
           });
         }
         if (!isCleanupCurrent()) {
@@ -510,15 +512,11 @@ export async function spawnSubagentDirect(
           await rollbackPreparedContextEngine(state?.contextEnginePreparation);
         }
         if (attachmentId && isCleanupCurrent()) {
-          try {
-            await cleanupMaterializedSubagentAttachments({
-              childSessionKey,
-              attachmentId,
-              isCurrent: isCleanupCurrent,
-            });
-          } catch {
-            // Best-effort cleanup only.
-          }
+          await cleanupMaterializedSubagentAttachments({
+            childSessionKey,
+            attachmentId,
+            isCurrent: isCleanupCurrent,
+          }).catch(() => {});
         }
         let emitLifecycleHooks = threadBindingReady;
         if (phase === "dispatch" && threadBindingReady) {
@@ -598,10 +596,14 @@ export async function spawnSubagentDirect(
           : undefined;
       return {
         status: spawnStatus === "forbidden" ? "forbidden" : "error",
-        error:
+        error: [
           pipelineResult.phase === "register" && spawnStatus !== "forbidden"
             ? `Failed to register subagent run: ${summarizeSpawnError(pipelineResult.error)}`
             : summarizeSpawnError(pipelineResult.error),
+          acceptedRunCleanupError,
+        ]
+          .filter(Boolean)
+          .join(" "),
         childSessionKey,
         ...(pipelineResult.phase === "initialize" ? {} : { runId }),
       };

@@ -1,5 +1,14 @@
+import { expectDefined } from "@openclaw/normalization-core/expect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { awaitGateBeforeSettlement, withinTest } from "../../../../test/helpers/promise.js";
+import { createMessageReceiptFromOutboundResults } from "../../../channels/message/receipt.js";
+import type { ChannelPlugin } from "../../../channels/plugins/types.public.js";
 import * as config from "../../../config/config.js";
+import {
+  appendTranscriptMessage,
+  loadSessionEntry,
+  upsertSessionEntryCore,
+} from "../../../config/sessions/session-accessor.js";
 import { resolvePhysicalSessionStorePath } from "../../../config/sessions/session-store-path.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { callGateway } from "../../../gateway/call.js";
@@ -10,6 +19,7 @@ import {
 } from "../../../gateway/server-plugin-in-process-dispatch.test-support.js";
 import { bindGatewayLifecycleRequest } from "../../../gateway/server-recovery-runtime-context.js";
 import { onAgentEvent, rotateAgentEventLifecycleGeneration } from "../../../infra/agent-events.js";
+import { getActivePluginRegistry, setActivePluginRegistry } from "../../../plugins/runtime.js";
 import {
   getGatewayContextLifetime,
   getPluginRuntimeGatewayRequestScope,
@@ -17,7 +27,13 @@ import {
 } from "../../../plugins/runtime/gateway-request-scope.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
 import * as stateWorker from "../../../state/openclaw-state-worker-store.js";
+import {
+  createChannelTestPluginBase,
+  createTestRegistry,
+} from "../../../test-utils/channel-plugins.js";
 import { withOpenClawTestState } from "../../../test-utils/openclaw-test-state.js";
+import { setSubagentAnnounceDeliveryDepsForTest } from "../announce/subagent-announce-overrides.test-support.js";
+import * as announce from "../announce/subagent-announce.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import { SubagentRegistryWriteError } from "./subagent-registry-persistence.js";
 import { subscribeSubagentRunChanges } from "./subagent-registry-publication.js";
@@ -25,11 +41,13 @@ import {
   persistSubagentRunsToDiskAsyncOrThrow,
   persistSubagentRunsToDiskOrThrow,
 } from "./subagent-registry-state.js";
+import { observeRootWork } from "./subagent-registry.browser-cleanup.test-support.js";
 import {
   adoptSubagentRunForRequesterTurn,
   registerSubagentRun,
   replaceSubagentRunAfterSteerCore,
 } from "./subagent-registry.js";
+import { settleSubagentRegistryPersistenceWork } from "./subagent-registry.persistence.test-support.js";
 import {
   loadSubagentRegistryFromSqlite,
   saveSubagentRegistryChangesToSqlite,
@@ -283,6 +301,195 @@ describe("registered completion source custody", () => {
       }
     });
   });
+
+  it.for(["current", "revoked"] as const)(
+    "rechecks %s registered completion authority at the final outbound adapter",
+    async (authority, { signal }) => {
+      await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+        const cfg = { session: { store: state.path("sessions.json") } };
+        vi.mocked(config.getRuntimeConfig).mockReturnValue(cfg);
+        const requesterSessionKey = "agent:main:discord:dm:registered-completion";
+        const childSessionKey = "agent:main:subagent:registered-final-delivery";
+        const runId = "registered-final-delivery";
+        const content = "Acknowledged child result";
+        for (const [sessionKey, sessionId] of [
+          [requesterSessionKey, "completion-requester"],
+          [childSessionKey, "completion-child"],
+        ] as const) {
+          await upsertSessionEntryCore(
+            { storePath: cfg.session.store, sessionKey, agentId: "main" },
+            { sessionId, updatedAt: Date.now() },
+          );
+        }
+        const context = createContext();
+        context.getRuntimeConfig = () => cfg;
+        context.resolveGatewayContext = () => context;
+        const client = createOperatorClient({
+          profileName: "registered-final-delivery",
+          scopes: ["operator.write"],
+        });
+        const revoked = new AbortController();
+        client.internal = {
+          operatorAccessAuthority: {
+            signal: revoked.signal,
+            assertCurrent: () => revoked.signal.throwIfAborted(),
+          },
+        };
+        const terminal = createDeferredCore<unknown>();
+        const beforeSend = createDeferredCore();
+        const releaseSend = createDeferredCore();
+        const flowCompleted = createDeferredCore<announce.SubagentAnnounceFlowOutcome>();
+        let announcement: ReturnType<typeof announce.runSubagentAnnounceFlow> | undefined;
+        const actualAnnounce = announce.runSubagentAnnounceFlow;
+        const announceSpy = vi
+          .spyOn(announce, "runSubagentAnnounceFlow")
+          .mockImplementation((params) => {
+            announcement = actualAnnounce(params);
+            void announcement.then(flowCompleted.resolve, flowCompleted.reject);
+            return announcement;
+          });
+        const received: string[] = [];
+        const sendText = vi.fn(async ({ text }: { text: string }) => {
+          received.push(text);
+          return {
+            messageId: "registered-completion-result",
+            receipt: createMessageReceiptFromOutboundResults({
+              results: [{ channel: "discord", messageId: "registered-completion-result" }],
+              kind: "text",
+            }),
+          };
+        });
+        const channel = {
+          ...createChannelTestPluginBase({ id: "discord" }),
+          message: {
+            id: "discord",
+            send: {
+              lifecycle: {
+                beforeSendAttempt: async () => {
+                  beforeSend.resolve();
+                  await releaseSend.promise;
+                },
+              },
+              text: sendText,
+            },
+          },
+        } satisfies ChannelPlugin;
+        const previousRegistry = getActivePluginRegistry();
+        setActivePluginRegistry(
+          createTestRegistry([{ pluginId: "discord", source: "test", plugin: channel }]),
+        );
+        setSubagentAnnounceDeliveryDepsForTest({
+          dispatchGatewayMethodInProcess: vi.fn().mockResolvedValue({
+            status: "ok",
+            result: { payloads: [{ text: content }], meta: { durationMs: 1 } },
+          }),
+        });
+        vi.mocked(callGateway).mockReturnValue(terminal.promise);
+        const settleRoots = observeRootWork();
+        const failures: unknown[] = [];
+        try {
+          await withPluginRuntimeGatewayRequestScope(
+            {
+              client,
+              context,
+              resolveGatewayContext: () => context,
+              isWebchatConnect: () => false,
+            },
+            () =>
+              registerSubagentRun(
+                registration(runId, {
+                  childSessionKey,
+                  requesterSessionKey,
+                  requesterAgentId: "main",
+                  requesterOrigin: { channel: "discord", to: "dm:registered-completion" },
+                  gatewayContextResolver: () => context,
+                }),
+              ),
+          );
+          const entry = expectDefined(subagentRuns.get(runId), "acknowledged registration");
+          expect(loadSubagentRegistryFromSqlite().get(runId)).toMatchObject({
+            childSessionKey,
+            execution: { status: "running" },
+          });
+          await appendTranscriptMessage(
+            {
+              storePath: cfg.session.store,
+              sessionKey: childSessionKey,
+              sessionId: "completion-child",
+              agentId: "main",
+            },
+            {
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: content }],
+                stopReason: "stop",
+                __openclaw: { runId },
+              },
+            },
+          );
+          terminal.resolve({
+            status: "ok",
+            startedAt: entry.createdAt,
+            endedAt: Date.now(),
+            terminalReply: { disposition: "visible", text: content },
+          });
+          await withinTest(
+            awaitGateBeforeSettlement(
+              beforeSend.promise,
+              flowCompleted.promise,
+              "Registered completion did not reach its final outbound adapter",
+            ),
+            signal,
+          );
+          expect(received).toEqual([]);
+          expect(entry.execution.status).toBe("terminal");
+          if (authority === "revoked") {
+            revoked.abort(new Error("registered completion operator revoked"));
+          }
+          releaseSend.resolve();
+          await withinTest(flowCompleted.promise, signal);
+          await settleSubagentRegistryPersistenceWork(() => settleRoots(true));
+          const stored = expectDefined(
+            loadSubagentRegistryFromSqlite().get(runId),
+            "retained result",
+          );
+          if (authority === "current") {
+            expect(received).toEqual([content]);
+            expect(sendText).toHaveBeenCalledOnce();
+            expect(stored.delivery?.status).toBe("delivered");
+          } else {
+            expect(received).toEqual([]);
+            expect(sendText).not.toHaveBeenCalled();
+            expect(stored.delivery?.status).not.toBe("delivered");
+          }
+          expect(
+            loadSessionEntry({ storePath: cfg.session.store, sessionKey: childSessionKey }),
+          ).toMatchObject({ sessionId: "completion-child" });
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          terminal.resolve({ status: "pending" });
+          releaseSend.resolve();
+          const settled = await Promise.allSettled([announcement]);
+          failures.push(
+            ...settled.flatMap((result) => (result.status === "rejected" ? [result.reason] : [])),
+          );
+          try {
+            await settleSubagentRegistryPersistenceWork(() => settleRoots());
+          } catch (error) {
+            failures.push(error);
+          }
+          resetSubagentRegistryForTests({ persist: false });
+          announceSpy.mockRestore();
+          setSubagentAnnounceDeliveryDepsForTest();
+          setActivePluginRegistry(previousRegistry ?? createTestRegistry());
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "Registered completion delivery proof failed");
+        }
+      });
+    },
+  );
 
   it("retains raw child ownership, including unknown legacy ownership, on registration replay", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
