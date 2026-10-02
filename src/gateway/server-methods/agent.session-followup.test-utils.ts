@@ -581,7 +581,11 @@ describe("gateway agent completed-child delivery", () => {
           endedAt: number;
           terminalReply: { disposition: "visible"; text: string };
         }>();
-        mocks.agentCommand.mockReturnValueOnce(provider.promise);
+        const commandStarted = createDeferred();
+        mocks.agentCommand.mockImplementationOnce(() => {
+          commandStarted.resolve();
+          return provider.promise;
+        });
         mocks.registryCallGateway.mockImplementation(async (request) => {
           if (request.method !== "agent.wait") {
             throw new Error(`Unexpected child-session effect: ${request.method}`);
@@ -590,6 +594,7 @@ describe("gateway agent completed-child delivery", () => {
           return await secondWait.promise;
         });
         const context = makeContext();
+        const client = backendGatewayClient();
         const terminal = createDeferred();
         const respond = vi.fn((ok, payload) => {
           if (!ok || payload?.status === "ok" || payload?.status === "error") {
@@ -609,9 +614,10 @@ describe("gateway agent completed-child delivery", () => {
               message: "Second task",
               idempotencyKey: secondRunId,
             },
-            { context, respond, reqId: secondRunId, client: backendGatewayClient() },
+            { context, respond, reqId: secondRunId, client, flushDispatch: false },
           );
           admitted = true;
+          await withinTest(commandStarted.promise, signal);
           expect(getSubagentRunByRunId(secondRunId)).toMatchObject({
             generation: 2,
             task: "Second task",
