@@ -7,7 +7,10 @@ import type {
 import type { TranscriptArchivePresenceRead } from "./session-accessor.sqlite-archive-types.js";
 import type { SessionAccessScope } from "./session-accessor.types.js";
 import type { CanonicalSessionReaderContinuation } from "./session-canonical-key.js";
-import type { MemorySessionSelectors, MemorySessionTarget } from "./session-memory-targets.js";
+import type {
+  MemorySessionSelectors,
+  MemorySessionTarget,
+} from "./session-memory-targets.types.js";
 
 export type SessionArchiveInventoryScope = Pick<
   SessionAccessScope,

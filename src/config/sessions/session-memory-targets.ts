@@ -4,29 +4,11 @@ import { listSessionTranscriptInstances } from "./session-accessor.sqlite-entry.
 import { listSessionTranscriptArchivesReadOnly } from "./session-accessor.sqlite-history.js";
 import { listSessionParticipantsReadOnly } from "./session-accessor.sqlite-participant-read.js";
 import type { CanonicalSessionReaderContinuation } from "./session-canonical-key.js";
+import type {
+  MemorySessionSelectors,
+  MemorySessionTarget,
+} from "./session-memory-targets.types.js";
 import type { SessionParticipantIdentity } from "./session-participant-identity.js";
-
-export type MemorySessionTarget = {
-  agentId: string;
-  sessionId: string;
-  sessionKey?: string;
-  resolution: "live" | "archived" | "unresolved";
-  hookExternalContentSource: string | null;
-  channel: string | null;
-  accountId: string | null;
-  chatType: string | null;
-  createdAt?: number;
-  participants: SessionParticipantIdentity[];
-};
-
-export type MemorySessionSelectors = {
-  agentId: string;
-  storePath?: string;
-  sessionIds?: readonly string[];
-  hookSources?: readonly string[];
-  participants?: readonly string[];
-  since?: string | number;
-};
 
 export function projectSessionMetadata(
   instance: SessionTranscriptInstance,

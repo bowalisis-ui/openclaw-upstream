@@ -10,7 +10,8 @@ import {
   readSessionEntryInWorker,
   withSessionStoreReaderInWorker,
 } from "./session-entry-read-runtime.js";
-import { readMemorySessionTargets, type MemorySessionSelectors } from "./session-memory-targets.js";
+import { readMemorySessionTargets } from "./session-memory-targets.js";
+import type { MemorySessionSelectors } from "./session-memory-targets.types.js";
 import { resolveSessionStorePathForScope } from "./session-store-path.js";
 import type { SessionArchiveInventoryScope } from "./session-transcript-inventory.types.js";
 

@@ -3,15 +3,17 @@ import { listSessionTranscriptInstances } from "../config/sessions/session-acces
 import {
   projectSessionMetadata,
   readMemorySessionTargets,
-  type MemorySessionSelectors,
-  type MemorySessionTarget,
 } from "../config/sessions/session-memory-targets.js";
+import type {
+  MemorySessionSelectors,
+  MemorySessionTarget,
+} from "../config/sessions/session-memory-targets.types.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 
 export type {
   MemorySessionSelectors,
   MemorySessionTarget,
-} from "../config/sessions/session-memory-targets.js";
+} from "../config/sessions/session-memory-targets.types.js";
 
 /** @deprecated Use loadArchivedSessionsAsync; removed at the next Plugin SDK major. */
 export { listSessionTranscriptArchivesReadOnly as loadArchivedSessions } from "../config/sessions/session-accessor.js";
