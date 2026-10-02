@@ -8,7 +8,6 @@ import {
 import {
   buildSessionEntry,
   listSessionTranscriptCorpusEntriesForAgent,
-  readTranscriptStatsBatchReadOnlySync,
   sessionPathForFile,
   sessionPathForSessionIdentity,
   statSessionEntrySync,
@@ -23,6 +22,7 @@ import {
 import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
 import { listMemorySessionTombstones } from "../memory-entry-origins.js";
 import { runInMemoryBackgroundContext } from "./background-context.js";
+import { readMemoryTranscriptStatsInWorker } from "./manager-cpu-worker-runtime.js";
 import { shouldSyncSessionsForReindex } from "./manager-session-reindex.js";
 import {
   isMemorySessionIndexable,
@@ -191,7 +191,7 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
     const sqliteCorpusEntries = corpusEntries.filter(
       (entry) => entry.transcriptSource === "sqlite",
     );
-    const transcriptStats = readTranscriptStatsBatchReadOnlySync(
+    const transcriptStats = await readMemoryTranscriptStatsInWorker(
       sqliteCorpusEntries.map((entry) => ({
         agentId: entry.agentId,
         sessionId: entry.sessionId,
@@ -199,6 +199,9 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
         ...(entry.storePath ? { storePath: entry.storePath } : {}),
       })),
     );
+    if (this.closed) {
+      return [];
+    }
     const statsByEntry = new Map(
       sqliteCorpusEntries.map((entry, index) => [entry, transcriptStats[index]] as const),
     );
@@ -279,7 +282,7 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
 
   protected async runSessionStartupCatchup(): Promise<string[]> {
     const dirtyFiles = await this.markSessionStartupCatchupDirtyFiles();
-    if (!this.sessionsDirty || this.closed) {
+    if (!this.sessionsDirty || this.closing || this.closed) {
       return dirtyFiles;
     }
     void this.sync({ reason: "session-startup-catchup" }).catch((err: unknown) => {

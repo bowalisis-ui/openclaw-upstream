@@ -7,6 +7,7 @@ import type {
 import type { TranscriptArchivePresenceRead } from "./session-accessor.sqlite-archive-types.js";
 import type { SessionAccessScope } from "./session-accessor.types.js";
 import type { CanonicalSessionReaderContinuation } from "./session-canonical-key.js";
+import type { MemorySessionSelectors, MemorySessionTarget } from "./session-memory-targets.js";
 
 export type SessionArchiveInventoryScope = Pick<
   SessionAccessScope,
@@ -39,15 +40,24 @@ type SessionCorpusInventoryWorkerInput = {
   continuation?: CanonicalSessionReaderContinuation;
 };
 
+type MemorySessionTargetsWorkerInput = {
+  kind: "memory-session-targets";
+  database: { agentId: string; path: string };
+  params: MemorySessionSelectors & { env: NodeJS.ProcessEnv };
+  continuation?: CanonicalSessionReaderContinuation;
+};
+
 type SessionArchivePresenceWorkerInput = TranscriptArchivePresenceRead & {
   kind: "session-archive-presence";
 };
 
 export type SessionTranscriptInventoryWorkerInput =
+  | MemorySessionTargetsWorkerInput
   | SessionArchiveInventoryWorkerInput
   | SessionCorpusInventoryWorkerInput
   | SessionArchivePresenceWorkerInput;
 export type SessionTranscriptInventoryWorkerValues = {
+  "memory-session-targets": { kind: "memory-session-targets"; targets: MemorySessionTarget[] };
   "session-archive-inventory": {
     kind: "session-archive-inventory";
     archives: SessionArchiveInventoryEntry[];
@@ -59,6 +69,9 @@ export type SessionTranscriptInventoryWorkerValues = {
   "session-archive-presence": { kind: "session-archive-presence"; registered: boolean };
 };
 export type SessionTranscriptInventoryReaders = {
+  readMemorySessionTargets: (
+    input: Omit<MemorySessionTargetsWorkerInput, "kind" | "database">,
+  ) => Promise<MemorySessionTarget[]>;
   readArchiveInventory: (
     input: Omit<SessionArchiveInventoryWorkerInput, "kind" | "database">,
   ) => Promise<SessionArchiveInventoryEntry[]>;
