@@ -1156,7 +1156,6 @@ describe("VoiceCallWebhookServer classic response routing", () => {
   it("keeps outbound calls on their frozen agent when the dialed number has an inbound route", async () => {
     const call = createCall(Date.now());
     call.agentId = "support";
-    call.direction = "outbound";
     call.to = "+15550001111";
     call.sessionKey = "agent:top:voice:15550001111";
     const config = createConfig({
