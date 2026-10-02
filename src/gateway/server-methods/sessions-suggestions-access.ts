@@ -1,6 +1,7 @@
 import {
   ErrorCodes,
   errorShape,
+  type ErrorShape,
   type SessionSuggestionEvent,
   type SessionSuggestionResolution,
 } from "../../../packages/gateway-protocol/src/index.js";
@@ -9,19 +10,19 @@ import {
   SessionWorkStartInvalidatedError,
   isSessionWorkStartInvalidatedError,
 } from "../../config/sessions/lifecycle.js";
-import {
-  resolveSqliteScope,
-  toDatabaseOptions,
-} from "../../config/sessions/session-accessor.sqlite-scope.js";
-import { withOpenClawAgentDatabaseAsync } from "../../state/openclaw-agent-db.js";
-import { runOpenClawAgentWriteAdmission } from "../../state/openclaw-agent-write-admission.js";
 import { hasOperatorBoundary, operatorSessionCap } from "../operator-role-policy.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
+import type { SessionSharingTarget } from "../session-sharing-policy.js";
+import {
+  prepareSessionMutationFacts,
+  SessionMutationFactsUnavailableError,
+} from "../session-sharing-preparation.js";
 import {
   authorizeIncognitoSessionTarget,
   authorizeSessionSharingTarget,
   createSessionListEntryFilter,
   resolveSessionSharingRole,
+  prepareProjectedSessionSharing,
   resolveSessionSharingTarget,
   resolveSessionVisibility,
   SessionMutationAuthorizationChangedError,
@@ -32,13 +33,14 @@ function canSeeSuggestionTarget(params: {
   client: GatewayClient | null;
   cfg: ReturnType<GatewayRequestContext["getRuntimeConfig"]>;
   target: NonNullable<ReturnType<typeof resolveSessionSharingTarget>>;
+  sharing?: ReturnType<typeof prepareProjectedSessionSharing>;
 }): boolean {
   return (
     !hasOperatorBoundary(params.client, params.cfg) ||
-    createSessionListEntryFilter({ client: params.client, cfg: params.cfg })?.(
-      params.target.storeKey,
-      params.target.entry,
-    ) !== false
+    (
+      params.sharing?.entryFilter ??
+      createSessionListEntryFilter({ client: params.client, cfg: params.cfg })
+    )?.(params.target.storeKey, params.target.entry) !== false
   );
 }
 
@@ -50,6 +52,7 @@ export function requireSuggestionTarget(params: {
   respond: RespondFn;
 }) {
   const cfg = params.context.getRuntimeConfig();
+  const policyConfig = params.context.getCommittedRuntimeConfig?.() ?? cfg;
   const requestedAgent = resolveRequestedSessionAgentId(cfg, params.sessionKey, params.agentId);
   if (!requestedAgent.ok) {
     params.respond(false, undefined, requestedAgent.error);
@@ -60,7 +63,7 @@ export function requireSuggestionTarget(params: {
     sessionKey: params.sessionKey,
     agentId: requestedAgent.agentId,
   });
-  if (!target || !canSeeSuggestionTarget({ client: params.client, cfg, target })) {
+  if (!target || !canSeeSuggestionTarget({ client: params.client, cfg: policyConfig, target })) {
     params.respond(
       false,
       undefined,
@@ -77,12 +80,15 @@ export function requireVisibleSuggestionRole(params: {
   sessionKey: string;
   target: NonNullable<ReturnType<typeof resolveSessionSharingTarget>>;
   respond: RespondFn;
+  sharing?: ReturnType<typeof prepareProjectedSessionSharing>;
 }) {
-  const role = resolveSessionSharingRole({
-    client: params.client,
-    cfg: params.cfg,
-    target: params.target,
-  });
+  const role =
+    params.sharing?.roleForTarget(params.target) ??
+    resolveSessionSharingRole({
+      client: params.client,
+      cfg: params.cfg,
+      target: params.target,
+    });
   const incognitoError = authorizeIncognitoSessionTarget({
     client: params.client,
     sessionKey: params.sessionKey,
@@ -95,11 +101,13 @@ export function requireVisibleSuggestionRole(params: {
   if (resolveSessionVisibility(params.target.entry) !== "draft") {
     return role;
   }
-  const error = authorizeSessionSharingTarget({
-    client: params.client,
-    cfg: params.cfg,
-    target: params.target,
-  });
+  const error = params.sharing
+    ? params.sharing.authorizeTarget(params.target)
+    : authorizeSessionSharingTarget({
+        client: params.client,
+        cfg: params.cfg,
+        target: params.target,
+      });
   if (!error) {
     return role;
   }
@@ -170,39 +178,36 @@ export function respondSessionSuggestionSessionChanged(
   respond: RespondFn,
   sessionKey: string,
 ): void {
-  respond(
-    false,
-    undefined,
-    errorShape(
-      ErrorCodes.UNAVAILABLE,
-      "session changed before suggestion resolution could be finalized",
-      {
-        retryable: false,
-        details: {
-          code: "SESSION_SUGGESTION_SESSION_CHANGED",
-          sessionKey,
-        },
+  respond(false, undefined, sessionSuggestionSessionChangedError(sessionKey));
+}
+
+function sessionSuggestionSessionChangedError(sessionKey: string): ErrorShape {
+  return errorShape(
+    ErrorCodes.UNAVAILABLE,
+    "session changed before suggestion resolution could be finalized",
+    {
+      retryable: false,
+      details: {
+        code: "SESSION_SUGGESTION_SESSION_CHANGED",
+        sessionKey,
       },
-    ),
+    },
   );
 }
 
-export type SessionSuggestionMutationResult<T> = { ok: true; value: T } | { ok: false };
+export type SessionSuggestionMutationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: ErrorShape };
 type SuggestionWriteScope = ReturnType<typeof suggestionScope> & { env: NodeJS.ProcessEnv };
 type SessionSuggestionMutation<T> = {
-  mutate: (scope: SuggestionWriteScope) => T;
+  mutate: (scope: SuggestionWriteScope, assertCurrent: () => void) => Promise<T>;
 } & ({ kind: "start"; action: "add" | SessionSuggestionResolution } | { kind: "settle" });
 
 export function resolveCurrentSuggestionTarget(
-  target: NonNullable<ReturnType<typeof resolveSessionSharingTarget>>,
+  target: SessionSharingTarget,
   expectedSessionId: string | undefined,
-  cfg: ReturnType<GatewayRequestContext["getRuntimeConfig"]>,
+  current: SessionSharingTarget | null,
 ) {
-  const current = resolveSessionSharingTarget({
-    cfg,
-    sessionKey: target.canonicalKey,
-    agentId: target.agentId,
-  });
   if (
     !current ||
     current.agentId !== target.agentId ||
@@ -216,8 +221,8 @@ export function resolveCurrentSuggestionTarget(
   return current;
 }
 
-export function createSessionSuggestionMutation(params: {
-  target: NonNullable<ReturnType<typeof resolveSessionSharingTarget>>;
+export async function createSessionSuggestionMutation(params: {
+  target: SessionSharingTarget;
   context: GatewayRequestContext;
   client: GatewayClient | null;
   respond: RespondFn;
@@ -226,28 +231,63 @@ export function createSessionSuggestionMutation(params: {
   assertCurrent?: () => void;
 }) {
   const scope = { ...suggestionScope(params.target), env: { ...process.env } };
-  const databaseOptions = toDatabaseOptions(resolveSqliteScope(scope));
   const expectedSessionId = params.target.entry.sessionId;
-  return async <T>(
+  const facts = await prepareSessionMutationFacts({
+    cfg: params.context.getRuntimeConfig(),
+    sessionKey: params.target.canonicalKey,
+    agentId: params.target.agentId,
+    allowMissing: true,
+  });
+  const readCurrent = () => {
+    const cfg = params.context.getRuntimeConfig();
+    const current = facts.readCurrent(cfg);
+    const target = resolveCurrentSuggestionTarget(params.target, expectedSessionId, current.target);
+    const policyConfig = params.context.getCommittedRuntimeConfig?.() ?? cfg;
+    const sharing = prepareProjectedSessionSharing({
+      cfg: policyConfig,
+      client: params.client,
+      isMember: (_target, identityId) => current.membership.has(identityId),
+    });
+    return { target, cfg: policyConfig, sharing };
+  };
+  const run = async <T>(
     operation: SessionSuggestionMutation<T>,
   ): Promise<SessionSuggestionMutationResult<T>> => {
     const rejected = new Error("session suggestion mutation refused");
+    let rejectionError: ErrorShape | undefined;
     const assertCurrent = () => {
       if (operation.kind === "start") {
-        params.signal?.throwIfAborted();
-        params.assertCurrent?.();
+        if (params.signal?.aborted) {
+          throw new SessionMutationAuthorizationChangedError(
+            errorShape(ErrorCodes.UNAVAILABLE, "suggestion request was cancelled"),
+          );
+        }
+        try {
+          params.assertCurrent?.();
+        } catch (error) {
+          if (error instanceof SessionMutationAuthorizationChangedError) {
+            throw error;
+          }
+          // Host guards also use plain errors. This guard runs before dispatch
+          // or a worker commit grant, so its refusal has no accepted write.
+          throw new SessionMutationAuthorizationChangedError(
+            errorShape(
+              ErrorCodes.UNAVAILABLE,
+              error instanceof Error ? error.message : "suggestion requester authority changed",
+            ),
+          );
+        }
       }
-      const cfg = params.context.getRuntimeConfig();
-      const current = resolveCurrentSuggestionTarget(params.target, expectedSessionId, cfg);
+      const current = readCurrent();
       if (
         operation.kind === "start" &&
         !authorizeSessionSuggestionMutation(
           {
-            client: params.client,
-            cfg,
-            sessionKey: params.sessionKey,
-            target: current,
-            respond: params.respond,
+            ...params,
+            ...current,
+            respond: (_ok, _payload, error) => {
+              rejectionError = error;
+            },
           },
           operation.action,
         )
@@ -256,35 +296,31 @@ export function createSessionSuggestionMutation(params: {
       }
     };
     try {
-      return await runOpenClawAgentWriteAdmission(
-        databaseOptions,
-        () =>
-          withOpenClawAgentDatabaseAsync(
-            databaseOptions,
-            // Settlement retains the accepted dispatch token; a later caller abort cannot replay it.
-            (database) => ({
-              ok: true as const,
-              value: operation.mutate({ ...scope, storePath: database.path }),
-            }),
-            assertCurrent,
-          ),
-        true,
-      );
+      // The worker invokes this guard at transaction and commit admission. Accepted
+      // input settlement retains its exact token independently of the caller's lifetime.
+      assertCurrent();
+      const value = await operation.mutate(scope, assertCurrent);
+      return { ok: true, value };
     } catch (error) {
       if (error === rejected) {
-        return { ok: false };
+        return {
+          ok: false,
+          error: rejectionError ?? errorShape(ErrorCodes.FORBIDDEN, "suggestion mutation refused"),
+        };
       }
       if (error instanceof SessionMutationAuthorizationChangedError) {
-        params.respond(false, undefined, error.error);
-        return { ok: false };
+        return { ok: false, error: error.error };
       }
-      if (!isSessionWorkStartInvalidatedError(error)) {
+      if (
+        !isSessionWorkStartInvalidatedError(error) &&
+        !(error instanceof SessionMutationFactsUnavailableError)
+      ) {
         throw error;
       }
-      respondSessionSuggestionSessionChanged(params.respond, params.sessionKey);
-      return { ok: false };
+      return { ok: false, error: sessionSuggestionSessionChangedError(params.sessionKey) };
     }
   };
+  return { run, readCurrent, release: facts.release };
 }
 
 export function publishSuggestion(

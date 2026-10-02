@@ -33,6 +33,7 @@ import {
 } from "../session-sharing.js";
 import { flushPendingSessionsChangedEvents } from "./session-change-event.js";
 import { sessionMutationHandlers } from "./sessions-mutations.js";
+import { initializeSessionReadContext } from "./sessions-read-cache.test-support.js";
 import { sessionSharingHandlers } from "./sessions-sharing.js";
 import { identifiedClient, sessionSharingTestContext } from "./sessions-sharing.test-support.js";
 import { sessionSuggestionHandlers } from "./sessions-suggestions.js";
@@ -60,8 +61,8 @@ const handlers: GatewayRequestHandlers = {
 afterEach(() => flushPendingSessionsChangedEvents());
 
 async function seedMetadata(state: OpenClawTestState) {
-  const owner = ensureProfileForEmail("metadata-owner@example.test");
-  const other = ensureProfileForEmail("metadata-other@example.test");
+  const owner = await ensureProfileForEmail("metadata-owner@example.test");
+  const other = await ensureProfileForEmail("metadata-other@example.test");
   const scope = { agentId: "main", env: state.env, sessionKey: "agent:main:metadata" };
   await upsertSessionEntryCore(scope, {
     sessionId: "metadata",
@@ -120,11 +121,13 @@ describe("session metadata writer admission", () => {
           agentId: scope.agentId,
         })!;
         expect(resolveSessionSharingRole({ cfg: {}, client: viewer, target })).toBe("viewer");
+        const context = sessionSharingTestContext(vi.fn());
+        await initializeSessionReadContext(context);
         const request = invoke(
           "sessions.assignOwner",
           { key: scope.sessionKey, owner: { type: "human", id: other.id } },
           viewer,
-          sessionSharingTestContext(vi.fn()),
+          context,
         );
         await request.done;
         expect(request.errors).toEqual([]);
@@ -154,6 +157,7 @@ describe("session metadata writer admission", () => {
         let cfg: OpenClawConfig = {};
         const context = sessionSharingTestContext(vi.fn());
         context.getRuntimeConfig = () => cfg;
+        await initializeSessionReadContext(context);
         const entered = createDeferredCore();
         const release = createDeferredCore();
         const reservation = runOpenClawAgentWorkerWrite(options, async () => {
@@ -199,7 +203,7 @@ describe("session metadata writer admission", () => {
       const fixture = await seedMetadata(state);
       const { scope, owner, other, options } = fixture;
       if (method === "session.members.remove") {
-        addSessionMember(scope, { identityId: other.id, addedBy: owner.id });
+        await addSessionMember(scope, { identityId: other.id, addedBy: owner.id });
       }
       if (method === "session.suggestions.resolve") {
         addSessionSuggestion(scope, {
@@ -222,6 +226,8 @@ describe("session metadata writer admission", () => {
         suggestions: listSessionSuggestions(scope),
       });
       const before = structuredClone(read());
+      const context = sessionSharingTestContext(vi.fn());
+      await initializeSessionReadContext(context);
       const entered = createDeferredCore();
       const release = createDeferredCore();
       const reservation = runOpenClawAgentWorkerWrite(options, async () => {
@@ -229,12 +235,7 @@ describe("session metadata writer admission", () => {
         await release.promise;
       });
       await entered.promise;
-      const request = invoke(
-        method,
-        params,
-        identifiedClient(owner.id),
-        sessionSharingTestContext(vi.fn()),
-      );
+      const request = invoke(method, params, identifiedClient(owner.id), context);
       try {
         await setImmediate();
         expect(request.respond).not.toHaveBeenCalled();
@@ -272,6 +273,7 @@ describe("session metadata writer admission", () => {
           kind === "owner" ? { agents: { entries: { main: {}, research: {} } } } : {};
         const context = sessionSharingTestContext(vi.fn());
         context.getRuntimeConfig = () => cfg;
+        await initializeSessionReadContext(context);
         const entered = createDeferredCore();
         const release = createDeferredCore();
         const reservation = runOpenClawAgentWorkerWrite(options, async () => {

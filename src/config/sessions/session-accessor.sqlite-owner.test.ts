@@ -20,6 +20,44 @@ afterEach(() => {
 });
 
 describe("SQLite session owner assignment", () => {
+  it("refuses stale session identity and lifecycle before assigning an owner", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      const scope = {
+        agentId: "main",
+        env: state.env,
+        sessionKey: "agent:main:guarded-owner",
+      };
+      await upsertSessionEntryCore(scope, {
+        sessionId: "session-original",
+        updatedAt: 1,
+        lifecycleRevision: "original-generation",
+        createdActor: { type: "human", source: "profile", id: "profile-creator" },
+      });
+      const expectedEntry = loadSessionEntry(scope)!;
+      const assignment = {
+        owner: { type: "agent" as const, id: "research" },
+        assignedBy: { type: "human" as const, id: "profile-assigner" },
+      };
+      expect(() =>
+        assignSessionOwner(scope, { ...assignment, expectedSessionId: "session-replaced" }),
+      ).toThrow("session changed before owner assignment");
+      expect(loadSessionEntry(scope)?.owner).toBeUndefined();
+
+      await upsertSessionEntryCore(scope, {
+        ...expectedEntry,
+        lifecycleRevision: "replacement-generation",
+      });
+      expect(() =>
+        assignSessionOwner(scope, {
+          ...assignment,
+          expectedSessionId: expectedEntry.sessionId,
+          expectedEntry,
+        }),
+      ).toThrow("session ownership changed before owner assignment");
+      expect(loadSessionEntry(scope)?.owner).toBeUndefined();
+    });
+  });
+
   it("lazily adds bare columns and preserves the assignment across reopen", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const scope = {
@@ -33,8 +71,8 @@ describe("SQLite session owner assignment", () => {
         createdActor: { type: "human", source: "profile", id: "profile-creator" },
       });
       const initial = openOpenClawAgentDatabase({ agentId: "main", env: state.env });
-      for (const { columnName } of FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS) {
-        initial.db.exec(`ALTER TABLE session_nodes DROP COLUMN ${columnName};`);
+      for (const { columnName, tableName } of FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS) {
+        initial.db.exec(`ALTER TABLE ${tableName} DROP COLUMN ${columnName};`);
       }
       closeOpenClawAgentDatabasesForTest();
 
@@ -60,29 +98,22 @@ describe("SQLite session owner assignment", () => {
       ).toThrow("roll back owner schema");
       expect(loadSessionEntry(scope)?.owner).toBeUndefined();
 
+      const assignment = {
+        actor: { type: "agent" as const, id: "research" },
+        assignedBy: { type: "human" as const, id: "profile-assigner" },
+        assignedAt: 1234,
+      };
       expect(
         assignSessionOwner(scope, {
-          owner: { type: "agent", id: "research" },
-          assignedBy: { type: "human", id: "profile-assigner" },
-          assignedAt: 1234,
+          owner: assignment.actor,
+          assignedBy: assignment.assignedBy,
+          assignedAt: assignment.assignedAt,
         }),
-      ).toEqual({
-        actor: { type: "agent", id: "research" },
-        assignedBy: { type: "human", id: "profile-assigner" },
-        assignedAt: 1234,
-      });
-      expect(loadSessionEntry(scope)?.owner).toEqual({
-        actor: { type: "agent", id: "research" },
-        assignedBy: { type: "human", id: "profile-assigner" },
-        assignedAt: 1234,
-      });
+      ).toEqual(assignment);
+      expect(loadSessionEntry(scope)?.owner).toEqual(assignment);
 
       closeOpenClawAgentDatabasesForTest();
-      expect(loadSessionEntry(scope)?.owner).toEqual({
-        actor: { type: "agent", id: "research" },
-        assignedBy: { type: "human", id: "profile-assigner" },
-        assignedAt: 1234,
-      });
+      expect(loadSessionEntry(scope)?.owner).toEqual(assignment);
       const reopened = openOpenClawAgentDatabase({ agentId: "main", env: state.env });
       const columns = reopened.db.prepare("PRAGMA table_info(session_nodes)").all() as Array<{
         name: string;

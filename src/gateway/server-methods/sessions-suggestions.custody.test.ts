@@ -11,10 +11,12 @@ import {
 } from "../../config/sessions/session-accessor.sqlite-scope.js";
 import { addSessionSuggestion } from "../../config/sessions/session-suggestion-store.js";
 import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
-import { ensureProfileForEmail, linkEmail } from "../../state/user-profiles.js";
+import { linkEmail } from "../../state/user-profile-writes.worker.js";
+import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import { handleGatewayRequest } from "../server-methods.js";
 import { dispatchInboundMessageMock, installGatewayTestHooks } from "../test-helpers.js";
 import { useBrowserFollowupFixture } from "./chat-send-pending-inputs.test-support.js";
+import { initializeSessionReadContext } from "./sessions-read-cache.test-support.js";
 import { sessionSuggestionHandlers } from "./sessions-suggestions.js";
 import type { RespondFn } from "./types.js";
 
@@ -34,8 +36,8 @@ describe("suggestion dispatch through real chat input custody", () => {
       persistDuringDispatch: true,
     });
     const email = "suggestion-custody@example.test";
-    const profile = ensureProfileForEmail(email);
-    const mergedProfile = ensureProfileForEmail("suggestion-custody-merged@example.test");
+    const profile = await ensureProfileForEmail(email);
+    const mergedProfile = await ensureProfileForEmail("suggestion-custody-merged@example.test");
     fixture.client.authenticatedUserProfile = {
       profileId: profile.id,
       displayName: null,
@@ -46,6 +48,7 @@ describe("suggestion dispatch through real chat input custody", () => {
     const runId = `session-suggestion:${suggestionId}`;
     const text = "Review this synthetic suggestion after the current task.";
     addSessionSuggestion(fixture.scope, { id: suggestionId, authorId: profile.id, text });
+    await initializeSessionReadContext(fixture.context);
     const { db } = openOpenClawAgentDatabase(toDatabaseOptions(resolveSqliteScope(fixture.scope)));
     const claim = () =>
       db
@@ -117,7 +120,7 @@ describe("suggestion dispatch through real chat input custody", () => {
       expect(loadTranscriptEventsSync(fixture.scope)).toEqual(fixture.activeTranscript);
       const recorder = await fixture.dispatchedRecorder;
       const acceptedResponse = structuredClone(response.mock.calls);
-      linkEmail(email, mergedProfile.id);
+      await linkEmail(email, mergedProfile.id);
       if (change === "host after custody") {
         hostCurrent = false;
       }
