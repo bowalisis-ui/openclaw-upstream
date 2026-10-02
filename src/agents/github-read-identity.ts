@@ -46,9 +46,10 @@ function ambientGitHubCredential(env: NodeJS.ProcessEnv, host = resolveGitHubHos
 export async function readCachedNativeGitHubToken(
   env: NodeJS.ProcessEnv,
   requireAbsentProof = false,
+  githubHost = resolveGitHubHost(),
 ): Promise<string | undefined> {
   const effectiveEnv = mergeProcessEnv([process.env, env]);
-  const { host, token } = ambientGitHubCredential(effectiveEnv);
+  const { host, token } = ambientGitHubCredential(effectiveEnv, githubHost);
   if (token) {
     return normalizeGitHubToken(token);
   }

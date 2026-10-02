@@ -24,6 +24,7 @@ import {
   resolveGitHubHost,
   withGitHubToken,
 } from "./github-host-runtime.js";
+import { resolveConfiguredGitHubApiBaseUrl } from "./github-host.js";
 import { verifyGitHubCredential } from "./github-oauth-client.js";
 import { inspectGitHubOAuthRecord } from "./github-oauth-records.js";
 import {
@@ -42,7 +43,7 @@ import {
   type PreparedGitHubReadIdentity,
   type PreparedGitHubSourceReadIdentity,
 } from "./github-read-identity.js";
-import type { GitHubToolAccount } from "./github-tool-account.js";
+import { managedGitHubHosts, type GitHubToolAccount } from "./github-tool-account.js";
 
 export { GitHubIdentityError } from "./github-read-identity.js";
 
@@ -389,11 +390,13 @@ async function resolveGitHubIdentityFacts(
   const identity = params.identity;
   const managed = identity.source !== "system-detected";
   const probeEnv = githubIdentityProbeEnvironment(params, identity);
+  const host = resolveGitHubHost();
+  const apiBaseUrl = resolveGitHubApiBaseUrl();
   const token = managed
     ? await readManagedGitHubToken(identity.profileDir)
-    : await readNativeGitHubToken(probeEnv);
+    : await readNativeGitHubToken(probeEnv, false, host);
   const [probe, author] = await Promise.all([
-    token ? verifyGitHubCredential(token) : undefined,
+    token ? verifyGitHubCredential(token, managed ? undefined : { apiBaseUrl }) : undefined,
     readGitAuthor(probeEnv, params.cwd),
   ]);
   const account = probe?.status === "available" ? probe.account : null;
@@ -479,7 +482,7 @@ export async function preparePersonalGitHubPublicationIdentity(params: {
     GH_CONFIG_DIR: profileDir,
     GH_PROMPT_DISABLED: "1",
   };
-  const probe = await verifyGitHubCredential(token, { apiBaseUrl });
+  const probe = await verifyGitHubCredential(token);
   assertSelected();
   if (probe.status !== "available") {
     throw new Error("My GitHub credential could not be verified; reconnect My GitHub.");
@@ -490,7 +493,7 @@ export async function preparePersonalGitHubPublicationIdentity(params: {
   return Object.freeze({
     source: "personal",
     profileId: params.profileId,
-    host,
+    host: GITHUB_HOST,
     account: probe.account,
     env: Object.freeze(env),
   });
@@ -527,10 +530,16 @@ async function prepareSharedGitHubIdentity(
   const env = currentEnvironment();
   const host = resolveGitHubHost();
   const apiBaseUrl = resolveGitHubApiBaseUrl();
+  if (managed && (host !== GITHUB_HOST || apiBaseUrl !== resolveConfiguredGitHubApiBaseUrl())) {
+    const error = new GitHubIdentityError("unavailable");
+    error.message =
+      "Use a credential issued by the repository's GitHub host; managed profiles are issued by github.com.";
+    throw error;
+  }
   const readToken = () =>
     managed
       ? readManagedGitHubToken(identity.profileDir)
-      : readNativeToken(currentEnvironment(), params.allowAnonymous === true);
+      : readNativeToken(currentEnvironment(), params.allowAnonymous === true, host);
   const token = await startGitHubIdentityOperation(readToken, params);
   if (!token) {
     return startGitHubIdentityOperation(() => {
@@ -653,16 +662,6 @@ async function verifyManagedGitHubCredential(token: string) {
     throw new Error("GitHub credential is missing required repo or read:org scopes.");
   }
   return { account: verified.account, credential };
-}
-
-function managedGitHubHosts(identity: { login: string; token: string }): string {
-  return stringifyYaml({
-    [GITHUB_HOST]: {
-      user: identity.login,
-      oauth_token: identity.token,
-      users: { [identity.login]: { oauth_token: identity.token } },
-    },
-  });
 }
 
 /** Write gh's external file contract without touching its OS keyring or verifying again. */

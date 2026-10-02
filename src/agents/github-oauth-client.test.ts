@@ -104,7 +104,9 @@ describe("GitHub OAuth client", () => {
     const probe = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(jsonResponse({ id: 303, login: "enterprise-user", avatar_url: null }));
-    await expect(verifyGitHubCredential("synthetic-enterprise-token")).resolves.toMatchObject({
+    await expect(
+      verifyGitHubCredential("synthetic-enterprise-token", { apiBaseUrl }),
+    ).resolves.toMatchObject({
       status: "available",
       account: { accountId: 303, login: "enterprise-user" },
     });

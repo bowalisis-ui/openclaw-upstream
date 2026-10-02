@@ -21,6 +21,8 @@ OpenClaw displays a one-time user code with a **Copy code** button beside it; cl
 
 OAuth access tokens expire after about eight hours. The Gateway refreshes them before expiry, verifies the durable GitHub account ID, and atomically replaces the credential inside the same private profile. New local exec launches use the refreshed credential; an already-running local exec keeps its launch token until it exits. Restart a long-running shell after its access token expires. An expired or rejected refresh token is shown as **Reconnect required**. Refresh never blocks Gateway startup.
 
+Managed profiles and personal publication use `github.com` and its public account-verification endpoint. Enterprise repository settings preserve that issuer binding. Enterprise repository reads and shared publication require a native credential bound to the selected Enterprise host; the separate discovery service credential also retains its declared host binding.
+
 **Use a PAT instead** preserves fine-grained personal access token setup as an explicit alternative. The browser places the pasted token in the secret store as a one-use handoff. The Gateway hard-deletes that handoff before validating the supplied credential with GitHub's `/user` endpoint. Both setup paths write an account-owned private `gh` profile without changing the host's global GitHub CLI login or OS keyring, default Git authorship to the account's canonical GitHub noreply identity, and store only secret-free OpenClaw config:
 
 ```json5

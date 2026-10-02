@@ -5,7 +5,7 @@ import { readResponseWithLimit } from "../infra/http-body.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { registerSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
 import { getOrCreatePromise } from "../shared/lazy-promise.js";
-import { resolveGitHubApiBaseUrl } from "./github-host-runtime.js";
+import { resolveConfiguredGitHubApiBaseUrl } from "./github-host.js";
 import { clearNativeGitHubTokenCache } from "./github-read-identity.js";
 import type { GitHubToolAccount } from "./github-tool-account.js";
 
@@ -301,7 +301,7 @@ async function readGitHubResponse(response: Response, surface: string, timeoutMs
   return parseJsonObject(bytes, surface);
 }
 
-/** Verifies only the supplied credential at GitHub's fixed account endpoint. */
+/** Public credentials use their fixed issuer; other issuers require an explicit endpoint. */
 export async function verifyGitHubCredential(
   token: string,
   options: GitHubOAuthRequestOptions = {},
@@ -312,7 +312,7 @@ export async function verifyGitHubCredential(
     if (/\s/u.test(token)) {
       return { status: "unavailable" };
     }
-    const apiBaseUrl = options.apiBaseUrl ?? resolveGitHubApiBaseUrl();
+    const apiBaseUrl = options.apiBaseUrl ?? resolveConfiguredGitHubApiBaseUrl();
     const key = createHash("sha256").update(`${apiBaseUrl}\0${token}`).digest("hex");
     const cache = verifiedCredentials;
     const cached = cache.get(key);
