@@ -17,7 +17,7 @@ export type SessionArchiveInventoryScope = Pick<
   includeAllAgents?: boolean;
 };
 
-export type SessionArchiveInventoryEntry = {
+type SessionArchiveInventoryEntry = {
   archiveName: string;
   sessionId: string;
   sessionKey: string;

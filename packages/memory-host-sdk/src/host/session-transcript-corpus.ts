@@ -28,17 +28,17 @@ import {
   type SessionEntry,
   type SessionTranscriptInstance,
 } from "./openclaw-runtime-session.js";
-import type { MemorySessionKind } from "./types.js";
-
-export type {
-  SessionTranscriptCorpusEntry,
-  SessionTranscriptCorpusOptions,
-} from "./session-transcript-corpus.types.js";
 import type {
   SessionTranscriptCorpusEntry,
   SessionTranscriptCorpusOptions,
   SessionTranscriptCorpusScope,
   SessionTranscriptCorpusArtifact,
+} from "./session-transcript-corpus.types.js";
+import type { MemorySessionKind } from "./types.js";
+
+export type {
+  SessionTranscriptCorpusEntry,
+  SessionTranscriptCorpusOptions,
 } from "./session-transcript-corpus.types.js";
 
 function fileContentRevision(filePath: string): string | undefined {
