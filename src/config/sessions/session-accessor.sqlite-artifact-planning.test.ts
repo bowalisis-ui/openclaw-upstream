@@ -38,7 +38,7 @@ beforeEach(async () => {
   const database = openOpenClawAgentDatabase({ agentId: "main", env: state.env });
   options = { agentId: "main", path: database.path, env: state.env };
   runOpenClawAgentWriteTransaction(
-    (database) => writeSessionEntry(database, sessionKey, entry),
+    (transaction) => writeSessionEntry(transaction, sessionKey, entry),
     options,
   );
   await replaceTranscriptEvents({ storePath, sessionKey, sessionId }, [event]);
