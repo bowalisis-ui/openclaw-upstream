@@ -105,6 +105,7 @@ const createConfig = (overrides: VoiceCallConfigInput = {}): VoiceCallConfig => 
 
 const createCall = (startedAt: number): CallRecord => ({
   callId: "call-1",
+  agentId: "main",
   providerCallId: "provider-call-1",
   provider: "mock",
   direction: "outbound",

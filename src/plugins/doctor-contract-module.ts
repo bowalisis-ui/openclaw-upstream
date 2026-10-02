@@ -170,6 +170,13 @@ export type PluginDoctorStateMigration = {
   /** Import retired file state only during explicit `doctor --fix` repair. */
   doctorOnly?: boolean;
   phase?: "after-session-repair";
+  /** Presence-only retirement checks run before migration detection or writes. */
+  retiredStateFiles?: (
+    params: Pick<
+      PluginDoctorStateMigrationInput,
+      "config" | "env" | "stateDir" | "serviceWorkspaceDir"
+    >,
+  ) => readonly string[];
   /** Read-only recovery inventory. Never open or migrate a writable store here. */
   collectBackupResources?: (
     params: Pick<
@@ -272,6 +279,7 @@ function coercePluginDoctorStateMigrations(value: unknown): PluginDoctorStateMig
     label: migration.label.trim(),
     doctorOnly: migration.doctorOnly === true ? true : undefined,
     phase: migration.phase === "after-session-repair" ? migration.phase : undefined,
+    retiredStateFiles: migration.retiredStateFiles,
     collectBackupResources: migration.collectBackupResources,
     detectLegacyState: migration.detectLegacyState,
     migrateLegacyState: migration.migrateLegacyState,

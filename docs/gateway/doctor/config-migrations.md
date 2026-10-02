@@ -38,6 +38,9 @@ written before the cutoff may be retired only with a clear refusal naming an
 intermediate release to upgrade through before retrying. Retirement must never
 silently discard persisted data.
 
+Extended-stable releases count by publication date, even when their version
+number names an earlier month.
+
 Legacy normalization belongs to Doctor and migration owners, with the existing
 backup and verification flow. Runtime readers consume canonical state.
 
@@ -66,6 +69,12 @@ succeed. Doctor preserves the config and stops with recovery guidance instead
 of stripping these settings or replacing them with a backup. For an older installation,
 [upgrade through `2026.9.5`](/install/updating#upgrading-very-old-versions)
 and run its Doctor migrations before installing the latest version.
+
+Voice Call `calls.jsonl` files are also retired. Their last runtime writer was
+removed on May 31, 2026. Doctor preserves a remaining log and refuses before
+repairing the plugin's SQLite state. Upgrade through OpenClaw `2026.9.7`, run
+`openclaw doctor --fix` against the original configured call store, then retry
+the update. The supported SQLite schema repair remains available.
 
 ## Cron ownership before roster migration
 

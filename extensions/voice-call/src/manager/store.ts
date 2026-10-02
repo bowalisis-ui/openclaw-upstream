@@ -99,7 +99,7 @@ function tryCreateCallRecordStateStores(
 }
 
 /** Build the stable storage key for one chunk of an event. */
-export function buildChunkKey(eventKey: string, index: number): string {
+function buildChunkKey(eventKey: string, index: number): string {
   return `${eventKey}:chunk:${String(index).padStart(4, "0")}`;
 }
 
@@ -176,7 +176,7 @@ function prepareVoiceCallRecordForStorage(call: CallRecord): CallRecord {
 }
 
 /** Encode one bounded record; chunks are produced only when requested by the writer. */
-export function encodeCallRecordEvent(call: CallRecord) {
+function encodeCallRecordEvent(call: CallRecord) {
   const serialized = JSON.stringify(prepareVoiceCallRecordForStorage(call));
   const buffer = Buffer.from(serialized, "utf8");
   const chunkCount = Math.max(1, Math.ceil(buffer.byteLength / RAW_CALL_RECORD_CHUNK_BYTES));
