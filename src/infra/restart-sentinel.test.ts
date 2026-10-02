@@ -13,9 +13,16 @@ const { mockWarn, mockThrowOpen, mockThrowWrite, mockThrowWorkerWrite, mockThrow
   }));
 const admission = vi.hoisted((): { beforeGrant?: (stage: string) => void } => ({}));
 
-vi.mock("../logging/subsystem.js", () => ({
-  createSubsystemLogger: () => ({ warn: mockWarn }),
-}));
+vi.mock("../logging/subsystem.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../logging/subsystem.js")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (...args: Parameters<typeof actual.createSubsystemLogger>) => {
+      const logger = actual.createSubsystemLogger(...args);
+      return args[0] === "restart-sentinel" ? { ...logger, warn: mockWarn } : logger;
+    },
+  };
+});
 
 vi.mock("../state/openclaw-state-db.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../state/openclaw-state-db.js")>();
