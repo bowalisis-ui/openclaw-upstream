@@ -7,7 +7,7 @@ import { isDeepStrictEqual } from "node:util";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { coerceSecretRef } from "../../config/types.secrets.js";
+import { parseSecretRef } from "../../config/types.secrets.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import {
   getOAuthApiKey,
@@ -306,9 +306,9 @@ function authProfileSecretRefKey(
 ): string | undefined {
   const ref =
     profile.type === "api_key"
-      ? (coerceSecretRef(profile.keyRef, defaults) ?? coerceSecretRef(profile.key, defaults))
+      ? (parseSecretRef(profile.keyRef, defaults) ?? parseSecretRef(profile.key, defaults))
       : profile.type === "token"
-        ? (coerceSecretRef(profile.tokenRef, defaults) ?? coerceSecretRef(profile.token, defaults))
+        ? (parseSecretRef(profile.tokenRef, defaults) ?? parseSecretRef(profile.token, defaults))
         : null;
   return ref ? secretRefKey(ref) : undefined;
 }
@@ -370,7 +370,7 @@ function throwUnmaterializedAuthProfileSecretRef(params: {
   agentDir?: string;
   profileId: string;
   pathSuffix: "key" | "token";
-  ref: NonNullable<ReturnType<typeof coerceSecretRef>>;
+  ref: NonNullable<ReturnType<typeof parseSecretRef>>;
 }): never {
   throw new SecretSurfaceUnavailableError({
     ownerKind: "account",
@@ -450,8 +450,8 @@ export async function resolveApiKeyForProfile(
     });
     const inlineValue = cred.type === "api_key" ? cred.key : cred.token;
     const ref =
-      coerceSecretRef(cred.type === "api_key" ? cred.keyRef : cred.tokenRef, refDefaults) ??
-      coerceSecretRef(inlineValue, refDefaults);
+      parseSecretRef(cred.type === "api_key" ? cred.keyRef : cred.tokenRef, refDefaults) ??
+      parseSecretRef(inlineValue, refDefaults);
     const apiKey = normalizeOptionalSecretInput(inlineValue);
     if (ref && (!runtimeProfile.published || !apiKey)) {
       throwUnmaterializedAuthProfileSecretRef({
