@@ -19,12 +19,10 @@ import type { OpenClawAgentDatabaseOptions } from "../../state/openclaw-agent-db
 import type {
   AgentDatabaseOperations,
   AgentDatabaseRequestExecutionSource,
+  OpenClawAgentDatabaseExecution,
 } from "../../state/openclaw-agent-execution-contract.js";
 import type { AgentDatabaseExecutionScope } from "../../state/openclaw-agent-execution-native.js";
-import {
-  captureOpenClawAgentDatabaseExecution,
-  type OpenClawAgentDatabaseExecution,
-} from "../../state/openclaw-agent-execution.js";
+import { captureOpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution.js";
 import { runOpenClawAgentWorkerWrite } from "../../state/openclaw-agent-write-admission.js";
 import {
   retainSessionEntryWorkerPublication,
@@ -32,7 +30,6 @@ import {
   type SessionTranscriptInitializationPublication,
 } from "./session-accessor.sqlite-entry-cache.js";
 import { publishCommittedSessionIdentity } from "./session-accessor.sqlite-identity.js";
-import { prepareSessionEntryReplacementPublication } from "./session-accessor.sqlite-replacement-state.js";
 import type { SessionEntryReplacementCommitted } from "./session-accessor.sqlite-replacement-types.js";
 import type { SessionEntryCommitContext } from "./session-accessor.types.js";
 
@@ -333,8 +330,10 @@ export async function runSessionEntryWorkerMutation<T>(
     prepare?: SessionEntryWorkerPreparation;
   } = {},
 ): Promise<T> {
+  const unknownMessage =
+    "Session entry mutation has no confirmed native completion and commit receipt";
   const publication = retainSessionEntryWorkerPublication({
-    agentId: options.agentId,
+    agentId: lifecycle.identityAgentId,
     storePath: options.path,
     databaseIdentity,
   });
@@ -366,21 +365,29 @@ export async function runSessionEntryWorkerMutation<T>(
       !receipt ||
       completed?.kind === "not-committed";
     try {
-      if (receipt) {
-        lifecycle.onResult?.(completed?.value);
-        lifecycle.onLifecycleCommitted?.(receipt.pendingArchiveRecovery);
+      try {
+        if (receipt) {
+          lifecycle.onResult?.(completed?.value);
+          lifecycle.onLifecycleCommitted?.(receipt.pendingArchiveRecovery);
+        }
+      } finally {
+        // Result adoption precedes observers, but its failure cannot retain publication custody.
+        const published = publication.settle(receipt, unknown);
+        if (published) {
+          publishCommittedSessionIdentity(
+            lifecycle.identityAgentId,
+            databaseIdentity,
+            published.previous,
+            published.current,
+            published.prepared,
+          );
+        }
       }
-    } finally {
-      // Result adoption precedes observers, but its failure cannot retain publication custody.
-      const published = publication.settle(receipt, unknown);
-      if (published) {
-        publishCommittedSessionIdentity(
-          lifecycle.identityAgentId,
-          databaseIdentity,
-          published.previous,
-          published.current,
-        );
+    } catch (error) {
+      if (unknown) {
+        rejectUnknownSessionEntryOutcome(unknownMessage, error);
       }
+      throw error;
     }
     return unknown;
   };
@@ -402,7 +409,7 @@ export async function runSessionEntryWorkerMutation<T>(
           // Close joins this callback; a delayed result cannot borrow a successor owner.
           if (await settle()) {
             rejectUnknownSessionEntryOutcome(
-              "Session entry mutation has no confirmed native completion and commit receipt",
+              unknownMessage,
               outcome.ok ? undefined : outcome.error,
             );
           }
@@ -430,12 +437,20 @@ export async function runSessionEntryWorkerMutation<T>(
         !Array.isArray(facts.publication.membershipInvalidatedKeys) ||
         !facts.publication.membershipInvalidatedKeys.every(
           (key): key is string => typeof key === "string",
+        ) ||
+        !Array.isArray(facts.publication.sharingUnchangedKeys) ||
+        !facts.publication.sharingUnchangedKeys.every(
+          (key): key is string => typeof key === "string",
         )
       ) {
         throw new Error("Session entry mutation commit omitted its publication keys");
       }
       admitted = { admission, retained };
-      publication.begin(facts.publication.changedKeys, facts.publication.membershipInvalidatedKeys);
+      publication.begin(
+        facts.publication.changedKeys,
+        facts.publication.membershipInvalidatedKeys,
+        facts.publication.sharingUnchangedKeys,
+      );
     },
     executionOptions.retainedExecution,
     executionOptions.signal,
@@ -464,7 +479,7 @@ export function commitSessionEntryReplacementsInWorker(
       return {
         kind: "committed",
         value,
-        publication: prepareSessionEntryReplacementPublication(value),
+        publication: value.publication,
       };
     },
     lifecycle,

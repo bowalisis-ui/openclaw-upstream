@@ -101,13 +101,16 @@ export function createAgentDatabaseMaintenanceOwner(context: {
             current.set(sessionKey, after);
           },
           beforeCommit(database) {
-            publication = preparePublication({
-              pendingArchiveRecovery: false,
-              previous,
-              current,
-              maintenancePlans: [],
-              membershipInvalidatedKeys: [],
-            });
+            publication = preparePublication(
+              {
+                pendingArchiveRecovery: false,
+                previous,
+                current,
+                maintenancePlans: [],
+                membershipInvalidatedKeys: [],
+              },
+              database,
+            );
             deferSqliteWorkerCommitReceipt(database.db, publication);
             context.admit("commit", publication);
           },

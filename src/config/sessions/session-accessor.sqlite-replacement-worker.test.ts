@@ -33,6 +33,7 @@ import { createOpenClawDatabaseMaintenanceScope } from "../../state/openclaw-sta
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { withMockedPlatform } from "../../test-utils/vitest-spies.js";
 import * as configEnv from "../config-env-vars.js";
+import { readPreparedSessionEntryChange } from "./session-accessor.sqlite-entry-cache-publication.js";
 import {
   readCommittedSessionEntryCache,
   readSessionEntryCache,
@@ -486,6 +487,7 @@ it.each([
   "lost result and commit receipt after final grant",
   "unknown native settlement after commit",
   "post-commit observer failure",
+  "unknown native settlement and lifecycle callback failure",
 ] as const)("settles canonical replacement with %s", async (fault) => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
     const database = openOpenClawAgentDatabase({ agentId: "main" });
@@ -507,6 +509,12 @@ it.each([
       membership: new Set(["member"]),
     });
     const observed: unknown[] = [];
+    const preparedPublications: Array<ReturnType<typeof readPreparedSessionEntryChange>> = [];
+    const stopFacts = sessionChanges.subscribeFacts((change) => {
+      if ("sessionKey" in change && change.sessionKey === sessionKey) {
+        preparedPublications.push(readPreparedSessionEntryChange(change, sessionKey));
+      }
+    });
     const stop = sessionChanges.subscribe((change) => {
       if ("sessionKey" in change && change.sessionKey === sessionKey) {
         const current = sharing.readCurrent();
@@ -520,11 +528,16 @@ it.each([
     });
     const deliveryFailure = new Error("Replacement committed but its reply was lost");
     const missingReceipt = fault === "lost result and commit receipt after final grant";
-    const nativeUnknown = fault === "unknown native settlement after commit";
     const observerFailure = fault === "post-commit observer failure";
+    const callbackFails = fault === "unknown native settlement and lifecycle callback failure";
+    const nativeUnknown = fault === "unknown native settlement after commit" || callbackFails;
+    const callbackFailure = new Error("Replacement lifecycle callback failed after native commit");
     const committedLifecycle = vi.fn(() => {
       if (observerFailure) {
         throw deliveryFailure;
+      }
+      if (callbackFails) {
+        throw callbackFailure;
       }
     });
     const followup = vi.fn();
@@ -632,7 +645,7 @@ it.each([
             {
               sessionKey,
               previousSessionKeys: [],
-              entry: { ...row!.entry, visibility: "read-only" },
+              entry: { ...row!.entry, visibility: "read-only", label: "committed metadata" },
             },
           ],
         }),
@@ -651,6 +664,13 @@ it.each([
       } else {
         expect(outcome.error).toBe(deliveryFailure);
       }
+      if (callbackFails) {
+        expect(outcome.error).toBeInstanceOf(Error);
+        if (!(outcome.error instanceof Error)) {
+          throw new Error("Unknown replacement lost its lifecycle callback error");
+        }
+        expect(outcome.error.cause).toBe(callbackFailure);
+      }
       expect(followup).not.toHaveBeenCalled();
       expect(committedLifecycle).toHaveBeenCalledTimes(missingReceipt ? 0 : 1);
       expect(observed).toEqual([
@@ -659,15 +679,31 @@ it.each([
       expect(sharing.readCurrent()?.entry?.visibility).toBe(
         missingReceipt ? undefined : "read-only",
       );
+      expect(preparedPublications).toHaveLength(1);
+      if (missingReceipt) {
+        expect(preparedPublications[0]).toBeUndefined();
+      } else {
+        expect(preparedPublications[0]?.entry).toMatchObject({
+          ...entry,
+          visibility: "read-only",
+          label: "committed metadata",
+        });
+        expect(preparedPublications[0]?.source).toMatchObject({
+          identity,
+          revision: expect.any(Number),
+        });
+      }
       expect(readExactSessionEntryRow(database, sessionKey)?.entry).toMatchObject({
         ...entry,
         visibility: "read-only",
+        label: "committed metadata",
       });
     } finally {
       for (const restore of restoreFaults.toReversed()) {
         restore();
       }
       observer.mockRestore();
+      stopFacts();
       stop();
       sharing.release();
     }

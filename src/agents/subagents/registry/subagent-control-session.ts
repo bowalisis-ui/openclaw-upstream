@@ -11,10 +11,10 @@ import { hasSqliteWorkerOutcomeUnknown } from "../../../infra/sqlite-worker-cont
 import { readDatabasePathIdentitySync } from "../../../infra/sqlite-worker-identity.js";
 import { isIncognitoSessionKey } from "../../../routing/session-key.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../../../state/openclaw-agent-db.paths.js";
+import type { OpenClawAgentDatabaseExecution } from "../../../state/openclaw-agent-execution-contract.js";
 import {
   captureOpenClawAgentDatabaseExecution,
   supportsOpenClawAgentDatabaseExecution,
-  type OpenClawAgentDatabaseExecution,
 } from "../../../state/openclaw-agent-execution.js";
 import { runOpenClawAgentWriteAdmission } from "../../../state/openclaw-agent-write-admission.js";
 import type { AgentRunSessionTarget } from "../../run-session-target.types.js";
@@ -136,12 +136,8 @@ export async function prepareSubagentKillSession(
           release,
           assertCurrent,
           withPublication: (run) =>
-            runOpenClawAgentWriteAdmission(database, async () => {
-              // A pending metadata writer hides generation facts until publication.
-              // Hold its FIFO only over the registry commit, never over cancellation drain.
-              assertCurrent();
-              return await run();
-            }),
+            // The consumer checks its retained authority after joining the writer FIFO.
+            runOpenClawAgentWriteAdmission(database, run),
         };
       },
     );

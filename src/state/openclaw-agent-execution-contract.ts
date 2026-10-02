@@ -2,6 +2,7 @@ import type {
   SqliteWalPeriodicRequest,
   SqliteWalPeriodicResult,
 } from "../infra/sqlite-wal-write-admission.js";
+import type { SqliteWorkerStore } from "../infra/sqlite-worker-contract.js";
 import type { DatabasePathIdentity } from "../infra/sqlite-worker-identity.js";
 import type {
   SqliteWorkerAdmissionFactory,
@@ -13,7 +14,7 @@ import type { AgentDatabaseDomainOperations } from "./openclaw-agent-execution-d
 import type { RegisteredAgentWorkerOperations } from "./openclaw-agent-execution-operations.js";
 
 /** Recorded by the native owner; a descriptor never grants access to that owner. */
-export type AgentDatabaseExecutionIdentity = {
+export type AgentDatabaseFileExecutionIdentity = {
   kind: "file";
   physicalIdentity: string;
   birthtime?: string;
@@ -22,7 +23,7 @@ export type AgentDatabaseExecutionIdentity = {
 };
 
 export type AgentDatabaseExecutionFileIdentity = Pick<
-  AgentDatabaseExecutionIdentity,
+  AgentDatabaseFileExecutionIdentity,
   "kind" | "physicalIdentity" | "birthtime" | "nativeLocation"
 >;
 
@@ -33,7 +34,8 @@ export type AgentDatabaseGenerationClaim = {
   assertCurrent(): void;
 };
 
-export type AgentDatabaseExecutionOpen = {
+export type AgentDatabaseFileExecutionOpen = {
+  kind?: "file";
   leaseId: string;
   agentId: string;
   databasePath: string;
@@ -43,6 +45,49 @@ export type AgentDatabaseExecutionOpen = {
   /** Captured before a creating request yields; absence is an identity too. */
   creatingIdentity?: DatabasePathIdentity;
 };
+
+/** Process-private locators; neither a handle nor its incarnation grants authority. */
+export type AgentDatabaseIncognitoIdentity = Readonly<{
+  kind: "ephemeral";
+  handle: string;
+  incarnation: string;
+}>;
+
+export type AgentDatabaseIncognitoOpen = {
+  kind: "ephemeral";
+  identity: AgentDatabaseIncognitoIdentity;
+  agentId: string;
+  databasePath: string;
+  environment: SqliteWorkerStateContext["environment"];
+};
+
+export type AgentDatabaseExecutionOpen =
+  | AgentDatabaseFileExecutionOpen
+  | AgentDatabaseIncognitoOpen;
+
+type AgentDatabaseIncognitoMemory = {
+  agentId: string;
+  /** SQLite page allocation only, excluding allocator, decoded results, and transport memory. */
+  databaseBytes: number;
+  pageCount: number;
+  pageSize: number;
+};
+
+/** P1 deliberately admits no session-domain operation before its complete caller cutover. */
+export type AgentDatabaseIncognitoOperations = {
+  "database.incognito.memory": { input: undefined; output: AgentDatabaseIncognitoMemory };
+};
+
+export type AgentDatabaseIncognitoAuthority = { assertCurrent(): void };
+
+export class IncognitoSessionEndedError extends Error {
+  readonly code = "INCOGNITO_SESSION_ENDED";
+
+  constructor(options?: ErrorOptions) {
+    super("Incognito session ended. Create a new incognito session to continue.", options);
+    this.name = "IncognitoSessionEndedError";
+  }
+}
 
 export type AgentDatabaseOperations = AgentDatabaseDomainOperations &
   RegisteredAgentWorkerOperations & {
@@ -60,4 +105,26 @@ export type AgentDatabaseRequestExecutionSource = {
     authorize(request: SqliteWorkerAdmissionRequest): void;
     assertCurrent(): void;
   }): SqliteWorkerAdmissionFactory;
+};
+
+export type OpenClawAgentDatabaseExecution = {
+  readonly agentId: string;
+  readonly path: string;
+  /** The accepted native receipt; reading this never adopts the current pathname. */
+  readonly fileIdentity: AgentDatabaseExecutionFileIdentity | undefined;
+  assertCurrent(): void;
+  captureGenerationClaim(): AgentDatabaseGenerationClaim;
+  /** Initialize first-use storage through the same admitted native owner. */
+  prepare(source: AgentDatabaseRequestExecutionSource, signal?: AbortSignal): Promise<void>;
+  /** Admit a write against existing storage; a missing store remains missing. */
+  runExisting<T>(
+    source: AgentDatabaseRequestExecutionSource,
+    operation: (scope: Pick<SqliteWorkerStore<AgentDatabaseOperations>, "execute">) => Promise<T>,
+    options?: { retireNativeOnFailure: true },
+  ): Promise<T | undefined>;
+  /**
+   * Join this reference's work; native cleanup failures remain with its resource owner.
+   * The owner may retain one bounded idle generation.
+   */
+  release(): Promise<void>;
 };
