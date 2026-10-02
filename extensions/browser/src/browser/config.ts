@@ -191,7 +191,7 @@ function resolveBrowserSsrFPolicy(cfg: BrowserConfig | undefined): SsrFPolicy | 
     allowedHostnames: normalizeOptionalTrimmedStringList(rawPolicy?.allowedHostnames),
   });
   if (dangerouslyAllowPrivateNetwork !== undefined) {
-    return { ...resolved, dangerouslyAllowPrivateNetwork: dangerouslyAllowPrivateNetwork === true };
+    return { ...resolved, dangerouslyAllowPrivateNetwork };
   }
   // Keep an explicit strict object so every browser guard stays fail-closed
   // even when the operator leaves the shared policy unconfigured.
