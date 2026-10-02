@@ -56,6 +56,7 @@ import { createAgentDatabaseMaintenanceOwner } from "./openclaw-agent-execution-
 import {
   loadAgentTranscriptOperations,
   loadAgentReplacementOperations,
+  loadAgentRestartRecoveryOperations,
   loadAgentEntryReadOperations,
   loadAgentTrajectoryOperations,
   loadAgentArchiveOperations,
@@ -356,9 +357,7 @@ function openAgentDatabaseBackend(
     "session.archives.recordPublication": loadAgentArchiveOperations,
     "session.transcript.initialize": loadAgentTranscriptOperations,
     "session.entries.replace": loadAgentReplacementOperations,
-    "session.maintenance.prepare": loadMaintenanceOperations,
-    "session.maintenance.metadata": loadMaintenanceOperations,
-    "session.maintenance.release": loadMaintenanceOperations,
+    "session.restart.recover": loadAgentRestartRecoveryOperations,
     "session.entry.acp": loadAgentAcpOperations,
     "session.providerReview.compare": loadAgentProviderReviewOperations,
     "session.reaction.set": loadAgentReactionOperations,
@@ -366,6 +365,9 @@ function openAgentDatabaseBackend(
     "session.archivePruning.deletePublished": loadAgentArchivePruningOperations,
     "session.archivePruning.removeLegacy": loadAgentArchivePruningOperations,
     "session.archivePruning.reclaimPages": loadAgentArchivePruningOperations,
+    "session.maintenance.prepare": loadMaintenanceOperations,
+    "session.maintenance.metadata": loadMaintenanceOperations,
+    "session.maintenance.release": loadMaintenanceOperations,
   });
   const context: AgentWorkerOperationContext = {
     open: openWriter,
