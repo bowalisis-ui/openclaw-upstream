@@ -292,15 +292,6 @@ describe("createVoiceCallRuntime lifecycle", () => {
       agentRuntime: {} as never,
     });
     expect(runtime.config.agentId).toBe("operator");
-    expect(() =>
-      resolveCallRegistration({
-        callId: "unowned",
-        sessionKey: "agent:operator:voice:unowned",
-        direction: "outbound",
-        from: "+15550001111",
-        to: "+15550002222",
-      }),
-    ).toThrow("no recorded agent owner");
     await runtime.stop();
   });
 
@@ -462,6 +453,16 @@ describe("createVoiceCallRuntime lifecycle", () => {
       throw new Error("expected per-call realtime registration resolver");
     }
     expect(runtime.config.agentId).toBe("operator");
+    expect(() =>
+      resolveCallRegistration({
+        callId: "unowned",
+        sessionKey: "agent:operator:voice:unowned",
+        direction: "outbound",
+        from: "+15550001111",
+        to: "+15550002222",
+      }),
+    ).toThrow("no recorded agent owner");
+    expect(mocks.resolveConfiguredRealtimeVoiceProvider).not.toHaveBeenCalled();
     const defaultRegistration = resolveCallRegistration({
       callId: "call-default",
       agentId: "operator",
