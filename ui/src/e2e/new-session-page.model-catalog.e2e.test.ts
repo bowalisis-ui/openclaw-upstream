@@ -48,6 +48,7 @@ suite.define(() => {
 
         await modelSelect.click();
         await expect.poll(() => picker.getAttribute("open")).toBe("");
+        // Opening the picker moves focus to its filter so typing filters models.
         await expect
           .poll(() => search.evaluate((element) => element === document.activeElement))
           .toBe(true);

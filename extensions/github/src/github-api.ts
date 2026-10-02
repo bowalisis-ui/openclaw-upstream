@@ -244,21 +244,18 @@ function isGitHubApiRedirect(status: number): boolean {
 }
 
 function safeGitHubApiUrl(raw: string, apiBase: URL, graphqlUrl: string, base?: URL): URL | null {
-  try {
-    const url = new URL(raw, base);
-    if (
-      url.origin !== apiBase.origin ||
-      url.username ||
-      url.password ||
-      (url.href !== graphqlUrl &&
-        !url.pathname.startsWith(`${apiBase.pathname === "/" ? "" : apiBase.pathname}/`))
-    ) {
-      return null;
-    }
-    return url;
-  } catch {
+  const url = URL.parse(raw, base);
+  if (
+    !url ||
+    url.origin !== apiBase.origin ||
+    url.username ||
+    url.password ||
+    (url.href !== graphqlUrl &&
+      !url.pathname.startsWith(`${apiBase.pathname === "/" ? "" : apiBase.pathname}/`))
+  ) {
     return null;
   }
+  return url;
 }
 
 export async function fetchGitHubApi(
