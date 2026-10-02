@@ -1,4 +1,3 @@
-// Resolves and probes the Gateway port for the official Docker image healthcheck.
 import { fileURLToPath } from "node:url";
 import { getRuntimeConfig } from "./config/config.js";
 import { resolveGatewayPort } from "./config/paths.js";
@@ -17,7 +16,7 @@ type DockerHealthcheckDeps = Partial<DockerHealthcheckPortDeps> & {
   fetch?: typeof globalThis.fetch;
 };
 
-export async function resolveDockerHealthcheckPort(
+async function resolveDockerHealthcheckPort(
   deps: Partial<DockerHealthcheckPortDeps> = {},
 ): Promise<number> {
   const env = deps.env ?? process.env;

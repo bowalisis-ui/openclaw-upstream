@@ -1,11 +1,9 @@
-// Voice model catalog helpers shared by TTS and realtime voice plugins.
 import { parseModelCatalogRef } from "@openclaw/model-catalog-core/model-catalog-refs";
-import { normalizeOptionalString as normalizeString } from "@openclaw/normalization-core/string-coerce";
-
-type VoiceModelCapability = "tts" | "realtime_transcription" | "realtime_voice";
-
-/** Capability flags advertised by a voice model catalog entry. */
-export type VoiceModelCapabilities = Partial<Record<VoiceModelCapability, true>>;
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import {
+  normalizeOptionalLowercaseString as normalizeLowercaseString,
+  normalizeOptionalString as normalizeString,
+} from "@openclaw/normalization-core/string-coerce";
 
 /** Provider/model override parsed from config. */
 export type VoiceModelRef = {
@@ -23,35 +21,11 @@ export type VoiceModelProvider = {
   models?: readonly string[];
 };
 
-/** Synthesized voice model catalog row exposed to provider/model selection. */
-type VoiceModelCatalogEntry = {
-  kind: "voice";
-  provider: string;
-  model: string;
-  source: "static";
-  capabilities: VoiceModelCapabilities;
-  label?: string;
-  default?: boolean;
-  modes?: readonly string[];
-};
-
 /** Ordered provider candidate, optionally with a concrete voice model override. */
 export type VoiceProviderCandidate = {
   provider: string;
   voiceModel?: VoiceModelRef;
 };
-
-type VoiceModelConfig =
-  | string
-  | {
-      primary?: unknown;
-      fallbacks?: unknown;
-      timeoutMs?: unknown;
-    };
-
-function normalizeLowercaseString(value: unknown): string | undefined {
-  return normalizeString(value)?.toLowerCase();
-}
 
 function normalizeTimeoutMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0
@@ -101,12 +75,12 @@ export function voiceProviderSupportsModel(
 
 /** Parse primary/fallback voice model refs from config. */
 export function resolveVoiceModelRefs(config: unknown): VoiceModelRef[] {
-  const voiceModel = config as VoiceModelConfig | undefined;
-  if (typeof voiceModel === "string") {
-    const parsed = parseVoiceModelRef(voiceModel);
+  if (typeof config === "string") {
+    const parsed = parseVoiceModelRef(config);
     return parsed ? [parsed] : [];
   }
-  if (typeof voiceModel !== "object" || voiceModel === null || Array.isArray(voiceModel)) {
+  const voiceModel = asOptionalRecord(config);
+  if (!voiceModel) {
     return [];
   }
   const timeoutMs = normalizeTimeoutMs(voiceModel.timeoutMs);
@@ -227,42 +201,4 @@ export function getVoiceProviderConfig<TConfig extends Record<string, unknown>>(
     }
   }
   return {} as TConfig;
-}
-
-/** Convert provider metadata into static voice catalog entries. */
-export function synthesizeVoiceModelCatalogEntries(params: {
-  provider: VoiceModelProvider;
-  capabilities: VoiceModelCapabilities;
-  modes?: readonly string[];
-}): VoiceModelCatalogEntry[] {
-  const seen = new Set<string>();
-  const models = [params.provider.defaultModel, ...(params.provider.models ?? [])].flatMap(
-    (entry) => {
-      const model = normalizeString(entry);
-      if (!model || seen.has(model)) {
-        return [];
-      }
-      seen.add(model);
-      return [model];
-    },
-  );
-  return models.map((model) => {
-    const entry: VoiceModelCatalogEntry = {
-      kind: "voice",
-      provider: params.provider.id,
-      model,
-      source: "static",
-      capabilities: params.capabilities,
-    };
-    if (params.provider.label) {
-      entry.label = params.provider.label;
-    }
-    if (model === params.provider.defaultModel) {
-      entry.default = true;
-    }
-    if (params.modes) {
-      entry.modes = params.modes;
-    }
-    return entry;
-  });
 }

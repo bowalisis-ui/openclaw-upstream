@@ -1,4 +1,3 @@
-/** Auth probe planning and execution helpers for model diagnostics. */
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -6,6 +5,10 @@ import path from "node:path";
 import { normalizeUniqueStringEntries } from "@openclaw/normalization-core/string-normalization";
 import pMap from "p-map";
 import { prepareSystemAgentRunAdmission } from "../../agents/admitted-run-context.js";
+import {
+  agentRunHasVisibleReply,
+  extractAgentRunTerminalError,
+} from "../../agents/agent-run-result.js";
 import {
   resolveAgentDir,
   resolveAgentWorkspaceDir,
@@ -25,12 +28,15 @@ import {
 import { resolveAuthProfileOrderWithMetadata } from "../../agents/auth-profiles/order.js";
 import { resolveAuthProfileDatabasePath } from "../../agents/auth-profiles/sqlite.js";
 import { describeFailoverError } from "../../agents/failover-error.js";
+import { FAILOVER_PROBE_STATUS as PROBE_STATUS_BY_FAILOVER_REASON } from "../../agents/failover/probe-status.js";
 import type { FailoverReason } from "../../agents/failover/signal.js";
 import {
   prepareInternalSessionEffectsSession,
   removeInternalSessionEffectsSession,
 } from "../../agents/internal-session-effects.js";
+import { isNonSecretApiKeyMarker } from "../../agents/model-auth-markers.js";
 import {
+  hasSyntheticLocalProviderAuthConfig,
   hasUsableCustomProviderApiKey,
   resolveEnvApiKey,
   resolveProviderEntryApiKeyBinding,
@@ -38,16 +44,22 @@ import {
   resolveUsableCustomProviderApiKey,
 } from "../../agents/model-auth.js";
 import { findNormalizedProviderValue, normalizeProviderId } from "../../agents/model-selection.js";
-import { loadPreparedModelCatalog } from "../../agents/prepared-model-catalog.js";
+import { readPreparedModelCatalog } from "../../agents/prepared-model-catalog.js";
 import { resolveProviderIdForAuth } from "../../agents/provider-auth-aliases.js";
 import { resolveDefaultAgentWorkspaceDir } from "../../agents/workspace.js";
 import { formatCliCommand } from "../../cli/command-format.js";
+import { resolveMergedModelProviderEntry } from "../../config/model-provider-config.js";
+import {
+  copyConfigResolutionFacts,
+  copyConfigResolutionFactsExcept,
+  resolveConfigSecretRef,
+} from "../../config/resolution-facts.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
-  coerceSecretRef,
   hasConfiguredSecretInput,
   normalizeSecretInputString,
+  resolveSecretInputRef,
 } from "../../config/types.secrets.js";
 import type {
   EmbeddedStateLockHandle,
@@ -55,9 +67,11 @@ import type {
 } from "../../infra/embedded-state-lock.js";
 import type { GatewayLockIdentity, GatewayLockOptions } from "../../infra/gateway-lock.js";
 import { type SecretRefResolveCache, resolveSecretRefString } from "../../secrets/resolve.js";
+import { appendConfigPathSegment } from "../../shared/dot-path.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { disposeOpenClawAgentDatabaseByPath } from "../../state/openclaw-agent-db.js";
 import { redactStatusSecrets } from "../status-all/format.js";
+import { createAuthProbeWork } from "./list.probe.cleanup.js";
 import { buildProbeCandidateMap, selectProbeModel } from "./list.probe.models.js";
 import { formatMs } from "./shared.js";
 
@@ -72,11 +86,6 @@ const embeddedRunnerModuleLoader = createLazyImportLoader(
   () => import("../../agents/embedded-agent.js"),
 );
 
-function loadEmbeddedRunnerModule() {
-  return embeddedRunnerModuleLoader.load();
-}
-
-/** Normalized probe status bucket for auth/model diagnostics. */
 export type AuthProbeStatus =
   | "ok"
   | "auth"
@@ -97,7 +106,6 @@ export type AuthProbeReasonCode =
   | "ineligible_profile"
   | "no_model";
 
-/** Result for one profile/env/models.json auth probe target. */
 export type AuthProbeResult = {
   provider: string;
   model?: string;
@@ -122,7 +130,29 @@ type AuthProbeTarget = {
   useRuntimeAuth?: boolean;
 };
 
-/** Summary for a full auth probe run. */
+function buildProbeResult(
+  target: AuthProbeTarget,
+  outcome: Pick<AuthProbeResult, "status" | "reasonCode" | "error" | "latencyMs">,
+): AuthProbeResult {
+  return {
+    provider: target.provider,
+    model: target.model ? `${target.model.provider}/${target.model.model}` : undefined,
+    profileId: target.profileId,
+    label: target.label,
+    source: target.source,
+    mode: target.mode,
+    ...outcome,
+  };
+}
+
+function buildNoModelProbeResult(target: AuthProbeTarget): AuthProbeResult {
+  return buildProbeResult(target, {
+    status: "no_model",
+    reasonCode: "no_model",
+    error: "No model available for probe",
+  });
+}
+
 export type AuthProbeSummary = {
   startedAt: number;
   finishedAt: number;
@@ -138,7 +168,6 @@ export type AuthProbeSummary = {
   results: AuthProbeResult[];
 };
 
-/** Runtime options controlling provider/profile filtering and probe cost. */
 export type AuthProbeOptions = {
   provider?: string;
   profileIds?: string[];
@@ -148,26 +177,6 @@ export type AuthProbeOptions = {
   maxTokens: number;
 };
 
-const PROBE_STATUS_BY_FAILOVER_REASON = {
-  auth: "auth",
-  auth_permanent: "auth",
-  format: "format",
-  rate_limit: "rate_limit",
-  overloaded: "rate_limit",
-  billing: "billing",
-  server_error: "unknown",
-  timeout: "timeout",
-  tls_certificate: "unknown",
-  context_overflow: "unknown",
-  model_not_found: "format",
-  session_expired: "unknown",
-  empty_response: "unknown",
-  no_error_details: "unknown",
-  unclassified: "unknown",
-  unknown: "unknown",
-} satisfies Record<FailoverReason, AuthProbeStatus>;
-
-/** Maps runtime failover reasons into stable auth probe status buckets. */
 export function mapFailoverReasonToProbeStatus(reason?: string | null): AuthProbeStatus {
   return reason
     ? (PROBE_STATUS_BY_FAILOVER_REASON[reason as FailoverReason] ?? "unknown")
@@ -177,19 +186,15 @@ export function mapFailoverReasonToProbeStatus(reason?: string | null): AuthProb
 function mapEligibilityReasonToProbeReasonCode(
   reasonCode: AuthProfileEligibilityReasonCode,
 ): AuthProbeReasonCode {
-  if (reasonCode === "missing_credential") {
-    return "missing_credential";
+  switch (reasonCode) {
+    case "missing_credential":
+    case "expired":
+    case "invalid_expires":
+    case "unresolved_ref":
+      return reasonCode;
+    default:
+      return "ineligible_profile";
   }
-  if (reasonCode === "expired") {
-    return "expired";
-  }
-  if (reasonCode === "invalid_expires") {
-    return "invalid_expires";
-  }
-  if (reasonCode === "unresolved_ref") {
-    return "unresolved_ref";
-  }
-  return "ineligible_profile";
 }
 
 function formatMissingCredentialProbeError(reasonCode: AuthProbeReasonCode): string {
@@ -212,16 +217,11 @@ function formatMissingCredentialProbeError(reasonCode: AuthProbeReasonCode): str
 function resolveProbeSecretRef(profile: ProfileEntry, cfg: OpenClawConfig) {
   const defaults = cfg.secrets?.defaults;
   if (profile.type === "api_key") {
-    if (normalizeSecretInputString(profile.key) !== undefined) {
-      return null;
-    }
-    return coerceSecretRef(profile.keyRef, defaults);
+    return resolveSecretInputRef({ value: profile.key, refValue: profile.keyRef, defaults }).ref;
   }
   if (profile.type === "token") {
-    if (normalizeSecretInputString(profile.token) !== undefined) {
-      return null;
-    }
-    return coerceSecretRef(profile.tokenRef, defaults);
+    return resolveSecretInputRef({ value: profile.token, refValue: profile.tokenRef, defaults })
+      .ref;
   }
   return null;
 }
@@ -238,14 +238,14 @@ function withDirectCredential(
   mode: string | undefined,
 ): OpenClawConfig {
   const providers = cfg.models?.providers ?? {};
-  const configKey =
-    Object.keys(providers).find((key) => normalizeProviderId(key) === provider) ?? provider;
-  const configured = providers[configKey];
+  const configuredEntry = resolveMergedModelProviderEntry(cfg, provider);
+  const configKey = configuredEntry?.providerKey ?? provider;
+  const configured = configuredEntry?.providerConfig;
   if (!configured) {
     return withoutProfileFallback(cfg, provider);
   }
   const auth = mode === "oauth" || mode === "token" ? mode : "api-key";
-  return {
+  const next: OpenClawConfig = {
     ...cfg,
     models: {
       ...cfg.models,
@@ -266,10 +266,14 @@ function withDirectCredential(
       },
     },
   };
+  copyConfigResolutionFactsExcept(cfg, next, [
+    `${appendConfigPathSegment("models.providers", configKey)}.apiKey`,
+  ]);
+  return next;
 }
 
 function withoutProfileFallback(cfg: OpenClawConfig, provider: string): OpenClawConfig {
-  return {
+  const next: OpenClawConfig = {
     ...cfg,
     auth: {
       ...cfg.auth,
@@ -279,20 +283,24 @@ function withoutProfileFallback(cfg: OpenClawConfig, provider: string): OpenClaw
       },
     },
   };
+  copyConfigResolutionFacts(cfg, next);
+  return next;
 }
 
 async function resolveConfiguredProbeCredential(params: {
   cfg: OpenClawConfig;
   input: unknown;
+  path: string;
   cache: SecretRefResolveCache;
 }): Promise<string | null> {
-  const literal = normalizeSecretInputString(params.input);
-  if (literal !== undefined) {
-    return literal;
-  }
-  const ref = coerceSecretRef(params.input, params.cfg.secrets?.defaults);
+  const ref = resolveConfigSecretRef({
+    config: params.cfg,
+    path: params.path,
+    value: params.input,
+    defaults: params.cfg.secrets?.defaults,
+  });
   if (!ref) {
-    return null;
+    return normalizeSecretInputString(params.input) ?? null;
   }
   try {
     return await resolveSecretRefString(ref, {
@@ -332,7 +340,6 @@ async function maybeResolveUnresolvedRefIssue(params: {
   }
 }
 
-/** Builds probe targets plus preflight failures for missing/invalid credentials. */
 export async function buildProbeTargets(params: {
   cfg: OpenClawConfig;
   agentId?: string;
@@ -358,15 +365,23 @@ export async function buildProbeTargets(params: {
   const providerFilterKey = providerFilter ? normalizeProviderId(providerFilter) : null;
   const profileFilter = new Set(normalizeUniqueStringEntries(options.profileIds));
   const refResolveCache: SecretRefResolveCache = {};
-  const catalog = await loadPreparedModelCatalog({
+  const catalog = await readPreparedModelCatalog({
     config: cfg,
     ...(params.agentId ? { agentId: params.agentId } : {}),
     ...(agentDir ? { agentDir } : {}),
     ...(workspaceDir ? { workspaceDir } : {}),
+    readOnly: true,
   });
   const candidates = buildProbeCandidateMap(modelCandidates);
   const targets: AuthProbeTarget[] = [];
   const results: AuthProbeResult[] = [];
+  const appendTarget = (target: AuthProbeTarget) => {
+    if (target.model) {
+      targets.push(target);
+    } else {
+      results.push(buildNoModelProbeResult(target));
+    }
+  };
 
   for (const provider of providers) {
     const providerKey = normalizeProviderId(provider);
@@ -380,11 +395,20 @@ export async function buildProbeTargets(params: {
       candidates,
       catalog,
     });
-    const configuredProvider = findNormalizedProviderValue(cfg.models?.providers, providerKey);
+    const configuredProviderEntry = resolveMergedModelProviderEntry(cfg, providerKey);
+    const configuredProvider = configuredProviderEntry?.providerConfig;
+    const hasConfiguredProviderSecretRef = Boolean(
+      configuredProviderEntry &&
+      resolveConfigSecretRef({
+        config: cfg,
+        path: `${appendConfigPathSegment("models.providers", configuredProviderEntry.providerKey)}.apiKey`,
+        value: configuredProvider?.apiKey,
+        defaults: cfg.secrets?.defaults,
+      }),
+    );
     const includeDirectKeys = options.includeDirectKeys === true && profileFilter.size === 0;
     const includeConfigKey =
       includeDirectKeys &&
-      profileFilter.size === 0 &&
       hasConfiguredSecretInput(configuredProvider?.apiKey, cfg.secrets?.defaults);
     // Keep profiles saved under either surface. The production profile helper
     // is alias-aware, but scoped plugin metadata can differ between lookups.
@@ -411,6 +435,7 @@ export async function buildProbeTargets(params: {
           })
         : null;
     const configuredValue =
+      configuredProviderEntry &&
       includeConfigKey &&
       configuredReference.kind !== "profile" &&
       configuredReference.kind !== "profile-incompatible"
@@ -423,6 +448,7 @@ export async function buildProbeTargets(params: {
           : await resolveConfiguredProbeCredential({
               cfg,
               input: configuredProvider?.apiKey,
+              path: `${appendConfigPathSegment("models.providers", configuredProviderEntry.providerKey)}.apiKey`,
               cache: refResolveCache,
             })
         : null;
@@ -430,14 +456,21 @@ export async function buildProbeTargets(params: {
       configuredProvider?.auth === "oauth" || configuredProvider?.auth === "token"
         ? configuredProvider.auth
         : "api_key";
-    const resolvedEnvironmentValue = includeDirectKeys
-      ? resolveEnvApiKey(authProviderKey, process.env, {
-          config: cfg,
-          workspaceDir,
-        })
-      : null;
+    const resolvedEnvironmentValue =
+      includeDirectKeys && !hasConfiguredProviderSecretRef
+        ? resolveEnvApiKey(authProviderKey, process.env, {
+            config: cfg,
+            workspaceDir,
+          })
+        : null;
     const environmentValue =
       resolvedEnvironmentValue?.apiKey === configuredValue ? null : resolvedEnvironmentValue;
+    const configuredTargetLabel =
+      configuredReference.kind === "marker" &&
+      configuredValue &&
+      isNonSecretApiKeyMarker(configuredValue, { includeEnvVarName: false })
+        ? "provider"
+        : "config";
 
     const appendDirectTargets = () => {
       if (includeConfigKey) {
@@ -494,29 +527,15 @@ export async function buildProbeTargets(params: {
               ? "Configured API key could not be resolved."
               : "No model available for probe",
           });
-        } else if (model) {
-          targets.push({
+        } else {
+          appendTarget({
             provider: providerKey,
             model,
-            label: "config",
+            label: configuredTargetLabel,
             source: "models.json",
             mode: configuredMode,
             boundValue: configuredValue,
             ...(configuredReference.kind === "marker" ? { useRuntimeAuth: true } : {}),
-          });
-        } else {
-          // Config credential resolved but no probe model exists: report the
-          // defined no_model status instead of dropping the target, matching
-          // the environment branch below.
-          results.push({
-            provider: providerKey,
-            model: undefined,
-            label: "config",
-            source: "models.json",
-            mode: configuredMode,
-            status: "no_model",
-            reasonCode: "no_model",
-            error: "No model available for probe",
           });
         }
       }
@@ -531,27 +550,14 @@ export async function buildProbeTargets(params: {
             : environmentValue.source.includes("OAUTH_TOKEN")
               ? "oauth"
               : "api_key";
-        if (model) {
-          targets.push({
-            provider: providerKey,
-            model,
-            label: environmentValue.source,
-            source: "env",
-            mode,
-            boundValue: environmentValue.apiKey,
-          });
-        } else {
-          results.push({
-            provider: providerKey,
-            model: undefined,
-            label: environmentValue.source,
-            source: "env",
-            mode,
-            status: "no_model",
-            reasonCode: "no_model",
-            error: "No model available for probe",
-          });
-        }
+        appendTarget({
+          provider: providerKey,
+          model,
+          label: environmentValue.source,
+          source: "env",
+          mode,
+          boundValue: environmentValue.apiKey,
+        });
       }
     };
     const explicitOrder =
@@ -579,6 +585,14 @@ export async function buildProbeTargets(params: {
         const profile = store.profiles[profileId];
         const mode = profile?.type;
         const label = resolveAuthProfileDisplayLabel({ cfg, store, profileId });
+        const target: AuthProbeTarget = {
+          provider: providerKey,
+          model,
+          profileId,
+          label,
+          source: "profile",
+          mode,
+        };
         // A profile referenced by models.providers.<id>.apiKey is resolved by
         // runtime binding ahead of auth.order fallback, so it stays effective
         // even when excluded from auth.order. Probe it instead of reporting it
@@ -588,17 +602,13 @@ export async function buildProbeTargets(params: {
           configuredReference.kind === "profile" &&
           profileId === configuredReference.profileId;
         if (!isConfigBoundProfile && explicitOrder && !explicitOrder.includes(profileId)) {
-          results.push({
-            provider: providerKey,
-            profileId,
-            model: model ? `${model.provider}/${model.model}` : undefined,
-            label,
-            source: "profile",
-            mode,
-            status: "unknown",
-            reasonCode: "excluded_by_auth_order",
-            error: "Excluded by auth.order for this provider.",
-          });
+          results.push(
+            buildProbeResult(target, {
+              status: "unknown",
+              reasonCode: "excluded_by_auth_order",
+              error: "Excluded by auth.order for this provider.",
+            }),
+          );
           continue;
         }
         if (!isConfigBoundProfile && allowedProfiles && !allowedProfiles.has(profileId)) {
@@ -609,17 +619,13 @@ export async function buildProbeTargets(params: {
             profileId,
           });
           const reasonCode = mapEligibilityReasonToProbeReasonCode(eligibility.reasonCode);
-          results.push({
-            provider: providerKey,
-            model: model ? `${model.provider}/${model.model}` : undefined,
-            profileId,
-            label,
-            source: "profile",
-            mode,
-            status: "unknown",
-            reasonCode,
-            error: formatMissingCredentialProbeError(reasonCode),
-          });
+          results.push(
+            buildProbeResult(target, {
+              status: "unknown",
+              reasonCode,
+              error: formatMissingCredentialProbeError(reasonCode),
+            }),
+          );
           continue;
         }
         const unresolvedRefIssue = await maybeResolveUnresolvedRefIssue({
@@ -628,41 +634,16 @@ export async function buildProbeTargets(params: {
           cache: refResolveCache,
         });
         if (unresolvedRefIssue) {
-          results.push({
-            provider: providerKey,
-            model: model ? `${model.provider}/${model.model}` : undefined,
-            profileId,
-            label,
-            source: "profile",
-            mode,
-            status: "unknown",
-            reasonCode: unresolvedRefIssue.reasonCode,
-            error: unresolvedRefIssue.error,
-          });
+          results.push(
+            buildProbeResult(target, {
+              status: "unknown",
+              reasonCode: unresolvedRefIssue.reasonCode,
+              error: unresolvedRefIssue.error,
+            }),
+          );
           continue;
         }
-        if (!model) {
-          results.push({
-            provider: providerKey,
-            model: undefined,
-            profileId,
-            label,
-            source: "profile",
-            mode,
-            status: "no_model",
-            reasonCode: "no_model",
-            error: "No model available for probe",
-          });
-          continue;
-        }
-        targets.push({
-          provider: providerKey,
-          model,
-          profileId,
-          label,
-          source: "profile",
-          mode,
-        });
+        appendTarget(target);
       }
       appendDirectTargets();
       continue;
@@ -676,44 +657,37 @@ export async function buildProbeTargets(params: {
       continue;
     }
     const hasUsableModelsJsonKey = hasUsableCustomProviderApiKey(cfg, providerKey);
-    if (orderResolution.hasExplicitOrder && !hasUsableModelsJsonKey) {
+    const hasSyntheticLocalAuth = hasSyntheticLocalProviderAuthConfig({
+      cfg,
+      provider: providerKey,
+    });
+    if (orderResolution.hasExplicitOrder && !hasUsableModelsJsonKey && !hasSyntheticLocalAuth) {
       continue;
     }
 
-    const envKey = orderResolution.hasExplicitOrder
-      ? null
-      : resolveEnvApiKey(authProviderKey, process.env, {
-          config: cfg,
-          workspaceDir,
-        });
-    if (!envKey && !hasUsableModelsJsonKey) {
+    const envKey =
+      orderResolution.hasExplicitOrder || hasConfiguredProviderSecretRef
+        ? null
+        : resolveEnvApiKey(authProviderKey, process.env, {
+            config: cfg,
+            workspaceDir,
+          });
+    if (!envKey && !hasUsableModelsJsonKey && !hasSyntheticLocalAuth) {
       continue;
     }
 
-    const label = envKey ? "env" : "models.json";
     const source = envKey ? "env" : "models.json";
     const mode = envKey?.source.includes("OAUTH_TOKEN") ? "oauth" : "api_key";
 
-    if (!model) {
-      results.push({
-        provider: providerKey,
-        model: undefined,
-        label,
-        source,
-        mode,
-        status: "no_model",
-        reasonCode: "no_model",
-        error: "No model available for probe",
-      });
-      continue;
-    }
-
-    targets.push({
+    appendTarget({
       provider: providerKey,
       model,
-      label,
+      label: source,
       source,
       mode,
+      ...(hasSyntheticLocalAuth && !envKey && !hasUsableModelsJsonKey
+        ? { useRuntimeAuth: true }
+        : {}),
     });
   }
 
@@ -736,23 +710,13 @@ async function probeTarget(params: {
   // "config" probe must reflect only that credential — empty the provider auth
   // order and isolate the agent dir so stored profiles cannot satisfy it via
   // failover. Direct bound values instead pin an isolated synthetic profile.
-  const probeConfig = !target.boundValue
-    ? cfg
-    : target.useRuntimeAuth
-      ? withoutProfileFallback(cfg, target.provider)
+  const probeConfig = target.useRuntimeAuth
+    ? withoutProfileFallback(cfg, target.provider)
+    : !target.boundValue
+      ? cfg
       : withDirectCredential(cfg, target.provider, target.boundValue, target.mode);
   if (!target.model) {
-    return {
-      provider: target.provider,
-      model: undefined,
-      profileId: target.profileId,
-      label: target.label,
-      source: target.source,
-      mode: target.mode,
-      status: "no_model",
-      reasonCode: "no_model",
-      error: "No model available for probe",
-    };
+    return buildNoModelProbeResult(target);
   }
   const model = target.model;
 
@@ -762,18 +726,14 @@ async function probeTarget(params: {
   let sessionTarget: Awaited<ReturnType<typeof prepareInternalSessionEffectsSession>> | undefined;
   let preparedRunAdmission: ReturnType<typeof prepareSystemAgentRunAdmission> | undefined;
 
+  const work = await createAuthProbeWork(params.abortSignal);
   const start = Date.now();
-  const buildResult = (status: AuthProbeResult["status"], error?: string): AuthProbeResult => ({
-    provider: target.provider,
-    model: `${model.provider}/${model.model}`,
-    profileId: target.profileId,
-    label: target.label,
-    source: target.source,
-    mode: target.mode,
-    status,
-    ...(error ? { error } : {}),
-    latencyMs: Date.now() - start,
-  });
+  const buildResult = (status: AuthProbeResult["status"], error?: string): AuthProbeResult =>
+    buildProbeResult(target, {
+      status,
+      ...(error ? { error } : {}),
+      latencyMs: Date.now() - start,
+    });
   try {
     sessionTarget = await prepareInternalSessionEffectsSession({
       agentId,
@@ -784,8 +744,11 @@ async function probeTarget(params: {
     // Any bound-value target runs in an empty agent dir so stored profiles are
     // absent and cannot satisfy the probe via failover. Direct values pin a
     // synthetic profile; marker values are resolved by the runtime from the
-    // profile-order-cleared config.
-    if (target.boundValue) {
+    // profile-order-cleared config. Inside a Gateway, the isolated-read-only
+    // runtime mode set on the runner call keeps this pinned generation
+    // authoritative: a run-provenance lease would rebind it to the committed
+    // configured owner and lose the synthetic profile.
+    if (target.boundValue || target.useRuntimeAuth) {
       // Canonicalize so the isolated agent DB registers and unregisters under
       // one path. os.tmpdir() is a symlink on macOS (/var -> /private/var), and
       // disposeOpenClawAgentDatabaseByPath's exact-path guard would otherwise
@@ -818,40 +781,60 @@ async function probeTarget(params: {
         throw new Error("Could not prepare isolated auth probe profile");
       }
     }
-    const { runEmbeddedAgent } = await loadEmbeddedRunnerModule();
+    const { runEmbeddedAgent } = await embeddedRunnerModuleLoader.load();
+    const probeSessionTarget = sessionTarget;
     preparedRunAdmission = prepareSystemAgentRunAdmission(
       probeConfig,
       runId,
       agentId,
       "models.auth-probe",
     );
-    await runEmbeddedAgent({
-      preparedRunAdmission,
-      sessionId: sessionTarget.sessionId,
-      sessionKey: sessionTarget.sessionKey,
-      sessionTarget,
-      agentId,
-      workspaceDir,
-      agentDir: isolatedAgentDir ?? agentDir,
-      config: probeConfig,
-      prompt: PROBE_PROMPT,
-      provider: target.model.provider,
-      model: target.model.model,
-      authProfileId: isolatedProfileId ?? target.profileId,
-      authProfileIdSource: isolatedProfileId || target.profileId ? "user" : undefined,
-      timeoutMs,
-      runId,
-      lane: `auth-probe:${target.provider}:${target.profileId ?? target.source}`,
-      thinkLevel: "off",
-      reasoningLevel: "off",
-      verboseLevel: "off",
-      streamParams: { maxTokens },
-      agentHarnessRuntimeOverride: "openclaw",
-      disableTools: true,
-      modelRun: true,
-      cleanupBundleMcpOnRunEnd: true,
-      abortSignal: params.abortSignal,
-    });
+    const runResult = await work.run(() =>
+      runEmbeddedAgent({
+        preparedRunAdmission,
+        sessionId: probeSessionTarget.sessionId,
+        sessionKey: probeSessionTarget.sessionKey,
+        sessionTarget: probeSessionTarget,
+        agentId,
+        workspaceDir,
+        agentDir: isolatedAgentDir ?? agentDir,
+        config: probeConfig,
+        prompt: PROBE_PROMPT,
+        provider: model.provider,
+        model: model.model,
+        requestedRouteResolution: "resolved",
+        modelFallbacksOverride: [],
+        authProfileId: isolatedProfileId ?? target.profileId,
+        authProfileIdSource: isolatedProfileId || target.profileId ? "user" : undefined,
+        timeoutMs,
+        runId,
+        lane: `auth-probe:${target.provider}:${target.profileId ?? target.source}`,
+        thinkLevel: "off",
+        reasoningLevel: "off",
+        verboseLevel: "off",
+        streamParams: { maxTokens },
+        agentHarnessRuntimeOverride: "openclaw",
+        disableTools: true,
+        modelRun: true,
+        cleanupBundleMcpOnRunEnd: true,
+        // Keep the isolated generation outside configured Gateway ownership: a
+        // run-provenance lease rebinds the pinned agentDir to the committed
+        // configured owner, losing the synthetic probe profile below.
+        ...(isolatedAgentDir ? { preparedModelRuntimeMode: "isolated-read-only" as const } : {}),
+        abortSignal: params.abortSignal,
+      }),
+    );
+    const terminalError = extractAgentRunTerminalError(runResult);
+    if (terminalError) {
+      const described = describeFailoverError(new Error(terminalError));
+      return buildResult(
+        mapFailoverReasonToProbeStatus(described.reason),
+        redactAuthProbeError(described.message),
+      );
+    }
+    if (!agentRunHasVisibleReply(runResult)) {
+      return buildResult("format", "The model did not return a visible probe response.");
+    }
     return buildResult("ok");
   } catch (err) {
     const described = describeFailoverError(err);
@@ -861,12 +844,39 @@ async function probeTarget(params: {
     );
   } finally {
     preparedRunAdmission?.close();
-    await removeInternalSessionEffectsSession(sessionTarget);
-    if (isolatedAgentDir) {
-      clearRuntimeAuthProfileStoreSnapshot(isolatedAgentDir);
-      disposeOpenClawAgentDatabaseByPath(resolveAuthProfileDatabasePath(isolatedAgentDir));
-      await fs.rm(isolatedAgentDir, { recursive: true, force: true });
-    }
+    await work.settle(async () => {
+      const cleanups: Array<() => void | Promise<void>> = [
+        () => removeInternalSessionEffectsSession(sessionTarget),
+      ];
+      if (isolatedAgentDir) {
+        const ownedDir = isolatedAgentDir;
+        cleanups.push(
+          () => {
+            clearRuntimeAuthProfileStoreSnapshot(ownedDir);
+          },
+          () => {
+            disposeOpenClawAgentDatabaseByPath(resolveAuthProfileDatabasePath(ownedDir));
+          },
+          () => fs.rm(ownedDir, { recursive: true, force: true }),
+        );
+      }
+      const errors: unknown[] = [];
+      for (const cleanup of cleanups) {
+        try {
+          await cleanup();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length === 1) {
+        throw errors[0];
+      }
+      if (errors.length > 1) {
+        throw new AggregateError(errors, "Auth probe resources could not all be released", {
+          cause: errors[0],
+        });
+      }
+    });
   }
 }
 
@@ -949,20 +959,31 @@ export async function withAuthProbeStateOwnership<T>(
     await import("../../infra/embedded-state-lock.js");
   const signalBridge = createEmbeddedStateSignalBridge(ownership.process ?? process);
   let stateLock: EmbeddedStateLockHandle | null | undefined;
+  let work: Awaited<ReturnType<typeof createAuthProbeWork>> | undefined;
   try {
+    work = await createAuthProbeWork(signalBridge.signal);
     stateLock = await acquireEmbeddedStateLock({
       options: ownership.gatewayLockOptions,
       signal: signalBridge.signal,
       formatActiveGatewayRefusal: formatActiveGatewayModelsProbeRefusal,
     });
-    return await run(signalBridge.signal);
+    return await work.run(() => run(signalBridge.signal));
   } finally {
-    await stateLock?.release();
-    signalBridge.dispose();
+    const release = async () => {
+      try {
+        await stateLock?.release();
+      } finally {
+        signalBridge.dispose();
+      }
+    };
+    if (work) {
+      await work.settle(release);
+    } else {
+      await release();
+    }
   }
 }
 
-/** Runs all auth probes with bounded concurrency and returns a summary. */
 export async function runAuthProbes(params: {
   cfg: OpenClawConfig;
   agentId?: string;
@@ -1017,17 +1038,12 @@ export async function runAuthProbes(params: {
   });
 }
 
-/** Formats probe latency for table output. */
 export function formatProbeLatency(latencyMs?: number | null) {
-  if (!latencyMs && latencyMs !== 0) {
-    return "-";
-  }
   return formatMs(latencyMs);
 }
 
-/** Sorts probe results by provider and display label. */
 export function sortProbeResults(results: AuthProbeResult[]): AuthProbeResult[] {
-  return results.slice().toSorted((a, b) => {
+  return results.toSorted((a, b) => {
     const provider = a.provider.localeCompare(b.provider);
     if (provider !== 0) {
       return provider;
@@ -1038,7 +1054,6 @@ export function sortProbeResults(results: AuthProbeResult[]): AuthProbeResult[] 
   });
 }
 
-/** Produces the terse completion line for auth probe output. */
 export function describeProbeSummary(summary: AuthProbeSummary): string {
   if (summary.totalTargets === 0) {
     return "No probe targets.";

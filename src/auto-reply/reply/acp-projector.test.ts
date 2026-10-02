@@ -6,16 +6,6 @@ import { createAcpTestConfig as createCfg } from "./test-fixtures/acp-runtime.js
 
 type Delivery = { kind: string; text?: string };
 
-function countMatching<T>(items: readonly T[], predicate: (item: T) => boolean): number {
-  let count = 0;
-  for (const item of items) {
-    if (predicate(item)) {
-      count += 1;
-    }
-  }
-  return count;
-}
-
 function createProjectorHarness(
   cfgOverrides?: Parameters<typeof createCfg>[0],
   opts?: {
@@ -23,6 +13,7 @@ function createProjectorHarness(
     shouldSendToolSummaries?: boolean;
     shouldSendToolSummariesNow?: () => boolean;
     shouldSendFullToolDetails?: boolean;
+    getConversationContext?: () => string | undefined;
   },
 ) {
   const deliveries: Delivery[] = [];
@@ -35,6 +26,7 @@ function createProjectorHarness(
       deliveries.push({ kind, text: payload.text });
       return true;
     },
+    getConversationContext: opts?.getConversationContext,
     onProgress: opts?.onProgress,
   });
   return { deliveries, projector };
@@ -201,6 +193,32 @@ describe("createAcpReplyProjector", () => {
     expect(deliveries).toEqual([{ kind: "final", text: "a".repeat(70) }]);
   });
 
+  it.each(["live", "final_only"] as const)(
+    "uses finalized and refreshed owner context to redact split private prompts in %s mode",
+    async (deliveryMode) => {
+      const marker = "[Current message - respond to this]";
+      let conversationContext = "";
+      const { deliveries, projector } = createStreamHarness(
+        deliveryMode,
+        {},
+        {
+          getConversationContext: () => conversationContext,
+        },
+      );
+      conversationContext = `${marker}\nPrivate secret. Keep hidden.`;
+
+      await emitText(projector, "Visible answer before. ");
+      conversationContext = `${marker}\nPrivate updated context. Keep hidden.`;
+      await emitText(projector, `${marker}\nPrivate updated context. `);
+      await emitText(projector, "Keep hidden. Visible answer after.");
+      await projector.flush(true);
+
+      expect(deliveries.map((delivery) => delivery.text).join("")).toBe(
+        "Visible answer before.  Visible answer after.",
+      );
+    },
+  );
+
   it("rechecks the dynamic tool-summary gate for each ACP event", async () => {
     let allowToolSummaries = false;
     const { deliveries, projector } = createStreamHarness(
@@ -363,7 +381,7 @@ describe("createAcpReplyProjector", () => {
     expect(deliveries[2]).toEqual({ kind: "final", text: "What now?" });
   });
 
-  it("flushes buffered status/tool output on error in deliveryMode=final_only", async () => {
+  it("flushes buffered status/tool output without final text in deliveryMode=final_only", async () => {
     const { deliveries, projector } = createFinalOnlyStatusToolHarness();
 
     await emitStatus(projector, "available commands updated (7)", "available_commands_update");
@@ -524,7 +542,7 @@ describe("createAcpReplyProjector", () => {
     await emitText(projector, "hello");
     await projector.flush(true);
 
-    expect(countMatching(deliveries, (entry) => entry.kind === "tool")).toBe(4);
+    expect(deliveries.filter((entry) => entry.kind === "tool")).toHaveLength(4);
     expect(deliveries[0]).toEqual({
       kind: "tool",
       text: prefixSystemMessage("available commands updated"),
@@ -628,13 +646,6 @@ describe("createAcpReplyProjector", () => {
       },
       toolCallId: "hidden_boundary_1",
       includeNonTerminalUpdate: true,
-      expectedText: "fallback. I don't",
-    });
-  });
-
-  it("uses the built-in space separator for hidden live boundaries", async () => {
-    await runHiddenBoundaryCase({
-      toolCallId: "call_hidden_2",
       expectedText: "fallback. I don't",
     });
   });

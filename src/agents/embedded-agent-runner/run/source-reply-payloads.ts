@@ -7,23 +7,10 @@ import type {
 } from "../../embedded-agent-messaging.types.js";
 import { resolveExplicitFinalSourceReplyDeliveryEvidence } from "../delivery-evidence.js";
 
-type EmbeddedRunReplyItem = {
+type EmbeddedRunReplyItem = ReplyPayload & {
   text: string;
   media?: string[];
-  mediaUrl?: string;
-  isError?: boolean;
-  isReasoning?: boolean;
-  /** Marks pre-tool commentary (💬) — a display lane, suppressed unless the channel opts in. */
-  isCommentary?: boolean;
-  audioAsVoice?: boolean;
-  replyToId?: string;
-  replyToTag?: boolean;
-  replyToCurrent?: boolean;
-  presentation?: ReplyPayload["presentation"];
-  interactive?: ReplyPayload["interactive"];
-  channelData?: Record<string, unknown>;
-  nonTerminalToolErrorWarning?: boolean;
-  sourceReplyMirror?: { idempotencyKey?: string };
+  sourceReplyMirror?: { idempotencyKey?: string; transcriptOwner?: true };
 };
 
 /** Builds transcript mirrors and completion evidence for message-tool source replies. */
@@ -37,14 +24,13 @@ export function buildSourceReplyPayloadState(params: {
   replyItems: EmbeddedRunReplyItem[];
   hasSourceReplyPayload: boolean;
   deliveredSourceReplyViaMessageTool: boolean;
-  explicitFinalSourceReply: boolean | undefined;
   completedSourceReplyViaMessageTool: boolean;
 } {
   const sourceReplyPayloads = params.payloads ?? [];
   const replyItems = sourceReplyPayloads.flatMap((payload, index): EmbeddedRunReplyItem[] => {
     const text = normalizeOptionalString(payload.text) ?? "";
-    const media = Array.from(
-      new Set([...(payload.mediaUrl ? [payload.mediaUrl] : []), ...(payload.mediaUrls ?? [])]),
+    const media = (
+      payload.mediaUrls?.length ? payload.mediaUrls : payload.mediaUrl ? [payload.mediaUrl] : []
     ).filter((value) => value.trim().length > 0);
     if (
       !text &&
@@ -63,6 +49,10 @@ export function buildSourceReplyPayloadState(params: {
         ...(payload.mediaUrl ? { mediaUrl: payload.mediaUrl } : {}),
         ...(media.length ? { media } : {}),
         ...(payload.audioAsVoice ? { audioAsVoice: true } : {}),
+        ...(payload.attachments?.length ? { attachments: payload.attachments } : {}),
+        ...(payload.trustedLocalMedia !== undefined
+          ? { trustedLocalMedia: payload.trustedLocalMedia }
+          : {}),
         ...(payload.presentation ? { presentation: payload.presentation } : {}),
         ...(payload.interactive ? { interactive: payload.interactive } : {}),
         ...(payload.channelData ? { channelData: payload.channelData } : {}),
@@ -70,6 +60,7 @@ export function buildSourceReplyPayloadState(params: {
           idempotencyKey:
             payload.idempotencyKey ??
             (params.runId ? `${params.runId}:internal-source-reply:${index}` : undefined),
+          ...(payload.transcriptOwner ? { transcriptOwner: true as const } : {}),
         },
       },
     ];
@@ -86,7 +77,6 @@ export function buildSourceReplyPayloadState(params: {
     replyItems,
     hasSourceReplyPayload,
     deliveredSourceReplyViaMessageTool,
-    explicitFinalSourceReply,
     completedSourceReplyViaMessageTool:
       explicitFinalSourceReply ?? (hasSourceReplyPayload || deliveredSourceReplyViaMessageTool),
   };

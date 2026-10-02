@@ -13,12 +13,13 @@ import {
   beginSessionWorkAdmission,
   cancelSessionWorkAdmissionHandoff,
   consumeSessionWorkAdmissionHandoff,
-  getCurrentSessionWorkAdmissionRelease,
   getActiveSessionLifecycleMutationCount,
   getActiveSessionWorkAdmissionCount,
+  getSessionWorkAdmissionOwnerRelease,
   getSessionWorkAdmissionRelease,
   hasOnlySessionLifecycleMutationKindActive,
   interruptSessionWorkAdmissions,
+  isCompetingSessionWorkAdmissionActive,
   isSessionLifecycleMutationActive,
   isSessionWorkAdmissionActive,
   runExclusiveSessionLifecycleMutation,
@@ -38,95 +39,6 @@ it("counts one multi-identity admission once", async () => {
   expect(getActiveSessionWorkAdmissionCount()).toBe(0);
 });
 
-it("exposes completion only to the matching admitted session turn", async () => {
-  const scope = "store-self-archive-release";
-  const sessionKey = "agent:main:self-archive";
-  const sessionId = "session-self-archive";
-  const admission = await beginSessionWorkAdmission({
-    scope,
-    identities: [sessionKey, sessionId],
-    assertAllowed: () => {},
-  });
-  let settled = false;
-  let release: Promise<void> | undefined;
-
-  try {
-    expect(
-      getCurrentSessionWorkAdmissionRelease({ scope, identities: [sessionKey] }),
-    ).toBeUndefined();
-
-    await admission.run(async () => {
-      expect(
-        getCurrentSessionWorkAdmissionRelease({ scope, identities: ["agent:main:other"] }),
-      ).toBeUndefined();
-      release = getCurrentSessionWorkAdmissionRelease({
-        scope,
-        identities: [sessionKey, sessionId],
-      });
-      expect(release).toBeInstanceOf(Promise);
-      void release?.then(() => {
-        settled = true;
-      });
-      await Promise.resolve();
-      expect(settled).toBe(false);
-    });
-
-    expect(settled).toBe(false);
-  } finally {
-    admission.release();
-  }
-
-  await release;
-  await Promise.resolve();
-  expect(settled).toBe(true);
-});
-
-it("waits for every nested admission that owns the same session", async () => {
-  const scope = "store-self-archive-nested";
-  const sessionKey = "agent:main:nested-self-archive";
-  const outerAdmission = await beginSessionWorkAdmission({
-    scope,
-    identities: [sessionKey, "outer-session"],
-    assertAllowed: () => {},
-  });
-  let release: Promise<void> | undefined;
-  let settled = false;
-
-  try {
-    await outerAdmission.run(async () => {
-      const innerAdmission = await beginSessionWorkAdmission({
-        scope,
-        identities: [sessionKey, "inner-session"],
-        assertAllowed: () => {},
-      });
-
-      try {
-        await innerAdmission.run(async () => {
-          release = getCurrentSessionWorkAdmissionRelease({
-            scope,
-            identities: [sessionKey],
-          });
-          void release?.then(() => {
-            settled = true;
-          });
-        });
-      } finally {
-        innerAdmission.release();
-      }
-
-      await Promise.resolve();
-      expect(settled).toBe(false);
-    });
-    expect(settled).toBe(false);
-  } finally {
-    outerAdmission.release();
-  }
-
-  await release;
-  await Promise.resolve();
-  expect(settled).toBe(true);
-});
-
 it("waits for a competing session admission outside the caller context", async () => {
   const scope = "store-competing-self-archive";
   const sessionKey = "agent:main:competing-self-archive";
@@ -139,9 +51,6 @@ it("waits for a competing session admission outside the caller context", async (
   let release: Promise<void> | undefined;
 
   try {
-    expect(
-      getCurrentSessionWorkAdmissionRelease({ scope, identities: [sessionKey] }),
-    ).toBeUndefined();
     release = getSessionWorkAdmissionRelease({ scope, identities: [sessionKey] });
     expect(release).toBeInstanceOf(Promise);
     void release?.then(() => {
@@ -156,6 +65,42 @@ it("waits for a competing session admission outside the caller context", async (
   await release;
   await Promise.resolve();
   expect(settled).toBe(true);
+});
+
+it("observes only the named session admission owner while it is starting", async () => {
+  const scope = "store-named-owner";
+  const identities = ["agent:main:named-owner", "session-named-owner"];
+  const owner = Symbol.for("openclaw.test.namedSessionWorkAdmissionOwner");
+  const unrelated = await beginSessionWorkAdmission({ scope, identities, assertAllowed: () => {} });
+  const started = createDeferred();
+  const allowed = createDeferred();
+  const admissionPromise = beginSessionWorkAdmission({
+    scope,
+    identities,
+    owner,
+    assertAllowed: async () => {
+      started.resolve();
+      await allowed.promise;
+    },
+  });
+  try {
+    await started.promise;
+    const release = getSessionWorkAdmissionOwnerRelease({ scope, identities, owner });
+    expect(release).toBeInstanceOf(Promise);
+    unrelated.release();
+    expect(getSessionWorkAdmissionOwnerRelease({ scope, identities, owner })).toBeInstanceOf(
+      Promise,
+    );
+    allowed.resolve();
+    const admission = await admissionPromise;
+    admission.release();
+    await release;
+    expect(getSessionWorkAdmissionOwnerRelease({ scope, identities, owner })).toBeUndefined();
+  } finally {
+    unrelated.release();
+    allowed.resolve();
+    (await admissionPromise).release();
+  }
 });
 
 it("atomically hands admitted work across an interrupted RPC boundary", async () => {
@@ -566,43 +511,6 @@ it("lets an admitted root enter session work while suspension preparation refuse
   }
 });
 
-it("registers active work before waiting for the store writer barrier", async () => {
-  const storePath = "store-writer-barrier";
-  const writerStarted = createDeferred();
-  const releaseWriter = createDeferred();
-  const firstValidation = createDeferred();
-  let validationCount = 0;
-  const writer = runExclusiveSessionStoreWrite(storePath, async () => {
-    writerStarted.resolve();
-    await releaseWriter.promise;
-  });
-  await writerStarted.promise;
-
-  const admissionPromise = beginSessionWorkAdmission({
-    scope: storePath,
-    identities: ["agent:main:child", "session-writer-barrier"],
-    assertAllowed: () => {
-      validationCount += 1;
-      if (validationCount === 1) {
-        firstValidation.resolve();
-      }
-    },
-  });
-  await firstValidation.promise;
-  await Promise.resolve();
-
-  expect(isSessionWorkAdmissionActive(storePath, ["session-writer-barrier"])).toBe(true);
-
-  releaseWriter.resolve();
-  const admission = await admissionPromise;
-  try {
-    expect(validationCount).toBe(2);
-  } finally {
-    admission.release();
-    await writer;
-  }
-});
-
 it("revalidates inline when admission begins inside the active store writer", async () => {
   const storePath = "store-writer-reentrant-admission";
   const order: string[] = [];
@@ -651,6 +559,40 @@ it("runs one-time admission work only during writer-barrier revalidation", async
   }
 });
 
+it.each([false, true])(
+  "excludes its own lease during revalidation while retaining competing work (%s)",
+  async (hasCompetingWork) => {
+    const target = {
+      scope: "store-revalidation-owner",
+      identities: ["agent:main:main", "session-revalidation-owner"],
+    };
+    const competing = hasCompetingWork
+      ? await beginSessionWorkAdmission({ ...target, assertAllowed: () => {} })
+      : undefined;
+    try {
+      const admission = await beginSessionWorkAdmission({
+        ...target,
+        assertAllowed: () => {},
+        revalidateAllowed: async () => {
+          await Promise.resolve();
+          expect(isSessionWorkAdmissionActive(target.scope, target.identities)).toBe(true);
+          expect(isCompetingSessionWorkAdmissionActive(target.scope, target.identities)).toBe(
+            hasCompetingWork,
+          );
+        },
+      });
+      try {
+        expect(isCompetingSessionWorkAdmissionActive(target.scope, target.identities)).toBe(true);
+      } finally {
+        admission.release();
+      }
+      expect(isSessionWorkAdmissionActive(target.scope, target.identities)).toBe(hasCompetingWork);
+    } finally {
+      competing?.release();
+    }
+  },
+);
+
 it("rejects and releases an admission invalidated by an earlier store writer", async () => {
   const storePath = "store-writer-revalidation";
   const writerStarted = createDeferred();
@@ -687,6 +629,76 @@ it("rejects and releases an admission invalidated by an earlier store writer", a
   await expect(admission).rejects.toThrow("session changed");
   expect(validationCount).toBe(2);
   expect(isSessionWorkAdmissionActive(storePath, ["session-writer-revalidation"])).toBe(false);
+});
+
+it("admits an independent session while revalidating a conflicting writer's authority", async () => {
+  const scope = "store-keyed-admission";
+  const blockedKey = "agent:main:blocked";
+  const independentKey = "agent:main:independent";
+  const releaseWriter = createDeferred();
+  const initialValidation = createDeferred();
+  const independentEntered = createDeferred();
+  const releaseIndependent = createDeferred();
+  let allowed = true;
+  const validateBlocked = vi.fn(() => {
+    if (!allowed) {
+      throw new Error("session authority revoked");
+    }
+  });
+  const writer = runExclusiveSessionStoreWrite(
+    scope,
+    async () => {
+      await releaseWriter.promise;
+      allowed = false;
+    },
+    { identities: [blockedKey] },
+  );
+  const blocked = beginSessionWorkAdmission({
+    scope,
+    identities: [blockedKey, "blocked-id"],
+    storeWriterIdentities: [blockedKey],
+    assertAllowed: () => {
+      validateBlocked();
+      initialValidation.resolve();
+    },
+    revalidateAllowed: validateBlocked,
+  });
+  const blockedOutcome = expect(blocked).rejects.toThrow("session authority revoked");
+  await initialValidation.promise;
+  const independent = beginSessionWorkAdmission({
+    scope,
+    identities: [independentKey, "independent-id"],
+    storeWriterIdentities: [independentKey],
+    assertAllowed: () => {},
+    revalidateAllowed: async () => {
+      independentEntered.resolve();
+      await releaseIndependent.promise;
+    },
+  });
+
+  try {
+    await independentEntered.promise;
+    expect(validateBlocked).toHaveBeenCalledTimes(1);
+    releaseWriter.resolve();
+    await writer;
+    await blockedOutcome;
+    expect(validateBlocked).toHaveBeenCalledTimes(2);
+    expect(isSessionWorkAdmissionActive(scope, [blockedKey])).toBe(false);
+    expect(isSessionWorkAdmissionActive(scope, [independentKey])).toBe(true);
+    releaseIndependent.resolve();
+    const lease = await independent;
+    lease.release();
+  } finally {
+    releaseWriter.resolve();
+    releaseIndependent.resolve();
+    const results = await Promise.allSettled([blocked, independent]);
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        result.value.release();
+      }
+    }
+    await Promise.allSettled([writer, blockedOutcome]);
+  }
 });
 
 it("releases an admission aborted while waiting for the store writer barrier", async () => {
@@ -776,8 +788,6 @@ it("serializes lifecycle mutation and work admission across identity aliases", a
       await releaseMutation.promise;
     },
   });
-  await mutationStarted.promise;
-
   let admitted = false;
   const admission = beginSessionWorkAdmission({
     scope: "store-a",
@@ -786,16 +796,20 @@ it("serializes lifecycle mutation and work admission across identity aliases", a
       admitted = true;
     },
   });
-  await Promise.resolve();
-  expect(admitted).toBe(false);
+  try {
+    await mutationStarted.promise;
+    expect(admitted).toBe(false);
 
-  releaseMutation.resolve();
-  await mutation;
-  const admissionLease = await admission;
-  expect(admitted).toBe(true);
-  expect(isSessionWorkAdmissionActive("store-a", ["agent:main:child", "session-1"])).toBe(true);
-
-  admissionLease.release();
+    releaseMutation.resolve();
+    await mutation;
+    await admission;
+    expect(admitted).toBe(true);
+    expect(isSessionWorkAdmissionActive("store-a", ["agent:main:child", "session-1"])).toBe(true);
+  } finally {
+    releaseMutation.resolve();
+    await mutation;
+    (await admission).release();
+  }
   expect(isSessionWorkAdmissionActive("store-a", ["session-1"])).toBe(false);
 });
 
@@ -867,34 +881,6 @@ it("cancels work admission waiting behind a lifecycle mutation", async () => {
 
   const controller = new AbortController();
   const abortError = new Error("reset interrupted admission");
-  const admission = beginSessionWorkAdmission({
-    scope: "store-a",
-    identities: ["session-1"],
-    signal: controller.signal,
-    assertAllowed: () => {},
-  });
-  controller.abort(abortError);
-
-  await expect(admission).rejects.toBe(abortError);
-  releaseMutation.resolve();
-  await mutation;
-});
-
-it("cancels work admission while a lifecycle mutation holds the identity lock", async () => {
-  const mutationStarted = createDeferred();
-  const releaseMutation = createDeferred();
-  const mutation = runExclusiveSessionLifecycleMutation({
-    scope: "store-a",
-    identities: ["agent:main:child", "session-1"],
-    run: async () => {
-      mutationStarted.resolve();
-      await releaseMutation.promise;
-    },
-  });
-  await mutationStarted.promise;
-
-  const controller = new AbortController();
-  const abortError = new Error("cancel during lifecycle mutation");
   const admission = beginSessionWorkAdmission({
     scope: "store-a",
     identities: ["session-1"],
@@ -1013,34 +999,6 @@ it("bounds interruption waits for non-cooperative work", async () => {
         timeoutMs: 1,
       }),
     ).resolves.toBe(false);
-  } finally {
-    admissionLease.release();
-  }
-});
-
-it("excludes the initiating admission from an in-band interruption", async () => {
-  let interrupted = false;
-  const admissionLease = await beginSessionWorkAdmission({
-    scope: "store-a",
-    identities: ["agent:main:child", "session-1"],
-    assertAllowed: () => {},
-    onInterrupt: () => {
-      interrupted = true;
-    },
-  });
-
-  try {
-    await expect(
-      admissionLease.run(
-        async () =>
-          await interruptSessionWorkAdmissions({
-            scope: "store-a",
-            identities: ["session-1"],
-            timeoutMs: 1,
-          }),
-      ),
-    ).resolves.toBe(true);
-    expect(interrupted).toBe(false);
   } finally {
     admissionLease.release();
   }

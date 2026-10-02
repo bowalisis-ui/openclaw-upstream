@@ -3,6 +3,7 @@ import {
   resolveApprovalOverGateway,
   type ApprovalResolveResult,
 } from "openclaw/plugin-sdk/approval-gateway-runtime";
+import type { ChannelApprovalKind } from "openclaw/plugin-sdk/approval-handler-runtime";
 import type { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
@@ -12,6 +13,7 @@ import {
 } from "openclaw/plugin-sdk/conversation-runtime";
 import { isApprovalNotFoundError } from "openclaw/plugin-sdk/error-runtime";
 import { logVerbose, sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
+import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { TelegramApprovalCallback } from "./approval-callback-data.js";
 import {
   buildTelegramCanonicalApprovalTerminalText,
@@ -22,6 +24,10 @@ import type {
   TelegramCallbackButton,
   TelegramCallbackMessageActions,
 } from "./bot-handlers.callback-actions.js";
+import {
+  buildSyntheticContext,
+  buildSyntheticTextMessage,
+} from "./bot-handlers.message-context.js";
 import type { TelegramMessagePipeline } from "./bot-handlers.message-pipeline.js";
 import type { RegisterTelegramHandlerParams } from "./bot-handlers.types.js";
 import {
@@ -45,11 +51,7 @@ import { buildInlineKeyboard } from "./send.js";
 
 export type TelegramCallbackMessageRuntime = Pick<
   TelegramMessagePipeline,
-  | "buildSyntheticTextMessage"
-  | "buildSyntheticContext"
-  | "buildFailedProcessingResult"
-  | "processMessageWithReplyChain"
-  | "resolveTelegramSessionState"
+  "buildFailedProcessingResult" | "processMessageWithReplyChain" | "resolveTelegramSessionState"
 >;
 
 export class TelegramRetryableCallbackError extends Error {
@@ -229,7 +231,7 @@ export function createTelegramCallbackApprovalRuntime(params: {
   const handleLegacy = async (approvalCallback: LegacyApprovalCallback): Promise<void> => {
     const { execApprovalAuthorizedSender, pluginApprovalAuthorizedSender } =
       resolveApprovalAuthorizations();
-    const approvalKinds: Array<"exec" | "plugin"> = [];
+    const approvalKinds: ChannelApprovalKind[] = [];
     if (execApprovalAuthorizedSender || pluginApprovalAuthorizedSender) {
       approvalKinds.push("exec");
     }
@@ -419,14 +421,6 @@ const updateMultiSelectKeyboard = (
     }),
   );
 
-const resolvePluginCallbackSubmitText = (submitText: unknown): string | undefined => {
-  if (typeof submitText !== "string") {
-    return undefined;
-  }
-  const trimmed = submitText.trim();
-  return trimmed ? trimmed : undefined;
-};
-
 const isReplySessionInitConflictError = (err: unknown): boolean =>
   REPLY_SESSION_INIT_CONFLICT_MESSAGE_RE.test(String(err instanceof Error ? err.message : err));
 
@@ -469,12 +463,7 @@ export async function handleTelegramInteractiveCallback(params: {
     messageRuntime,
     authorizeCallback,
   } = params;
-  const {
-    buildSyntheticTextMessage,
-    buildSyntheticContext,
-    buildFailedProcessingResult,
-    processMessageWithReplyChain,
-  } = messageRuntime;
+  const { buildFailedProcessingResult, processMessageWithReplyChain } = messageRuntime;
   const {
     clearCallbackButtons,
     editCallbackButtons,
@@ -606,7 +595,7 @@ export async function handleTelegramInteractiveCallback(params: {
       if (result?.handled === false) {
         return;
       }
-      const submitText = resolvePluginCallbackSubmitText(result?.submitText);
+      const submitText = normalizeOptionalString(result?.submitText);
       if (!submitText || (await processSubmitText(submitText)) === "skipped") {
         return;
       }
@@ -619,18 +608,15 @@ export async function handleTelegramInteractiveCallback(params: {
     return true;
   }
 
-  const managedSelectCallback = parseTelegramManagedSelectCallback(data);
-  if (!managedSelectCallback) {
+  const selectCallback = parseTelegramManagedSelectCallback(callback.data?.trimStart() ?? data);
+  if (!selectCallback) {
     return false;
   }
-  if (
-    managedSelectCallback.type === "multi-toggle" ||
-    managedSelectCallback.type === "multi-clear"
-  ) {
+  if (selectCallback.type === "multi-toggle" || selectCallback.type === "multi-clear") {
     const buttons = updateMultiSelectKeyboard(
       callbackMessage,
-      managedSelectCallback.type === "multi-clear" ? "clear" : "toggle",
-      managedSelectCallback.type === "multi-toggle" ? managedSelectCallback.value : "",
+      selectCallback.type === "multi-clear" ? "clear" : "toggle",
+      selectCallback.type === "multi-toggle" ? selectCallback.value : "",
     );
     if (buttons.length > 0) {
       try {
@@ -645,7 +631,7 @@ export async function handleTelegramInteractiveCallback(params: {
   }
 
   let text: string;
-  if (managedSelectCallback.type === "multi-submit") {
+  if (selectCallback.type === "multi-submit") {
     const selected = resolveMultiSelectedValues(cloneInlineKeyboardButtons(callbackMessage));
     text = `Multi-select submitted: ${selected.length > 0 ? selected.join(", ") : "none"}`;
   } else {
@@ -660,7 +646,7 @@ export async function handleTelegramInteractiveCallback(params: {
         throw new TelegramRetryableCallbackError(editErr);
       }
     }
-    text = `Single-select submitted: ${managedSelectCallback.value}`;
+    text = `Single-select submitted: ${selectCallback.value}`;
   }
   const synthetic = buildSynthetic(text);
   await processMessageWithReplyChain({

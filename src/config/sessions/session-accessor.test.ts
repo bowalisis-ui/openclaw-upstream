@@ -2,10 +2,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expectDefined } from "@openclaw/normalization-core";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { withTestTimeout } from "../../../test/helpers/promise.js";
+import { redactIdentifier } from "@openclaw/normalization-core/node-crypto";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
+import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { cleanupTempDirs, makeTempDir } from "../../../test/helpers/temp-dir.js";
-import type { MsgContext } from "../../auto-reply/templating.js";
+import * as workerAdmission from "../../infra/sqlite-worker-operation-admission.js";
+import {
+  readSessionProgressCard,
+  writeSessionProgressCard,
+} from "../../session-cards/progress-card-store.js";
 import {
   onInternalSessionTranscriptUpdate,
   onSessionTranscriptUpdate,
@@ -17,30 +24,25 @@ import {
   openOpenClawAgentDatabase,
   resolveOpenClawAgentSqlitePath,
 } from "../../state/openclaw-agent-db.js";
-import {
-  closeOpenClawStateDatabaseForTest,
-  isOpenClawStateDatabaseOpen,
-} from "../../state/openclaw-state-db.js";
-import { appendSqliteTrajectoryRuntimeEvents } from "../../trajectory/runtime-store.sqlite.js";
-import type { TrajectoryEvent } from "../../trajectory/types.js";
+import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import {
   deliveryContextFromSession,
   sessionDeliveryRoute,
-} from "../../utils/delivery-context.shared.js";
-import { readSessionArchiveContentSync } from "./archive-compression.js";
+} from "../../utils/delivery-context.read.js";
+import type { OpenClawConfig } from "../types.openclaw.js";
 import {
   applySessionEntryReplacements,
   applySessionPatchProjections,
   appendTranscriptEvent,
   appendTranscriptMessage,
+  appendTranscriptMessageSync,
   applySessionEntryLifecycleMutation,
+  assignSessionOwner,
   commitReplySessionInitialization,
-  countSessionEntryRowsReadOnly,
   createSessionEntryWithTranscript,
   deleteSessionEntryLifecycle,
   findTranscriptEvent,
-  ensureSessionEntrySync,
-  listSessionEntriesCore,
+  listSessionChildEntriesReadOnly,
   listSessionEntriesByStatus,
   listSessionTranscriptInstances,
   loadReplySessionInitializationSnapshot,
@@ -54,10 +56,8 @@ import {
   patchSessionEntryTarget,
   persistSessionTranscriptTurn,
   readTranscriptStatsSync,
-  readSessionUpdatedAtCore,
   recordInboundSessionMeta,
   replaceSessionEntry,
-  replaceTranscriptEventsSync,
   resetSessionEntryLifecycle,
   SessionInitializationAgentScopeMismatchError,
   type SessionPatchProjectionOperation,
@@ -68,15 +68,14 @@ import {
   resolveSessionTranscriptRuntimeTarget,
   trimSessionTranscriptForManualCompact,
   updateSessionEntry,
+  updateResolvedSessionEntry,
   updateSessionLastRoute,
   upsertSessionEntryCore,
 } from "./session-accessor.js";
-import {
-  readSessionEntryCount,
-  readSessionEntryKeys,
-} from "./session-accessor.sqlite-entry-store.js";
 import { loadExactSessionEntry, replaceSessionEntrySync } from "./session-accessor.sqlite-entry.js";
-import { importSqliteSessionRows } from "./session-accessor.sqlite-import.js";
+import { importSqliteSessionRows } from "./session-accessor.sqlite-import.test-support.js";
+import { recordSessionParticipant } from "./session-accessor.sqlite-participants.native.js";
+import { findTranscriptEventInDatabase } from "./session-accessor.sqlite-read.js";
 import { applySessionEntryCanonicalReplacements } from "./session-accessor.sqlite-replacement-projection.js";
 import {
   appendTranscriptEventSync,
@@ -84,11 +83,9 @@ import {
   trimTranscriptForManualCompact,
 } from "./session-accessor.sqlite-transcript-write.js";
 import { resolveSqliteTargetFromSessionStorePath } from "./session-sqlite-target.js";
-import {
-  SessionTranscriptWriterClaimReboundError,
-  withOwnedSessionTranscriptWrites,
-} from "./transcript-write-context.js";
-import type { InternalSessionEntry, SessionEntry } from "./types.js";
+import { buildRestartRecoveryExpectedState } from "./session-transcript-turn-state.js";
+import { transcriptMessage } from "./transcript-message.test-support.js";
+import type { SessionEntry } from "./types.js";
 
 const cleanupArchivedSessionTranscriptsMock = vi.hoisted(() => vi.fn(async () => {}));
 const tempDirs: string[] = [];
@@ -101,22 +98,15 @@ vi.mock("../../gateway/session-archive.runtime.js", async (importOriginal) => {
   };
 });
 
-function createTestTrajectoryEvent(sessionId: string): TrajectoryEvent {
-  return {
-    traceSchema: "openclaw-trajectory",
-    schemaVersion: 1,
-    traceId: sessionId,
-    source: "runtime",
-    type: "test.concurrent-write",
-    ts: "2026-07-09T00:00:00.000Z",
-    seq: 1,
-    sessionId,
-  };
-}
-
-function createManualCompactRecords(sessionId: string) {
+function createManualCompactRecords(sessionId: string, cwd?: string) {
   return [
-    { type: "session", version: 3, id: sessionId, timestamp: "2026-06-19T12:00:00.000Z" },
+    {
+      type: "session",
+      version: 3,
+      id: sessionId,
+      timestamp: "2026-06-19T12:00:00.000Z",
+      ...(cwd ? { cwd } : {}),
+    },
     ...[1, 2, 3, 4].map((index) => ({
       type: "message",
       id: `entry-${index}`,
@@ -130,9 +120,10 @@ function createManualCompactRecords(sessionId: string) {
 describe("session accessor seam", () => {
   let tempDir: string;
   let storePath: string;
-  let transcriptPath: string;
-  let cleanupProbeDatabasePath = "";
-  let cleanupProbeRoot = "";
+
+  function transcriptScope(sessionId: string, sessionKey: string) {
+    return { agentId: "main", sessionId, sessionKey, storePath };
+  }
 
   function loadMainInitializationSnapshot(sessionKey: string) {
     return loadReplySessionInitializationSnapshot({ agentId: "main", sessionKey, storePath });
@@ -142,53 +133,30 @@ describe("session accessor seam", () => {
     cleanupArchivedSessionTranscriptsMock.mockReset();
     tempDir = makeTempDir(tempDirs, "openclaw-session-accessor-");
     storePath = path.join(tempDir, "sessions.json");
-    transcriptPath = path.join(tempDir, "session.jsonl");
   });
 
-  afterEach(() => {
+  function cleanupSessionDatabasesAndTempDirs() {
     closeOpenClawAgentDatabasesForTest();
     closeOpenClawStateDatabaseForTest();
     cleanupTempDirs(tempDirs);
-  });
+  }
 
-  describe.sequential("session database teardown boundary", () => {
-    it("opens cached agent and shared-state handles", async () => {
-      await replaceSessionEntry(
-        { agentId: "main", sessionKey: "agent:main:cleanup-probe", storePath },
-        { sessionId: "cleanup-probe", updatedAt: 1 },
-      );
-      cleanupProbeDatabasePath = expectDefined(
-        resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
-        "cleanup probe database path",
-      );
-      cleanupProbeRoot = tempDir;
+  afterEach(cleanupSessionDatabasesAndTempDirs);
 
-      expect(isOpenClawAgentDatabaseOpen(cleanupProbeDatabasePath)).toBe(true);
-      expect(isOpenClawStateDatabaseOpen()).toBe(true);
-    });
-
-    it("releases both cache owners before the next test", () => {
-      expect(isOpenClawAgentDatabaseOpen(cleanupProbeDatabasePath)).toBe(false);
-      expect(isOpenClawStateDatabaseOpen()).toBe(false);
-      expect(fs.existsSync(cleanupProbeRoot)).toBe(false);
-    });
-  });
-
-  it("returns typed sync event append outcomes for missing, rebound, and duplicate rows", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "expected-session",
-      sessionKey: "agent:main:typed-append",
-      storePath,
-    };
+  it("returns typed sync append outcomes for missing, rebound, and duplicate rows", async () => {
+    const scope = transcriptScope("expected-session", "agent:main:typed-append");
     const event = { type: "custom", id: "typed-event", timestamp: 1 };
+    const identity = {
+      agentIdHash: redactIdentifier(scope.agentId),
+      expectedSessionIdHash: redactIdentifier(scope.sessionId),
+      sessionKeyHash: redactIdentifier(scope.sessionKey),
+    };
 
     expect(appendTranscriptEventSync(scope, event)).toEqual({
       ok: false,
       error: {
+        ...identity,
         code: "session-entry-missing",
-        expectedSessionId: scope.sessionId,
-        sessionKey: scope.sessionKey,
       },
     });
 
@@ -196,147 +164,28 @@ describe("session accessor seam", () => {
     expect(appendTranscriptEventSync(scope, event)).toEqual({
       ok: false,
       error: {
-        actualSessionId: "replacement-session",
+        ...identity,
+        actualSessionIdHash: redactIdentifier("replacement-session"),
         code: "session-rebound",
-        expectedSessionId: scope.sessionId,
-        sessionKey: scope.sessionKey,
+      },
+    });
+    expect(
+      appendTranscriptMessageSync(scope, {
+        eventId: "typed-message",
+        message: { role: "user", content: "late" },
+      }),
+    ).toEqual({
+      ok: false,
+      error: {
+        ...identity,
+        actualSessionIdHash: redactIdentifier("replacement-session"),
+        code: "session-rebound",
       },
     });
 
     await upsertSessionEntryCore(scope, { sessionId: scope.sessionId, updatedAt: 2 });
     expect(appendTranscriptEventSync(scope, event)).toEqual({ ok: true, value: true });
     expect(appendTranscriptEventSync(scope, event)).toEqual({ ok: true, value: false });
-  });
-
-  it("loads, lists, and patches session entries without exposing the file store shape", async () => {
-    const scope = {
-      sessionKey: "agent:main:main",
-      storePath,
-    };
-
-    await upsertSessionEntryCore(scope, {
-      model: "gpt-5.5",
-      sessionId: "session-1",
-      updatedAt: 10,
-    });
-
-    expect(loadSessionEntry(scope)).toMatchObject({
-      model: "gpt-5.5",
-      sessionId: "session-1",
-      updatedAt: expect.any(Number),
-    });
-    expect(readSessionUpdatedAtCore(scope)).toEqual(expect.any(Number));
-    expect(listSessionEntriesCore({ storePath })).toEqual([
-      {
-        sessionKey: "agent:main:main",
-        entry: expect.objectContaining({
-          model: "gpt-5.5",
-          sessionId: "session-1",
-          updatedAt: expect.any(Number),
-        }),
-      },
-    ]);
-
-    await upsertSessionEntryCore(scope, { model: "sonnet-4.6", updatedAt: 20 });
-
-    expect(loadSessionEntry(scope)).toMatchObject({
-      model: "sonnet-4.6",
-      sessionId: "session-1",
-      updatedAt: expect.any(Number),
-    });
-  });
-
-  it("derives a scoped key owner before fixed-store read and write target resolution", async () => {
-    const fixedStorePath = path.join(tempDir, "fixed-sessions.json");
-    const scope = {
-      defaultAgentId: "main",
-      sessionKey: "agent:ops:main",
-      storePath: fixedStorePath,
-    };
-
-    await replaceSessionEntry(scope, {
-      sessionId: "ops-session",
-      updatedAt: 10,
-    });
-
-    expect(loadSessionEntry(scope)).toMatchObject({ sessionId: "ops-session" });
-    await expect(loadTranscriptEvents({ ...scope, sessionId: "ops-session" })).resolves.toEqual([]);
-    const opsPath = resolveSqliteTargetFromSessionStorePath(fixedStorePath, {
-      agentId: "ops",
-      defaultAgentId: "main",
-    }).path;
-    const mainPath = resolveSqliteTargetFromSessionStorePath(fixedStorePath, {
-      agentId: "main",
-      defaultAgentId: "main",
-    }).path;
-    expect(opsPath).not.toBe(mainPath);
-    expect(fs.existsSync(opsPath)).toBe(true);
-    expect(fs.existsSync(mainPath)).toBe(false);
-  });
-
-  it("excludes transcript-only nodes from logical entry counts and keys", async () => {
-    await replaceSessionEntry(
-      { sessionKey: "agent:main:logical-entry", storePath },
-      { sessionId: "logical-entry-session", updatedAt: 10 },
-    );
-    await replaceTranscriptEvents(
-      {
-        agentId: "main",
-        sessionId: "transcript-only-session",
-        sessionKey: "agent:main:transcript-only",
-        storePath,
-      },
-      [{ type: "session", id: "transcript-only-session" }],
-    );
-    const databasePath = expectDefined(
-      resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
-      "entry count database path",
-    );
-    const database = openOpenClawAgentDatabase({ agentId: "main", path: databasePath });
-
-    expect(readSessionEntryCount(database)).toBe(1);
-    expect(readSessionEntryKeys(database)).toEqual(["agent:main:logical-entry"]);
-    expect(countSessionEntryRowsReadOnly({ agentId: "main", storePath })).toBe(2);
-  });
-
-  it("counts rows on a cold handle without parsing invalid entry JSON", async () => {
-    await replaceSessionEntry(
-      { sessionKey: "agent:main:cold-count", storePath },
-      { sessionId: "cold-count-session", updatedAt: 10 },
-    );
-    const databasePath = expectDefined(
-      resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
-      "cold count database path",
-    );
-    closeOpenClawAgentDatabasesForTest();
-    const database = new DatabaseSync(databasePath);
-    database.prepare("UPDATE session_nodes SET entry_valid = 0").run();
-    database.close();
-
-    expect(countSessionEntryRowsReadOnly({ agentId: "main", storePath })).toBe(1);
-  });
-
-  it("retains legacy createdBy actor projections across rewrites", async () => {
-    const sessionKey = "agent:main:created-by";
-    await replaceSessionEntry({ sessionKey, storePath }, {
-      createdBy: { id: "legacy-human" },
-      sessionId: "created-by-session",
-      updatedAt: 10,
-    } as SessionEntry & { createdBy: { id: string } });
-    await upsertSessionEntryCore({ sessionKey, storePath }, { label: "rewritten" });
-    const databasePath = expectDefined(
-      resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
-      "createdBy database path",
-    );
-    const database = openOpenClawAgentDatabase({ agentId: "main", path: databasePath });
-
-    expect(
-      database.db
-        .prepare(
-          "SELECT created_actor_type, created_actor_id FROM session_nodes WHERE session_key = ?",
-        )
-        .get(sessionKey),
-    ).toEqual({ created_actor_type: "human", created_actor_id: "legacy-human" });
   });
 
   it("lists retained transcript instances across same-key session rotation", async () => {
@@ -397,12 +246,7 @@ describe("session accessor seam", () => {
   });
 
   it("marks transcript-only rows as unknown provenance", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "transcript-only",
-      sessionKey: "agent:main:transcript-only",
-      storePath,
-    };
+    const scope = transcriptScope("transcript-only", "agent:main:transcript-only");
     await appendTranscriptMessage(scope, {
       message: { role: "assistant", content: "orphan transcript" },
     });
@@ -550,35 +394,6 @@ describe("session accessor seam", () => {
     );
   });
 
-  it("loads parsed transcript events from store-derived SQLite targets", async () => {
-    const header = { type: "session", id: "session-events", timestamp: 1 };
-    const message = { type: "message", id: "m1", message: { role: "assistant" } };
-
-    // Transcript reads resolve to the SQLite transcript rows for the resolved
-    // agent-scoped session; there is no legacy custom sessionFile read path.
-    await upsertSessionEntryCore(
-      { sessionKey: "agent:main:main", storePath },
-      { sessionId: "session-events", updatedAt: 10 },
-    );
-    await replaceTranscriptEvents(
-      { agentId: "main", sessionId: "session-events", sessionKey: "agent:main:main", storePath },
-      [header, message],
-    );
-    const derived = await loadTranscriptEvents({
-      sessionId: "session-events",
-      sessionKey: "agent:main:main",
-      storePath,
-    });
-    expect(derived).toEqual([header, message]);
-
-    const missing = await loadTranscriptEvents({
-      sessionId: "session-absent",
-      sessionKey: "agent:main:main",
-      storePath,
-    });
-    expect(missing).toEqual([]);
-  });
-
   it("finds the newest matching transcript event without loading the whole transcript", async () => {
     const header = { type: "session", id: "session-find", timestamp: 1 };
     const older = { type: "message", id: "m1", message: { role: "assistant", tag: "old" } };
@@ -592,17 +407,49 @@ describe("session accessor seam", () => {
       [header, older, newer],
     );
 
-    const seen: unknown[] = [];
-    const found = await findTranscriptEvent(
-      { sessionId: "session-find", sessionKey: "agent:main:main", storePath },
-      (event) => {
-        seen.push(event);
-        return (event as { type?: string }).type === "message";
-      },
+    const databasePath = expectDefined(
+      resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
+      "transcript find database path",
     );
+    const database = openOpenClawAgentDatabase({ agentId: "main", path: databasePath });
+    const originalPrepare = database.db.prepare.bind(database.db);
+    let transcriptRowsRead = 0;
+    // Count SQLite rows rather than matcher calls: eager materialization happens before matching.
+    const prepareSpy = vi.spyOn(database.db, "prepare").mockImplementation((sql) => {
+      const statement = originalPrepare(sql);
+      return new Proxy(statement, {
+        get(target, property) {
+          if (property === "iterate") {
+            return (...params: Parameters<typeof target.iterate>) => {
+              const iterator = target.iterate(...params);
+              return (function* () {
+                for (const row of iterator) {
+                  if ("event_json" in row) {
+                    transcriptRowsRead += 1;
+                  }
+                  yield row;
+                }
+              })() as ReturnType<typeof target.iterate>;
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    });
+    const seen: unknown[] = [];
+    const found = await Promise.resolve()
+      .then(() =>
+        findTranscriptEventInDatabase(database, "session-find", (event) => {
+          seen.push(event);
+          return (event as { type?: string }).type === "message";
+        }),
+      )
+      .finally(() => prepareSpy.mockRestore());
     // Newest-first with early exit: the older message is never visited.
     expect(found).toEqual({ event: newer });
     expect(seen).toEqual([newer]);
+    expect(transcriptRowsRead).toBe(1);
 
     await replaceTranscriptEvents(
       { agentId: "main", sessionId: "session-falsy", sessionKey: "agent:main:falsy", storePath },
@@ -610,128 +457,15 @@ describe("session accessor seam", () => {
     );
     const falsy = await findTranscriptEvent(
       { sessionId: "session-falsy", sessionKey: "agent:main:falsy", storePath },
-      () => true,
+      { kind: "latest" },
     );
     expect(falsy).toEqual({ event: false });
 
     const missing = await findTranscriptEvent(
       { sessionId: "session-absent", sessionKey: "agent:main:main", storePath },
-      () => true,
+      { kind: "latest" },
     );
     expect(missing).toBeUndefined();
-  });
-
-  it("opens a borrowed read view with raw exact-key probes and deferred enumeration", async () => {
-    const mixedKey = "agent:main:matrix:channel:!RoomAbC:example.org";
-    await upsertSessionEntryCore(
-      { sessionKey: mixedKey, storePath },
-      { sessionId: "mixed-session", updatedAt: 10 },
-    );
-
-    const view = openSessionEntryReadView({ storePath });
-
-    expect(view.get(mixedKey)?.sessionId).toBe("mixed-session");
-    // Raw probe contract: unlike loadSessionEntry, no folded-alias or
-    // canonical-key resolution happens on get.
-    expect(view.get(mixedKey.toLowerCase())).toBeUndefined();
-    expect(view.entries()).toEqual([
-      {
-        sessionKey: mixedKey,
-        entry: expect.objectContaining({ sessionId: "mixed-session" }),
-      },
-    ]);
-  });
-
-  it("keeps case-distinct Matrix sessions separate under nested agent ownership", async () => {
-    const mixedKey = "agent:voice:agent:other:matrix:channel:!RoomAbC:example.org";
-    const lowerKey = "agent:voice:agent:other:matrix:channel:!Roomabc:example.org";
-
-    await upsertSessionEntryCore(
-      { sessionKey: mixedKey, storePath },
-      { sessionId: "mixed-session", updatedAt: 10 },
-    );
-    await upsertSessionEntryCore(
-      { sessionKey: lowerKey, storePath },
-      { sessionId: "lower-session", updatedAt: 20 },
-    );
-
-    expect(loadSessionEntry({ sessionKey: mixedKey, storePath })?.sessionId).toBe("mixed-session");
-    expect(loadSessionEntry({ sessionKey: lowerKey, storePath })?.sessionId).toBe("lower-session");
-    expect(
-      listSessionEntriesCore({ agentId: "voice", storePath }).map((entry) => entry.sessionKey),
-    ).toEqual([mixedKey, lowerKey]);
-  });
-
-  it("records inbound session meta as a createIfMissing upsert returning a detached entry", async () => {
-    const sessionKey = "agent:main:webchat:dm:user-1";
-    const ctx: MsgContext = {
-      Provider: "webchat",
-      Surface: "webchat",
-      ChatType: "direct",
-      From: "webchat:user-1",
-      To: "webchat:agent",
-      SessionKey: sessionKey,
-      OriginatingTo: "webchat:user-1",
-    };
-
-    const recorded = await recordInboundSessionMeta({ storePath, sessionKey, ctx });
-    expect(recorded?.delivery).toEqual({ kind: "internal" });
-    expect(recorded).toMatchObject({
-      chatType: "direct",
-      createdVia: "channel",
-      createdActor: { type: "human", id: "webchat:user-1" },
-      createdAt: expect.any(Number),
-    });
-    const creationStamp = {
-      createdVia: recorded?.createdVia,
-      createdActor: recorded?.createdActor,
-      createdAt: recorded?.createdAt,
-    };
-
-    await recordInboundSessionMeta({
-      storePath,
-      sessionKey,
-      ctx: { ...ctx, From: "webchat:different-sender" },
-    });
-    expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject(creationStamp);
-
-    // Detached result: caller mutations must never leak into cached store state.
-    if (recorded) {
-      recorded.delivery = { kind: "none" };
-    }
-    expect(loadSessionEntry({ sessionKey, storePath })?.delivery).toEqual({ kind: "internal" });
-
-    const operatorKey = "agent:main:dashboard:operator-created";
-    const operator = await recordInboundSessionMeta({
-      storePath,
-      sessionKey: operatorKey,
-      ctx: {
-        ...ctx,
-        SessionKey: operatorKey,
-        SessionCreation: {
-          via: "operator",
-          actor: { type: "human", id: "profile-ada" },
-        },
-      },
-    });
-    expect(operator).toMatchObject({
-      createdVia: "operator",
-      createdActor: { type: "human", id: "profile-ada" },
-      createdAt: expect.any(Number),
-    });
-  });
-
-  it("does not create sessions when inbound meta recording opts out of upsert", async () => {
-    const sessionKey = "agent:main:webchat:dm:absent";
-    const recorded = await recordInboundSessionMeta({
-      storePath,
-      sessionKey,
-      ctx: { Provider: "webchat", From: "webchat:absent", OriginatingTo: "webchat:absent" },
-      createIfMissing: false,
-    });
-
-    expect(recorded).toBeNull();
-    expect(loadSessionEntry({ sessionKey, storePath })).toBeUndefined();
   });
 
   it("preserves activity timestamps across inbound meta and last-route updates", async () => {
@@ -774,17 +508,61 @@ describe("session accessor seam", () => {
     expect(afterRoute?.updatedAt).toBe(anchorUpdatedAt);
   });
 
-  it("returns null from last-route updates for missing sessions when createIfMissing is false", async () => {
-    const sessionKey = "agent:main:webchat:dm:ghost";
-    const routed = await updateSessionLastRoute({
-      storePath,
-      sessionKey,
-      channel: "webchat",
-      to: "webchat:ghost",
-      createIfMissing: false,
+  it("preserves the conversation route when public metadata callers supply legacy heartbeat context", async () => {
+    const provider = "heartbeat";
+    const scope = { sessionKey: "agent:main:main", storePath };
+    const delivery: SessionEntry["delivery"] = {
+      kind: "external",
+      route: {
+        channel: "slack",
+        accountId: "work",
+        target: { to: "C123" },
+        thread: { id: "thread-1" },
+      },
+      context: { channel: "slack", accountId: "work", to: "C123", threadId: "thread-1" },
+      origin: {
+        provider: "slack",
+        surface: "slack",
+        to: "C123",
+        accountId: "work",
+        threadId: "thread-1",
+        nativeChannelId: "C123",
+      },
+    };
+    await replaceSessionEntry(scope, {
+      sessionId: "session-legacy-wake",
+      updatedAt: 10,
+      delivery,
     });
 
-    expect(routed).toBeNull();
+    await recordInboundSessionMeta({
+      ...scope,
+      ctx: { Provider: provider, Surface: provider, OriginatingChannel: provider },
+    });
+    expect(loadSessionEntry(scope)?.delivery).toEqual(delivery);
+
+    await updateSessionLastRoute({
+      ...scope,
+      ctx: { Provider: provider, Surface: provider, OriginatingChannel: provider },
+    });
+    expect(loadSessionEntry(scope)?.delivery).toEqual(delivery);
+  });
+
+  it("runs the last-route ownership guard at the SQLite commit edge", async () => {
+    const sessionKey = "agent:main:webchat:dm:revoked-route";
+
+    await expect(
+      updateSessionLastRoute({
+        storePath,
+        sessionKey,
+        channel: "webchat",
+        to: "webchat:revoked-route",
+        assertCommitAllowed: () => {
+          throw new Error("route owner changed");
+        },
+      }),
+    ).rejects.toThrow("route owner changed");
+
     expect(loadSessionEntry({ sessionKey, storePath })).toBeUndefined();
   });
 
@@ -798,7 +576,7 @@ describe("session accessor seam", () => {
       { sessionId: "legacy-session", updatedAt: 20 },
     );
     const notify = vi.fn();
-    const unsubscribe = onSessionIdentityMutation(notify);
+    onTestFinished(onSessionIdentityMutation(notify));
     await expect(
       patchSessionEntryTarget(
         {
@@ -853,7 +631,6 @@ describe("session accessor seam", () => {
       target,
     });
     await deleteSessionEntryLifecycle({ archiveTranscript: false, storePath, target });
-    unsubscribe();
 
     expect(notify.mock.calls.map(([event]) => event.kind)).toEqual([
       "delete",
@@ -890,52 +667,29 @@ describe("session accessor seam", () => {
     });
   });
 
-  it("does not persist abort target changes when the entry is absent", async () => {
-    const result = await markSessionAbortTarget({
-      scope: {
-        sessionKey: "agent:main:missing",
-        storePath,
-      },
-      resolveAbortCutoff: () => ({ messageSid: "unused" }),
-    });
-
-    expect(result).toBeNull();
-    expect(fs.existsSync(storePath)).toBe(false);
-  });
-
-  it("returns an implicit candidate fallback without persisting it", () => {
-    const resolved = resolveSessionEntryCandidateTarget({
-      agentId: "main",
-      candidateKeys: ["agent:main:missing"],
-      cfg: { session: { store: storePath } },
-      fallback: {
-        sessionKey: "agent:main:current",
-        entry: {
-          sessionId: "",
-          updatedAt: 40,
-        },
-      },
-    });
-
-    expect(resolved).toEqual({
-      agentId: "main",
-      candidateKey: "agent:main:current",
-      entry: {
-        sessionId: "",
-        updatedAt: 40,
-      },
-      persisted: false,
-      sessionKey: "agent:main:current",
-    });
-    expect(fs.existsSync(storePath)).toBe(false);
-  });
-
-  it("does not parse unrelated blobs across canonical candidate and transcript reads", async () => {
+  it("does not parse unrelated blobs across focused child, candidate, and transcript reads", async () => {
     const sessionKey = "agent:main:focused-session";
     await upsertSessionEntryCore(
       { agentId: "main", sessionKey, storePath },
       { sessionId: "focused-session", updatedAt: 42 },
     );
+    for (const [childSessionKey, lineage] of [
+      ["agent:main:focused-both-child", { spawnedBy: sessionKey }],
+      ["agent:main:focused-parent-child", { parentSessionKey: sessionKey }],
+      [
+        "agent:main:focused-spawned-child",
+        { parentSessionKey: "agent:main:other-parent", spawnedBy: sessionKey },
+      ],
+    ] as const) {
+      await upsertSessionEntryCore(
+        { agentId: "main", sessionKey: childSessionKey, storePath },
+        { ...lineage, sessionId: childSessionKey, updatedAt: 43 },
+      );
+      recordSessionParticipant(
+        { agentId: "main", sessionKey: childSessionKey, storePath },
+        { identity: { type: "agent", id: childSessionKey }, promptedAt: 43 },
+      );
+    }
     const databasePath = expectDefined(
       resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
       "focused session database path",
@@ -949,7 +703,31 @@ describe("session accessor seam", () => {
       .run("agent:main:unrelated-session", "unrelated-session", unrelatedEntryJson, 1);
 
     const parse = vi.spyOn(JSON, "parse");
+    const participantReads = trackSqliteStatementExecutions(database.db, ["participants"], (sql) =>
+      sql.includes('from "session_participants"') ? "participants" : null,
+    );
     try {
+      const children = listSessionChildEntriesReadOnly({ agentId: "main", sessionKey, storePath });
+      expect(children.map((child) => child.sessionKey)).toEqual([
+        "agent:main:focused-both-child",
+        "agent:main:focused-parent-child",
+        "agent:main:focused-spawned-child",
+      ]);
+      expect(
+        children.map(({ sessionKey: childKey, entry }) => ({
+          sessionKey: childKey,
+          participants: entry.participants,
+          participantCount: entry.participantCount,
+        })),
+      ).toEqual(
+        children.map(({ sessionKey: childKey }) => ({
+          sessionKey: childKey,
+          participants: [{ identity: { type: "agent", id: childKey } }],
+          participantCount: 1,
+        })),
+      );
+      expect(participantReads.counts.participants).toBeLessThanOrEqual(1);
+      expect(parse.mock.calls.filter(([value]) => value === unrelatedEntryJson)).toHaveLength(0);
       expect(
         resolveSessionEntrySelection({ agentId: "main", sessionKey, storePath }),
       ).toMatchObject({
@@ -975,206 +753,99 @@ describe("session accessor seam", () => {
       ).toMatchObject({ agentId: "main", sessionId: "focused-session", sessionKey });
       expect(parse.mock.calls.filter(([value]) => value === unrelatedEntryJson)).toHaveLength(0);
     } finally {
+      participantReads.restore();
       parse.mockRestore();
     }
   });
 
-  it("resolves non-main candidate entries from custom agent store templates", async () => {
-    const storeTemplate = path.join(tempDir, "{agentId}.json");
-    const supportStorePath = path.join(tempDir, "support.json");
-    await upsertSessionEntryCore(
-      {
-        agentId: "support",
-        sessionKey: "agent:support:main",
-        storePath: supportStorePath,
-      },
-      {
-        sessionId: "support-session",
-        updatedAt: 30,
-      },
-    );
+  it.each([
+    { sessionKey: "global", agentId: "research", global: true },
+    { sessionKey: "main", agentId: "research", global: false },
+  ])(
+    "keeps logical owner reads and updates isolated for $sessionKey with owner $agentId",
+    async ({ sessionKey, agentId: requestedAgentId, global }) => {
+      const cfg: OpenClawConfig = {
+        session: {
+          store: path.join(tempDir, "{agentId}.json"),
+          scope: global ? "global" : undefined,
+        },
+        agents: { entries: { research: {}, ops: {} } },
+      };
+      const canonicalKey = global ? "global" : "agent:research:main";
+      for (const agentId of ["research", "ops"]) {
+        await upsertSessionEntryCore(
+          {
+            agentId,
+            sessionKey: global ? "global" : `agent:${agentId}:main`,
+            storePath: path.join(tempDir, `${agentId}.json`),
+          },
+          { sessionId: `${agentId}-session`, updatedAt: 1, label: agentId },
+        );
+      }
+      const scope = { cfg, sessionKey, agentId: requestedAgentId };
 
-    const resolved = resolveSessionEntryCandidateTarget({
-      agentId: "support",
-      candidateKeys: ["agent:support:main"],
-      cfg: {
-        session: { store: storeTemplate },
-        agents: { entries: { support: { default: true } } },
-      },
-    });
+      expect(resolveSessionEntryAccessTarget(scope)).toMatchObject({
+        agentId: "research",
+        canonicalKey,
+        entry: { sessionId: "research-session", label: "research" },
+      });
+      const updated = await updateResolvedSessionEntry(scope, (entry) => {
+        entry.label = "updated research";
+        return entry.sessionId;
+      });
 
-    expect(resolved).toMatchObject({
-      agentId: "support",
-      candidateKey: "agent:support:main",
-      entry: { sessionId: "support-session" },
-      persisted: true,
-      sessionKey: "agent:support:main",
-    });
-  });
+      expect(updated).toMatchObject({ found: true, result: "research-session", canonicalKey });
+      expect(resolveSessionEntryAccessTarget(scope).entry?.label).toBe("updated research");
+      expect(
+        loadSessionEntry({
+          agentId: "ops",
+          sessionKey: global ? "global" : "agent:ops:main",
+          storePath: path.join(tempDir, "ops.json"),
+        })?.label,
+      ).toBe("ops");
+    },
+  );
 
-  it("resolves non-main logical entries from custom agent store templates", async () => {
-    const storeTemplate = path.join(tempDir, "{agentId}.json");
-    const supportStorePath = path.join(tempDir, "support.json");
-    await upsertSessionEntryCore(
-      {
-        agentId: "support",
-        sessionKey: "agent:support:main",
-        storePath: supportStorePath,
-      },
-      {
-        sessionId: "support-session",
-        updatedAt: 30,
-      },
-    );
-
-    const resolved = resolveSessionEntryAccessTarget({
-      cfg: {
-        session: { store: storeTemplate },
-        agents: { entries: { support: { default: true } } },
-      },
-      sessionKey: "agent:support:main",
-    });
-
-    expect(resolved).toMatchObject({
-      agentId: "support",
-      canonicalKey: "agent:support:main",
-      entry: { sessionId: "support-session" },
-      requestedKey: "agent:support:main",
-      storeKey: "agent:support:main",
-    });
-  });
-
-  it("creates durable session ids for metadata-only inserts", async () => {
-    const scope = {
-      sessionKey: "agent:main:main",
-      storePath,
-    };
-
-    const inserted = await upsertSessionEntryCore(scope, { model: "gpt-5.5" });
-
-    expect(inserted?.sessionId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-    );
-    expect(inserted?.sessionId).not.toBe(scope.sessionKey);
-    expect(loadSessionEntry(scope)?.sessionId).toBe(inserted?.sessionId);
-  });
-
-  it("creates entries with initialized SQLite transcripts and scoped session metadata", async () => {
-    const scope = {
-      agentId: "main",
-      sessionKey: "agent:main:main",
-      storePath,
-    };
-
-    const created = await createSessionEntryWithTranscript(scope, ({ sessionEntries }) => {
-      expect(sessionEntries).toEqual({});
-      return {
-        ok: true,
-        entry: {
-          sessionId: "session-1",
-          updatedAt: 10,
+  it.each(
+    ["ops", "retired"].flatMap((storeOwner) =>
+      ["agent:research:main"].map((sessionKey) => ({ storeOwner, sessionKey })),
+    ),
+  )(
+    "preserves fixed global owner $storeOwner after canonicalizing $sessionKey",
+    async ({ storeOwner, sessionKey }) => {
+      const sharedStorePath = path.join(tempDir, "shared.sqlite");
+      const storedScope = {
+        agentId: storeOwner,
+        defaultAgentId: storeOwner,
+        storePath: sharedStorePath,
+        sessionKey: "global",
+      };
+      await upsertSessionEntryCore(storedScope, {
+        sessionId: `${storeOwner}-session`,
+        updatedAt: 1,
+        label: "original owner label",
+      });
+      const cfg: OpenClawConfig = {
+        session: { store: sharedStorePath, scope: "global" },
+        agents: {
+          entries: { research: {}, ops: {} },
+          defaults: { sessionStore: { agentId: storeOwner } },
         },
       };
-    });
+      const scope = { cfg, sessionKey, agentId: "research" };
+      const expectedError = storeOwner === "retired" ? "retired" : 'belongs to "ops"';
 
-    expect(created.ok).toBe(true);
-    if (!created.ok) {
-      throw new Error("expected session creation to succeed");
-    }
-    expect(created.sessionFile).toBe(scope.sessionKey);
-    expect(created.entry).not.toHaveProperty("sessionFile");
-    await expect(
-      loadTranscriptEvents({
-        agentId: "main",
-        sessionId: "session-1",
-        sessionKey: "agent:main:main",
-        storePath,
-      }),
-    ).resolves.toEqual([expect.objectContaining({ id: "session-1", type: "session" })]);
-  });
-
-  it("resolves the default-store SQLite identity before appending", async () => {
-    const stateDir = path.join(tempDir, "state");
-    const expectedStorePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
-    const scope = {
-      agentId: "main",
-      env: {
-        ...process.env,
-        OPENCLAW_STATE_DIR: stateDir,
-      },
-      sessionId: "default-store-turn-session",
-      sessionKey: "agent:main:default-store-turn",
-    };
-    await upsertSessionEntryCore(
-      { ...scope, storePath: expectedStorePath },
-      {
-        sessionId: scope.sessionId,
-        updatedAt: 10,
-      },
-    );
-
-    const result = await persistSessionTranscriptTurn(scope, {
-      messages: [{ message: { role: "user", content: "default store sqlite turn" } }],
-      touchSessionEntry: true,
-      updateMode: "none",
-    });
-
-    const persistedScope = { ...scope, storePath: expectedStorePath };
-    expect(result.sessionEntry).not.toHaveProperty("sessionFile");
-    expect(loadSessionEntry(persistedScope)).not.toHaveProperty("sessionFile");
-    await expect(loadTranscriptEvents(persistedScope)).resolves.toContainEqual(
-      expect.objectContaining({
-        type: "message",
-        message: expect.objectContaining({
-          role: "user",
-          content: "default store sqlite turn",
-        }),
-      }),
-    );
-  });
-
-  it("rejects a transcript turn when the session id rotates mid-append", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "old-rotate-session",
-      sessionKey: "agent:main:turn-rotate",
-      storePath,
-    };
-    await replaceSessionEntry(
-      { sessionKey: scope.sessionKey, storePath },
-      { sessionId: scope.sessionId, updatedAt: Date.now() },
-    );
-
-    const result = await persistSessionTranscriptTurn(scope, {
-      messages: [
-        {
-          message: { role: "user", content: "rotate-hello", timestamp: Date.now() },
-          shouldAppend: async () => {
-            // Simulate a concurrent reset rotating the session id between target
-            // resolution and the transcript append.
-            await replaceSessionEntry(
-              { sessionKey: scope.sessionKey, storePath },
-              { sessionId: "new-rotate-session", updatedAt: Date.now() },
-            );
-            return true;
-          },
-        },
-      ],
-      touchSessionEntry: true,
-      updateMode: "none",
-    });
-
-    expect(result.rejectedReason).toBe("session-rebound");
-    // The message must not be silently written into the stale session transcript.
-    await expect(
-      loadTranscriptEvents({ ...scope, sessionId: "old-rotate-session" }),
-    ).resolves.not.toContainEqual(
-      expect.objectContaining({
-        type: "message",
-        message: expect.objectContaining({ content: "rotate-hello" }),
-      }),
-    );
-  });
+      expect.soft(() => resolveSessionEntryAccessTarget(scope)).toThrow(expectedError);
+      await expect
+        .soft(
+          updateResolvedSessionEntry(scope, (entry) => {
+            entry.label = "wrong owner mutation";
+          }),
+        )
+        .rejects.toThrow(expectedError);
+      expect(loadSessionEntry(storedScope)?.label).toBe("original owner label");
+    },
+  );
 
   it("rejects a default-store transcript turn when the session id rotates mid-append", async () => {
     // Caller omits storePath; resolveTranscriptTurnTarget derives the default
@@ -1196,8 +867,8 @@ describe("session accessor seam", () => {
       messages: [
         {
           message: { role: "user", content: "default-rotate-hello", timestamp: Date.now() },
-          shouldAppend: async () => {
-            await replaceSessionEntry(
+          shouldAppend: () => {
+            replaceSessionEntrySync(
               { sessionKey: scope.sessionKey, storePath: expectedStorePath },
               { sessionId: "new-default-rotate", updatedAt: Date.now() },
             );
@@ -1321,8 +992,8 @@ describe("session accessor seam", () => {
       messages: [
         {
           message: { role: "user", content: "durable-fallback-hello", timestamp: Date.now() },
-          shouldAppend: async () => {
-            await replaceSessionEntry(
+          shouldAppend: () => {
+            replaceSessionEntrySync(
               { sessionKey: scope.sessionKey, storePath },
               { sessionId: "new-durable-fallback", updatedAt: Date.now() },
             );
@@ -1335,103 +1006,6 @@ describe("session accessor seam", () => {
     });
 
     expect(result.rejectedReason).toBe("session-rebound");
-  });
-
-  it("rejects a transcript turn when the session id rotates before target resolution", async () => {
-    // A reset wins before resolveTranscriptTurnTarget reads the entry, so the
-    // resolved entry already holds the replacement id. The caller still passes
-    // its old id. The guarded transaction must use the caller's id (not the
-    // resolved entry's) to detect the mismatch and reject.
-    const scope = {
-      agentId: "main",
-      sessionId: "old-preresolve-session",
-      sessionKey: "agent:main:preresolve-rotate",
-      storePath,
-    };
-    // Rotate the entry before the turn is attempted — resolve will read the new id.
-    await replaceSessionEntry(
-      { sessionKey: scope.sessionKey, storePath },
-      { sessionId: "new-preresolve-session", updatedAt: Date.now() },
-    );
-
-    const result = await persistSessionTranscriptTurn(scope, {
-      messages: [{ message: { role: "user", content: "preresolve-hello", timestamp: Date.now() } }],
-      touchSessionEntry: true,
-      updateMode: "none",
-    });
-
-    expect(result.rejectedReason).toBe("session-rebound");
-    await expect(
-      loadTranscriptEvents({ ...scope, sessionId: "new-preresolve-session" }),
-    ).resolves.not.toContainEqual(
-      expect.objectContaining({
-        type: "message",
-        message: expect.objectContaining({ content: "preresolve-hello" }),
-      }),
-    );
-  });
-
-  it("appends SQLite turns to the active transcript leaf", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "branched-topic-session",
-      sessionKey: "agent:main:telegram:group:1:topic:4",
-      storePath,
-    };
-    await replaceTranscriptEvents(scope, [
-      { type: "session", version: 3, id: scope.sessionId },
-      {
-        type: "message",
-        id: "root",
-        parentId: null,
-        message: { role: "user", content: "root prompt" },
-      },
-      {
-        type: "message",
-        id: "abandoned",
-        parentId: "root",
-        message: { role: "assistant", content: "abandoned answer" },
-      },
-      {
-        type: "leaf",
-        id: "select-root",
-        parentId: "abandoned",
-        targetId: "root",
-        appendParentId: "root",
-      },
-    ]);
-
-    await persistSessionTranscriptTurn(scope, {
-      messages: [{ message: { role: "assistant", content: "active answer" } }],
-      updateMode: "none",
-    });
-
-    const appended = (await loadTranscriptEvents(scope)).at(-1);
-    expect(appended).toMatchObject({
-      type: "message",
-      parentId: "root",
-      message: { role: "assistant", content: "active answer" },
-    });
-  });
-
-  it("does not persist the entry when creation validation fails", async () => {
-    const scope = {
-      agentId: "main",
-      sessionKey: "agent:main:main",
-      storePath,
-    };
-
-    const created = await createSessionEntryWithTranscript(scope, () => ({
-      error: "invalid patch",
-      ok: false,
-    }));
-
-    expect(created).toMatchObject({
-      ok: false,
-      phase: "entry",
-    });
-    expect(loadSessionEntry(scope)).toBeUndefined();
-    expect(listSessionEntriesCore({ storePath })).toEqual([]);
   });
 
   it("does not write the session database when entry preparation is rejected", async () => {
@@ -1466,60 +1040,7 @@ describe("session accessor seam", () => {
     });
   });
 
-  it("rejects stale reply session initialization snapshots without writing", async () => {
-    const sessionKey = "agent:main:main";
-    await upsertSessionEntryCore(
-      { sessionKey, storePath },
-      {
-        sessionId: "first-session",
-        updatedAt: 10,
-      },
-    );
-    const snapshot = loadMainInitializationSnapshot(sessionKey);
-    await upsertSessionEntryCore(
-      { sessionKey, storePath },
-      {
-        sessionId: "second-session",
-        updatedAt: 20,
-      },
-    );
-
-    const committed = await commitReplySessionInitialization({
-      activeSessionKey: sessionKey,
-      agentId: "main",
-      expectedRevision: snapshot.revision,
-      sessionEntry: {
-        sessionId: "stale-session",
-        updatedAt: 30,
-      },
-      sessionKey,
-      storePath,
-    });
-
-    expect(committed).toMatchObject({
-      ok: false,
-      reason: "stale-snapshot",
-    });
-    expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject({
-      sessionId: "second-session",
-    });
-  });
-
   it.each([
-    {
-      name: "commits reply session initialization despite active-turn metadata changes",
-      initial: {},
-      concurrent: { compactionCount: 1, totalTokensFresh: false, updatedAt: 11 },
-      prepared: {},
-      expected: { compactionCount: 1, totalTokensFresh: false },
-    },
-    {
-      name: "commits reply session initialization despite non-identity metadata changes",
-      initial: { lastHeartbeatSentAt: 100, lastHeartbeatText: "heartbeat-1" },
-      concurrent: { lastHeartbeatSentAt: 200, lastHeartbeatText: "heartbeat-2" },
-      prepared: { lastHeartbeatSentAt: 100, lastHeartbeatText: "heartbeat-1" },
-      expected: { lastHeartbeatSentAt: 200, lastHeartbeatText: "heartbeat-2" },
-    },
     {
       name: "preserves concurrent optional additions when prepared fields are undefined",
       initial: {},
@@ -1673,26 +1194,6 @@ describe("session accessor seam", () => {
     expect(persisted?.pendingFinalDelivery).toBeUndefined();
   });
 
-  it("rejects reply session initialization writes to a legacy alias", async () => {
-    await expect(
-      applySessionEntryLifecycleMutation({
-        storePath,
-        upserts: [
-          {
-            sessionKey: "Agent:Main:Main",
-            entry: {
-              sessionId: "legacy-alias-session",
-              updatedAt: 10,
-            },
-          },
-        ],
-      }),
-    ).rejects.toMatchObject({
-      code: "SESSION_CANONICAL_KEY_MIGRATION_REQUIRED",
-      message: expect.stringContaining("openclaw doctor --fix"),
-    });
-  });
-
   it("rejects a reply initialization key scoped to another explicit agent", () => {
     try {
       loadReplySessionInitializationSnapshot({
@@ -1767,24 +1268,6 @@ describe("session accessor seam", () => {
     }
   });
 
-  it("supports multiple logical agents in an explicit shared SQLite store", async () => {
-    const sharedStorePath = path.join(tempDir, "shared.sqlite");
-    await upsertSessionEntryCore(
-      { agentId: "main", sessionKey: "agent:main:shared", storePath: sharedStorePath },
-      { sessionId: "main-shared", updatedAt: 10 },
-    );
-    await upsertSessionEntryCore(
-      { agentId: "ops", sessionKey: "agent:ops:shared", storePath: sharedStorePath },
-      { sessionId: "ops-shared", updatedAt: 20 },
-    );
-
-    expect(
-      listSessionEntriesCore({ agentId: "main", storePath: sharedStorePath }).map(
-        ({ sessionKey }) => sessionKey,
-      ),
-    ).toEqual(["agent:main:shared", "agent:ops:shared"]);
-  });
-
   it("rejects reply session initialization when the entry is deleted during prepare", async () => {
     const sessionKey = "agent:main:main";
     await upsertSessionEntryCore(
@@ -1822,106 +1305,27 @@ describe("session accessor seam", () => {
     expect(loadSessionEntry({ sessionKey, storePath })).toBeUndefined();
   });
 
-  it("updates existing entries without creating missing sessions", async () => {
+  it("keeps a pending reset through bookkeeping until an explicit consumer resolves it", async () => {
     const scope = {
-      sessionKey: "agent:main:main",
+      sessionKey: "agent:main:pending-reset",
       storePath,
     };
-
-    await expect(updateSessionEntry(scope, () => ({ model: "gpt-5.5" }))).resolves.toBeNull();
-    expect(listSessionEntriesCore({ storePath })).toEqual([]);
-
-    await upsertSessionEntryCore(scope, {
-      sessionId: "session-1",
-      updatedAt: 10,
-    });
-    const beforeNullUpdate = loadSessionEntry(scope);
-    await expect(updateSessionEntry(scope, () => null)).resolves.toEqual(beforeNullUpdate);
-    expect(loadSessionEntry(scope)).toMatchObject({
-      sessionId: "session-1",
-      updatedAt: beforeNullUpdate?.updatedAt,
-    });
-    await expect(
-      updateSessionEntry(scope, () => ({ model: "gpt-5.5", updatedAt: 20 })),
-    ).resolves.toMatchObject({
-      model: "gpt-5.5",
-      sessionId: "session-1",
-      updatedAt: expect.any(Number),
-    });
-  });
-
-  it("replaces entries so deleted fields stay removed", async () => {
-    const scope = {
-      sessionKey: "agent:main:main",
-      storePath,
-    };
-
-    await upsertSessionEntryCore(scope, {
-      model: "gpt-5.5",
-      providerOverride: "openai",
-      sessionId: "session-1",
-      updatedAt: 10,
-    });
-
     await replaceSessionEntry(scope, {
-      sessionId: "session-1",
-      updatedAt: 20,
+      sessionId: "pending-reset-session",
+      lifecycleRevision: "pending-reset-revision",
+      updatedAt: 0,
     });
 
-    expect(loadSessionEntry(scope)).toMatchObject({
-      sessionId: "session-1",
-      updatedAt: expect.any(Number),
+    await updateSessionEntry(scope, () => ({ model: "gpt-5.5", updatedAt: Date.now() }));
+    expect(loadSessionEntry(scope)).toMatchObject({ model: "gpt-5.5", updatedAt: 0 });
+
+    await markSessionAbortTarget({ scope });
+    expect(loadSessionEntry(scope)).toMatchObject({ abortedLastRun: true, updatedAt: 0 });
+
+    await updateSessionEntry(scope, () => ({ updatedAt: Date.now() }), {
+      consumePendingReset: true,
     });
-    expect(loadSessionEntry(scope)?.model).toBeUndefined();
-    expect(loadSessionEntry(scope)?.providerOverride).toBeUndefined();
-  });
-
-  it("patches entries atomically with a fallback entry", async () => {
-    const scope = {
-      sessionKey: "agent:main:main",
-      storePath,
-    };
-    let missingContextEntry: SessionEntry | undefined;
-    let existingContextEntry: SessionEntry | undefined;
-
-    await patchSessionEntryCore(
-      scope,
-      (entry, context) => {
-        missingContextEntry = context.existingEntry;
-        return {
-          ...entry,
-          model: "gpt-5.5",
-        };
-      },
-      {
-        fallbackEntry: {
-          sessionId: "session-1",
-          updatedAt: 10,
-        },
-        replaceEntry: true,
-      },
-    );
-
-    await patchSessionEntryCore(
-      scope,
-      (entry, context) => {
-        existingContextEntry = context.existingEntry;
-        return {
-          ...entry,
-          model: undefined,
-          providerOverride: "openai",
-        };
-      },
-      { replaceEntry: true },
-    );
-
-    expect(missingContextEntry).toBeUndefined();
-    expect(existingContextEntry).toMatchObject({ model: "gpt-5.5" });
-    expect(loadSessionEntry(scope)).toMatchObject({
-      providerOverride: "openai",
-      sessionId: "session-1",
-    });
-    expect(loadSessionEntry(scope)?.model).toBeUndefined();
+    expect(loadSessionEntry(scope)?.updatedAt).toBeGreaterThan(0);
   });
 
   it("rejects a patch when its commit-edge ownership guard retires", async () => {
@@ -1945,85 +1349,61 @@ describe("session accessor seam", () => {
     expect(loadSessionEntry(scope)?.model).toBeUndefined();
   });
 
-  it("can patch metadata without refreshing session activity", async () => {
-    const scope = {
-      sessionKey: "agent:main:main",
-      storePath,
-    };
-
-    await upsertSessionEntryCore(scope, {
-      sessionId: "session-1",
-      updatedAt: 10,
-    });
-    const beforePatch = loadSessionEntry(scope);
-
-    await patchSessionEntryCore(
-      scope,
-      () => ({
-        model: "gpt-5.5",
-        updatedAt: 20,
-      }),
-      { preserveActivity: true },
-    );
-
-    expect(loadSessionEntry(scope)).toMatchObject({
-      model: "gpt-5.5",
-      sessionId: "session-1",
-      updatedAt: beforePatch?.updatedAt,
-    });
-  });
-
   it("applies explicit replacements without exposing mutable store rows", async () => {
     await applySessionEntryLifecycleMutation({
       storePath,
-      upserts: [
-        {
-          sessionKey: "agent:main:main",
-          entry: {
-            sessionId: "session-1",
-            status: "running",
-            updatedAt: 10,
-          },
-        },
-        {
-          sessionKey: "agent:main:other",
-          entry: {
-            sessionId: "session-2",
-            status: "running",
-            updatedAt: 20,
-          },
-        },
-        {
-          sessionKey: "agent:main:done",
-          entry: {
-            sessionId: "session-done",
-            status: "done",
-            updatedAt: 25,
-          },
-        },
-        {
-          sessionKey: "agent:main:shared-running",
-          entry: {
-            sessionId: "session-shared",
-            status: "running",
-            updatedAt: 26,
-          },
-        },
-        {
-          sessionKey: "agent:main:shared-done",
-          entry: {
-            sessionId: "session-shared",
-            status: "done",
-            updatedAt: 27,
-          },
-        },
-      ],
+      upserts: (
+        [
+          ["main", "session-1", "running", 10],
+          ["other", "session-2", "running", 20],
+          ["done", "session-done", "done", 25],
+          ["shared-running", "session-shared", "running", 26],
+          ["shared-done", "session-shared", "done", 27],
+        ] as const
+      ).map(([suffix, sessionId, status, updatedAt]) => ({
+        sessionKey: `agent:main:${suffix}`,
+        entry: { sessionId, status, updatedAt },
+      })),
       skipMaintenance: true,
     });
+    const doneOwner = { id: "done-owner", type: "human" as const };
+    assignSessionOwner(
+      { sessionKey: "agent:main:done", storePath },
+      { assignedBy: doneOwner, owner: doneOwner },
+    );
+    recordSessionParticipant(
+      { sessionKey: "agent:main:main", storePath },
+      { identity: { type: "profile", id: "replacement-reader" }, promptedAt: 10 },
+    );
+    const databasePath = expectDefined(
+      resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
+      "replacement preparation database path",
+    );
+    const database = openOpenClawAgentDatabase({ agentId: "main", path: databasePath });
+    const preparationReads = trackSqliteStatementExecutions(
+      database.db,
+      ["entries", "participants"],
+      (sql) => {
+        if (/from\s+"session_nodes"/i.test(sql)) {
+          return "entries";
+        }
+        return /from\s+"session_participants"/i.test(sql) ? "participants" : null;
+      },
+    );
 
     const result = await applySessionEntryReplacements({
       storePath,
       update: (entries) => {
+        // The detached snapshot and participant facts now come from the read worker.
+        expect(preparationReads.counts.entries).toBe(0);
+        expect(preparationReads.counts.participants).toBe(0);
+        expect(entries.map(({ sessionKey }) => sessionKey)).toEqual([
+          "agent:main:done",
+          "agent:main:main",
+          "agent:main:other",
+          "agent:main:shared-done",
+          "agent:main:shared-running",
+        ]);
         const main = entries.find((entry) => entry.sessionKey === "agent:main:main");
         const other = entries.find((entry) => entry.sessionKey === "agent:main:other");
         if (other) {
@@ -2032,6 +1412,9 @@ describe("session accessor seam", () => {
         if (!main) {
           return { result: { replaced: false } };
         }
+        expect(main.entry.participants).toEqual([
+          { identity: { type: "profile", id: "replacement-reader" } },
+        ]);
         main.entry.abortedLastRun = true;
         main.entry.updatedAt = 30;
         return {
@@ -2039,7 +1422,7 @@ describe("session accessor seam", () => {
           replacements: [{ sessionKey: main.sessionKey, entry: main.entry }],
         };
       },
-    });
+    }).finally(() => preparationReads.restore());
 
     expect(result).toEqual({ replaced: true });
     expect(loadSessionEntry({ sessionKey: "agent:main:main", storePath })).toMatchObject({
@@ -2070,9 +1453,12 @@ describe("session accessor seam", () => {
       "agent:main:other",
       "agent:main:shared-running",
     ]);
-    expect(
-      listSessionEntriesByStatus({ storePath }, ["done"]).map((entry) => entry.sessionKey),
-    ).toEqual(["agent:main:done", "agent:main:shared-done"]);
+    const doneSessions = listSessionEntriesByStatus({ storePath }, ["done"]);
+    expect(doneSessions.map((entry) => entry.sessionKey)).toEqual([
+      "agent:main:done",
+      "agent:main:shared-done",
+    ]);
+    expect(doneSessions[0]?.entry.owner?.actor).toEqual(doneOwner);
 
     const other = loadSessionEntry({ sessionKey: "agent:main:other", storePath });
     expect(other).toBeDefined();
@@ -2229,6 +1615,17 @@ describe("session accessor seam", () => {
       { sessionKey: previousKey, storePath },
       { sessionId: "rekeyed", updatedAt: 20 },
     );
+    for (const [sessionKey, count] of [
+      [canonicalKey, 2],
+      [previousKey, 3],
+    ] as const) {
+      for (let promptedAt = 0; promptedAt < count; promptedAt += 1) {
+        recordSessionParticipant(
+          { sessionKey, storePath },
+          { identity: { type: "profile", id: "profile-shared" }, promptedAt },
+        );
+      }
+    }
     const databasePath = resolveSqliteTargetFromSessionStorePath(storePath, {
       agentId: "main",
     }).path;
@@ -2239,7 +1636,7 @@ describe("session accessor seam", () => {
       )
       .run(previousKey, "member-1", "test", 1);
     const identityListener = vi.fn();
-    const unsubscribe = onSessionIdentityMutation(identityListener);
+    onTestFinished(onSessionIdentityMutation(identityListener));
     await applySessionEntryCanonicalReplacements({
       sessionKeys: [canonicalKey, previousKey],
       storePath,
@@ -2257,7 +1654,6 @@ describe("session accessor seam", () => {
         result: undefined,
       }),
     });
-    unsubscribe();
     expect(loadSessionEntry({ sessionKey: previousKey, storePath })).toBeUndefined();
     expect(loadSessionEntry({ sessionKey: canonicalKey, storePath })).toMatchObject({
       label: "Moved",
@@ -2273,7 +1669,33 @@ describe("session accessor seam", () => {
         .prepare("SELECT session_key, identity_id FROM session_members WHERE identity_id = ?")
         .get("member-1"),
     ).toEqual({ session_key: canonicalKey, identity_id: "member-1" });
+    expect(
+      database.db
+        .prepare("SELECT contribution_count FROM session_participants WHERE actor_id = ?")
+        .get("profile-shared"),
+    ).toEqual({ contribution_count: 5 });
     expect(identityListener.mock.calls.map(([event]) => event.kind)).toEqual(["move", "replace"]);
+    await expect(
+      applySessionEntryCanonicalReplacements({
+        sessionKeys: [canonicalKey, previousKey],
+        storePath,
+        update: (entries) => ({
+          replacements: [
+            {
+              entry: entries.find((entry) => entry.sessionKey === canonicalKey)!.entry,
+              previousSessionKeys: [previousKey],
+              sessionKey: canonicalKey,
+            },
+          ],
+          result: undefined,
+        }),
+      }),
+    ).rejects.toThrow("cannot replace missing alias");
+    expect(
+      database.db
+        .prepare("SELECT contribution_count FROM session_participants WHERE actor_id = ?")
+        .get("profile-shared"),
+    ).toEqual({ contribution_count: 5 });
   });
 
   it("rejects internal canonical targets and alias sources without changing rows or events", async () => {
@@ -2345,25 +1767,31 @@ describe("session accessor seam", () => {
         structuredClone(loadSessionEntry({ sessionKey, storePath })),
       ]),
     );
-    const databasePath = resolveSqliteTargetFromSessionStorePath(storePath, {
-      agentId: "main",
-    }).path;
-    const database = openOpenClawAgentDatabase({ agentId: "main", path: databasePath });
-    database.db.exec(`
-      CREATE TRIGGER fail_mixed_replacement_after_exact_write
-      BEFORE UPDATE OF entry_json ON session_nodes
-      WHEN NEW.session_key = '${canonicalKey}'
-        AND (
-          SELECT json_extract(entry_json, '$.label')
-          FROM session_nodes
-          WHERE session_key = '${exactKey}'
-        ) = 'Exact updated'
-      BEGIN
-        SELECT RAISE(ABORT, 'injected mixed replacement failure');
-      END;
-    `);
     const identityListener = vi.fn();
     const unsubscribe = onSessionIdentityMutation(identityListener);
+
+    let refusedCommits = 0;
+    const createAdmission = workerAdmission.createSqliteWorkerOperationAdmission;
+    const admissionSpy = vi
+      .spyOn(workerAdmission, "createSqliteWorkerOperationAdmission")
+      .mockImplementation((callback, attachment) =>
+        createAdmission((request, grant) => {
+          const publication = isRecord(request.facts) ? request.facts.publication : undefined;
+          if (
+            request.stage === "commit" &&
+            isRecord(publication) &&
+            publication.kind === "session-entry-replacements"
+          ) {
+            expect(publication.changedKeys).toHaveLength(3);
+            expect(publication.changedKeys).toEqual(
+              expect.arrayContaining([exactKey, canonicalKey, previousKey]),
+            );
+            refusedCommits++;
+            throw new Error("injected mixed replacement failure");
+          }
+          callback(request, grant);
+        }, attachment),
+      );
 
     try {
       await expect(
@@ -2394,14 +1822,105 @@ describe("session accessor seam", () => {
         }),
       ).rejects.toThrow("injected mixed replacement failure");
     } finally {
+      admissionSpy.mockRestore();
       unsubscribe();
-      database.db.exec("DROP TRIGGER fail_mixed_replacement_after_exact_write");
     }
 
     for (const sessionKey of [exactKey, canonicalKey, previousKey]) {
       expect(loadSessionEntry({ sessionKey, storePath })).toEqual(before.get(sessionKey));
     }
+    expect(refusedCommits).toBe(1);
     expect(identityListener).not.toHaveBeenCalled();
+  });
+
+  it("rejects a label claimed while a replacement is being prepared", async () => {
+    const target = { sessionKey: "agent:main:label-target", storePath };
+    const competing = { sessionKey: "agent:main:label-competitor", storePath };
+    await upsertSessionEntryCore(target, { sessionId: "label-target", updatedAt: 1 });
+    await upsertSessionEntryCore(competing, { sessionId: "label-competitor", updatedAt: 1 });
+
+    await expect(
+      applySessionEntryCanonicalReplacements({
+        sessionKeys: [target.sessionKey],
+        includeLabelOwners: "Claimed",
+        storePath,
+        update: async (entries) => {
+          expect(entries.map(({ sessionKey }) => sessionKey)).toEqual([target.sessionKey]);
+          await Promise.resolve();
+          replaceSessionEntrySync(competing, {
+            sessionId: "label-competitor",
+            label: "Claimed",
+            updatedAt: 2,
+          });
+          return {
+            result: undefined,
+            replacements: [
+              {
+                sessionKey: target.sessionKey,
+                previousSessionKeys: [],
+                entry: { ...entries[0]!.entry, label: "Claimed" },
+              },
+            ],
+          };
+        },
+      }),
+    ).rejects.toThrow("label owners changed before replacement");
+    expect(loadSessionEntry(target)?.label).toBeUndefined();
+    expect(loadSessionEntry(competing)?.label).toBe("Claimed");
+  });
+
+  it("rejects a label owner released and reclaimed during detached planning", async () => {
+    const target = { sessionKey: "agent:main:label-target", storePath };
+    const competing = { sessionKey: "agent:main:label-competitor", storePath };
+    const competingEntry = { sessionId: "label-competitor", label: "Claimed", updatedAt: 1 };
+    await upsertSessionEntryCore(target, { sessionId: "label-target", updatedAt: 1 });
+    await upsertSessionEntryCore(competing, competingEntry);
+    const databasePath = expectDefined(
+      resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
+      "label race database path",
+    );
+    const externalWriter = new DatabaseSync(databasePath);
+    const changeCompetingLabel = (label: string, updatedAt: number) => {
+      externalWriter
+        .prepare(
+          "UPDATE session_nodes SET label = ?, updated_at = ?, entry_json = json_set(entry_json, '$.label', ?, '$.updatedAt', ?) WHERE session_key = ?",
+        )
+        .run(label, updatedAt, label, updatedAt, competing.sessionKey);
+    };
+    try {
+      await expect(
+        applySessionEntryCanonicalReplacements({
+          sessionKeys: [target.sessionKey],
+          includeLabelOwners: "Claimed",
+          storePath,
+          update: async (entries) => {
+            expect(
+              entries.find(({ sessionKey }) => sessionKey === competing.sessionKey)?.entry,
+            ).toMatchObject({ label: "Claimed" });
+            changeCompetingLabel("Released", 2);
+            await Promise.resolve();
+            changeCompetingLabel("Claimed", 3);
+            return {
+              result: undefined,
+              replacements: [
+                {
+                  sessionKey: target.sessionKey,
+                  previousSessionKeys: [],
+                  entry: {
+                    ...entries.find(({ sessionKey }) => sessionKey === target.sessionKey)!.entry,
+                    label: "Claimed",
+                  },
+                },
+              ],
+            };
+          },
+        }),
+      ).rejects.toThrow("changed before replacement");
+      expect(loadSessionEntry(target)?.label).toBeUndefined();
+      expect(loadSessionEntry(competing)?.label).toBe("Claimed");
+    } finally {
+      externalWriter.close();
+    }
   });
 
   it("prepares entry replacements without holding a write transaction", async () => {
@@ -2414,20 +1933,14 @@ describe("session accessor seam", () => {
       sessionId: "replacement-prepare",
       updatedAt: 10,
     });
-    let releasePlanner!: () => void;
-    let markPlannerStarted!: () => void;
-    const plannerStarted = new Promise<void>((resolve) => {
-      markPlannerStarted = resolve;
-    });
-    const plannerGate = new Promise<void>((resolve) => {
-      releasePlanner = resolve;
-    });
+    const plannerStarted = createDeferred();
+    const plannerGate = createDeferred();
     const pendingReplacement = applySessionEntryReplacements({
       sessionKeys: [scope.sessionKey],
       storePath,
       update: async (entries) => {
-        markPlannerStarted();
-        await plannerGate;
+        plannerStarted.resolve();
+        await plannerGate.promise;
         return {
           replacements: entries.map(({ entry, sessionKey }) => ({
             entry: { ...entry, model: "planned" },
@@ -2438,7 +1951,7 @@ describe("session accessor seam", () => {
       },
     });
 
-    await plannerStarted;
+    await plannerStarted.promise;
     let replacementError: unknown;
     try {
       replaceSessionEntrySync(scope, {
@@ -2449,7 +1962,7 @@ describe("session accessor seam", () => {
     } catch (error) {
       replacementError = error;
     } finally {
-      releasePlanner();
+      plannerGate.resolve();
     }
     const planningError = await pendingReplacement.then(
       () => undefined,
@@ -2463,50 +1976,86 @@ describe("session accessor seam", () => {
     expect(loadSessionEntry(scope)).toMatchObject({ model: "newer", updatedAt: 20 });
   });
 
-  it("does not hold a write transaction while awaiting a lifecycle entry builder", async () => {
-    const sessionKey = "agent:main:lifecycle-prepare";
+  it("preserves participant changes made while status-selected replacements are planned", async () => {
+    const scope = { sessionKey: "agent:main:participant-replacement", storePath };
+    await upsertSessionEntryCore(scope, {
+      sessionId: "participant-replacement",
+      status: "running",
+      updatedAt: 10,
+    });
     await upsertSessionEntryCore(
-      { sessionKey, storePath },
-      { model: "base", sessionId: "lifecycle-prepare", updatedAt: 10 },
+      { sessionKey: "agent:main:participant-replacement-peer", storePath },
+      { sessionId: "participant-replacement-peer", status: "running", updatedAt: 10 },
     );
-    let releaseBuilder!: () => void;
-    let markBuilderStarted!: () => void;
-    const builderStarted = new Promise<void>((resolve) => {
-      markBuilderStarted = resolve;
+    recordSessionParticipant(scope, {
+      identity: {
+        type: "observation",
+        id: "8167215807",
+        pluginId: null,
+        accountId: null,
+        senderKind: "unknown",
+      },
+      promptedAt: 10,
     });
-    const builderGate = new Promise<void>((resolve) => {
-      releaseBuilder = resolve;
-    });
-    const pendingMutation = applySessionEntryLifecycleMutation({
+
+    await applySessionEntryReplacements({
+      statuses: ["running"],
       storePath,
-      upserts: [
-        {
-          sessionKey,
-          buildEntry: async ({ currentEntry }) => {
-            markBuilderStarted();
-            await builderGate;
-            return { ...currentEntry, model: "projected" } as SessionEntry;
-          },
-        },
-      ],
-      skipMaintenance: true,
+      update: async (entries) => {
+        expect(entries).toHaveLength(2);
+        const snapshot = expectDefined(
+          entries.find(({ sessionKey }) => sessionKey === scope.sessionKey),
+          "selected replacement snapshot",
+        );
+        expect(snapshot.entry.participantCount).toBe(1);
+        expect(snapshot.entry.participants?.map(({ identity }) => identity.id)).toEqual([
+          "8167215807",
+        ]);
+        await Promise.resolve();
+        expect(
+          recordSessionParticipant(scope, {
+            identity: { type: "agent", id: "late-participant" },
+            promptedAt: 20,
+          }),
+        ).toBe("inserted");
+        // The detached snapshot stays old; participant history has its own writer.
+        expect(snapshot.entry.participantCount).toBe(1);
+        expect(snapshot.entry.participants?.map(({ identity }) => identity.id)).toEqual([
+          "8167215807",
+        ]);
+        return {
+          replacements: entries.map(({ entry, sessionKey }) => ({
+            entry: { ...entry, abortedLastRun: true },
+            sessionKey,
+          })),
+          result: undefined,
+        };
+      },
     });
 
-    await builderStarted;
-    let unrelatedWriteError: unknown;
-    try {
-      appendSqliteTrajectoryRuntimeEvents({ sessionId: "lifecycle-prepare", storePath }, [
-        createTestTrajectoryEvent("lifecycle-prepare"),
-      ]);
-    } catch (error) {
-      unrelatedWriteError = error;
-    } finally {
-      releaseBuilder();
+    const fresh = expectDefined(loadSessionEntry(scope), "replaced session entry");
+    expect(fresh).toMatchObject({ abortedLastRun: true, participantCount: 2 });
+    expect(fresh.participants?.map(({ identity }) => identity.id)).toEqual([
+      "8167215807",
+      "late-participant",
+    ]);
+    const databasePath = expectDefined(
+      resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
+      "participant replacement database path",
+    );
+    const database = openOpenClawAgentDatabase({ agentId: "main", path: databasePath });
+    const stored = expectDefined(
+      database.db
+        .prepare("SELECT entry_json FROM session_nodes WHERE session_key = ?")
+        .get(scope.sessionKey),
+      "persisted replacement row",
+    );
+    if (typeof stored.entry_json !== "string") {
+      throw new Error("Expected persisted session JSON");
     }
-
-    await expect(pendingMutation).resolves.toMatchObject({ afterCount: 1 });
-    expect(unrelatedWriteError).toBeUndefined();
-    expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject({ model: "projected" });
+    const persisted: unknown = JSON.parse(stored.entry_json);
+    expect(persisted).not.toHaveProperty("participants");
+    expect(persisted).not.toHaveProperty("participantCount");
   });
 
   it("rejects a lifecycle projection when its source row changes", async () => {
@@ -2516,22 +2065,16 @@ describe("session accessor seam", () => {
       sessionId: "lifecycle-stale",
       updatedAt: 10,
     });
-    let releaseBuilder!: () => void;
-    let markBuilderStarted!: () => void;
-    const builderStarted = new Promise<void>((resolve) => {
-      markBuilderStarted = resolve;
-    });
-    const builderGate = new Promise<void>((resolve) => {
-      releaseBuilder = resolve;
-    });
+    const builderStarted = createDeferred();
+    const builderGate = createDeferred();
     const pendingMutation = applySessionEntryLifecycleMutation({
       storePath,
       upserts: [
         {
           sessionKey: scope.sessionKey,
           buildEntry: async ({ currentEntry }) => {
-            markBuilderStarted();
-            await builderGate;
+            builderStarted.resolve();
+            await builderGate.promise;
             return { ...currentEntry, model: "stale-projection" } as SessionEntry;
           },
         },
@@ -2539,7 +2082,7 @@ describe("session accessor seam", () => {
       skipMaintenance: true,
     });
 
-    await builderStarted;
+    await builderStarted.promise;
     let replacementError: unknown;
     try {
       replaceSessionEntrySync(scope, {
@@ -2550,7 +2093,7 @@ describe("session accessor seam", () => {
     } catch (error) {
       replacementError = error;
     } finally {
-      releaseBuilder();
+      builderGate.resolve();
     }
     const mutationError = await pendingMutation.then(
       () => undefined,
@@ -2562,47 +2105,6 @@ describe("session accessor seam", () => {
       message: expect.stringContaining("changed before lifecycle upsert"),
     });
     expect(loadSessionEntry(scope)).toMatchObject({ model: "newer", updatedAt: 20 });
-  });
-
-  it("reclaims SQLite transcript rows for lifecycle removals without archive intent", async () => {
-    const scope = {
-      sessionId: "session-1",
-      sessionKey: "agent:main:preserve",
-      storePath,
-    };
-    await upsertSessionEntryCore(scope, {
-      restartRecoveryDeliveryContext: {
-        channel: "whatsapp",
-        to: "+15551234567",
-      },
-      restartRecoveryDeliveryRunId: "old-run",
-      sessionId: scope.sessionId,
-      updatedAt: 10,
-    });
-    await replaceTranscriptEvents(scope, [
-      {
-        id: "event-1",
-        message: { role: "user", content: "keep me" },
-        type: "message",
-      },
-    ]);
-
-    const notify = vi.fn();
-    const unsubscribe = onSessionIdentityMutation(notify);
-    const result = await applySessionEntryLifecycleMutation({
-      storePath,
-      removals: [{ expectedSessionId: scope.sessionId, sessionKey: scope.sessionKey }],
-    });
-    unsubscribe();
-
-    expect(result.removedEntries).toBe(1);
-    expect(notify).toHaveBeenCalledWith({
-      kind: "delete",
-      previous: { sessionId: scope.sessionId, sessionKeys: [scope.sessionKey] },
-    });
-    expect(result.archivedTranscriptDirectories).toEqual([]);
-    expect(loadSessionEntry(scope)).toBeUndefined();
-    await expect(loadTranscriptEvents(scope)).resolves.toEqual([]);
   });
 
   it("captures SQLite archived transcript cleanup failures when requested", async () => {
@@ -2705,6 +2207,33 @@ describe("session accessor seam", () => {
     },
   );
 
+  it("clears progress cards when lifecycle deletion retains transcript windows", async () => {
+    const sessionKey = "agent:main:progress-delete";
+    const scope = { agentId: "main", sessionId: "progress-delete", sessionKey, storePath };
+    await replaceSessionEntry(scope, { sessionId: scope.sessionId, updatedAt: 10 });
+    const databasePath = expectDefined(
+      resolveSqliteTargetFromSessionStorePath(storePath, { agentId: scope.agentId }).path,
+      "progress delete database path",
+    );
+    const database = openOpenClawAgentDatabase({ agentId: scope.agentId, path: databasePath });
+    writeSessionProgressCard(database.db, sessionKey, { markdown: "Working" });
+
+    const result = await deleteSessionEntryLifecycle({
+      archiveTranscript: false,
+      storePath,
+      target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
+    });
+
+    expect(result.deleted).toBe(true);
+    expect(loadSessionEntry(scope)).toBeUndefined();
+    expect(
+      database.db
+        .prepare("SELECT entry_valid FROM session_nodes WHERE session_key = ?")
+        .get(sessionKey),
+    ).toEqual({ entry_valid: -1 });
+    expect(readSessionProgressCard(database.db, sessionKey)).toBeNull();
+  });
+
   it("trims a manual compact transcript and clears stale token metadata", async () => {
     const sessionId = "11111111-1111-4111-8111-111111111111";
     const scope = {
@@ -2736,33 +2265,22 @@ describe("session accessor seam", () => {
       contextBudgetStatus,
       inputTokens: 10,
       outputTokens: 20,
+      cacheRead: 40,
+      cacheWrite: 10,
+      estimatedCostUsd: 0.02,
       sessionId,
       totalTokens: 30,
       totalTokensFresh: true,
       updatedAt: 100,
     });
-    const transcriptRecords = [
-      {
-        type: "session",
-        version: 3,
-        id: sessionId,
-        timestamp: "2026-06-19T12:00:00.000Z",
-        cwd: tempDir,
-      },
-      ...[1, 2, 3, 4].map((index) => ({
-        type: "message",
-        id: `entry-${index}`,
-        parentId: index === 1 ? null : `entry-${index - 1}`,
-        timestamp: `2026-06-19T12:00:0${index}.000Z`,
-        message: { role: "user", content: `message ${index}`, timestamp: index },
-      })),
-    ];
+    const transcriptRecords = createManualCompactRecords(sessionId, tempDir);
     await replaceTranscriptEvents(
       scope,
       transcriptRecords as Parameters<typeof replaceTranscriptEvents>[1],
     );
     const updates: unknown[] = [];
     const unsubscribe = onSessionTranscriptUpdate((update) => updates.push(update));
+    onTestFinished(unsubscribe);
 
     const result = await trimSessionTranscriptForManualCompact(scope, {
       maxLines: 3,
@@ -2771,17 +2289,6 @@ describe("session accessor seam", () => {
 
     unsubscribe();
     expect(result).toMatchObject({ compacted: true, kept: 3 });
-    const archived = result.compacted ? result.archived : "";
-    expect(path.basename(archived)).toMatch(
-      new RegExp(`^${sessionId}\\.jsonl\\.bak\\.\\d{4}-\\d{2}-\\d{2}T`),
-    );
-    expect(fs.realpathSync(path.dirname(archived))).toBe(fs.realpathSync(tempDir));
-    expect(fs.existsSync(archived)).toBe(true);
-    const archivedRecords = readSessionArchiveContentSync(archived)
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(archivedRecords).toEqual(transcriptRecords);
     const trimmedRecords = (await loadTranscriptEvents(scope)) as Array<Record<string, unknown>>;
     expect(trimmedRecords).toMatchObject([
       { type: "session", id: sessionId },
@@ -2796,44 +2303,12 @@ describe("session accessor seam", () => {
     expect(updatedEntry?.contextBudgetStatus).toBeUndefined();
     expect(updatedEntry?.inputTokens).toBeUndefined();
     expect(updatedEntry?.outputTokens).toBeUndefined();
+    expect(updatedEntry?.cacheRead).toBeUndefined();
+    expect(updatedEntry?.cacheWrite).toBeUndefined();
+    expect(updatedEntry?.estimatedCostUsd).toBeUndefined();
     expect(updatedEntry?.totalTokens).toBeUndefined();
     expect(updatedEntry?.totalTokensFresh).toBeUndefined();
     expect(updates).toEqual([]);
-  });
-
-  it("keeps every transcript row when the manual compact backup cannot be written", async () => {
-    const sessionId = "44444444-4444-4444-8444-444444444444";
-    const stateDir = path.join(tempDir, "state-root");
-    const scope = {
-      agentId: "main",
-      env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
-      sessionId,
-      sessionKey: "agent:main:main",
-    };
-    const records = createManualCompactRecords(sessionId);
-    await upsertSessionEntryCore(scope, { sessionId, updatedAt: 1 });
-    await replaceTranscriptEvents(scope, records as Parameters<typeof replaceTranscriptEvents>[1]);
-    const archiveDirPath = path.join(stateDir, "agents", "main", "sessions");
-    fs.writeFileSync(archiveDirPath, "not a directory");
-
-    await expect(trimSessionTranscriptForManualCompact(scope, { maxLines: 3 })).rejects.toThrow();
-
-    expect((await loadTranscriptEvents(scope)).length).toBe(5);
-    expect(await loadTranscriptEvents(scope)).toEqual(records);
-  });
-
-  it("keeps no-op manual compaction tolerant of a missing current session entry", async () => {
-    await expect(
-      trimTranscriptForManualCompact(
-        {
-          agentId: "main",
-          sessionId: "99999999-9999-4999-8999-999999999999",
-          sessionKey: "agent:main:main",
-          storePath,
-        },
-        () => null,
-      ),
-    ).resolves.toEqual({ trimmed: false });
   });
 
   it("rolls back the manual compact row trim when token metadata cannot be cleared", async () => {
@@ -2862,28 +2337,24 @@ describe("session accessor seam", () => {
     );
     const database = openOpenClawAgentDatabase({ agentId: "main", path: databasePath });
     database.db.exec(`
-      CREATE TRIGGER reject_manual_compact_metadata_update
-      BEFORE UPDATE OF entry_json ON session_nodes
+      CREATE TEMP TRIGGER reject_manual_compact_metadata_update
+      BEFORE UPDATE OF entry_json ON main.session_nodes
       WHEN OLD.session_key = '${sessionKey}'
       BEGIN
         SELECT RAISE(ABORT, 'injected manual compact metadata failure');
       END;
     `);
 
-    await expect(
-      trimSessionTranscriptForManualCompact(scope, { maxLines: 3, nowMs: 500 }),
-    ).rejects.toThrow("injected manual compact metadata failure");
-    database.db.exec("DROP TRIGGER reject_manual_compact_metadata_update;");
+    try {
+      await expect(
+        trimSessionTranscriptForManualCompact(scope, { maxLines: 3, nowMs: 500 }),
+      ).rejects.toThrow("injected manual compact metadata failure");
+    } finally {
+      database.db.exec("DROP TRIGGER reject_manual_compact_metadata_update;");
+    }
 
     expect(await loadTranscriptEvents(scope)).toEqual(records);
     expect(loadSessionEntry(scope)).toEqual(entryBeforeCompact);
-    const archiveNames = fs.readdirSync(tempDir).filter((name) => name.includes(".bak."));
-    expect(archiveNames).toHaveLength(1);
-    expect(
-      readSessionArchiveContentSync(
-        path.join(tempDir, expectDefined(archiveNames[0], "manual compact archive name")),
-      ),
-    ).toBe(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
   });
 
   it.each([
@@ -2891,24 +2362,15 @@ describe("session accessor seam", () => {
       name: "rejects a manual compact when session metadata changes after its snapshot",
       sessionId: "88888888-8888-4888-8888-888888888888",
       conflict: "metadata",
-      reuseArchive: false,
     },
     {
-      name: "preserves the backup and rows written after the manual compact snapshot",
+      name: "preserves rows written after the manual compact snapshot",
       sessionId: "55555555-5555-4555-8555-555555555555",
       conflict: "transcript",
-      reuseArchive: false,
     },
-    {
-      name: "preserves a reused manual compact backup when the rewrite conflicts",
-      sessionId: "66666666-6666-4666-8666-666666666666",
-      conflict: "transcript",
-      reuseArchive: true,
-    },
-  ] as const)("$name", async ({ sessionId, conflict, reuseArchive }) => {
+  ] as const)("$name", async ({ sessionId, conflict }) => {
     const scope = { agentId: "main", sessionId, sessionKey: "agent:main:main", storePath };
     const records = createManualCompactRecords(sessionId);
-    const archiveContent = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
     await upsertSessionEntryCore(
       scope,
       conflict === "metadata"
@@ -2916,10 +2378,6 @@ describe("session accessor seam", () => {
         : { sessionId, updatedAt: 1 },
     );
     await replaceTranscriptEvents(scope, records as Parameters<typeof replaceTranscriptEvents>[1]);
-    const existingArchive = path.join(tempDir, `${sessionId}.jsonl.bak.preexisting`);
-    if (reuseArchive) {
-      fs.writeFileSync(existingArchive, archiveContent);
-    }
 
     const expectedError =
       conflict === "metadata"
@@ -2963,18 +2421,6 @@ describe("session accessor seam", () => {
       expect(remaining).toHaveLength(6);
       expect(remaining.slice(0, 5)).toEqual(records);
       expect(remaining[5]).toMatchObject({ id: "late-append" });
-    }
-    if (reuseArchive) {
-      expect(fs.existsSync(existingArchive)).toBe(true);
-      expect(readSessionArchiveContentSync(existingArchive)).toBe(archiveContent);
-    } else {
-      const archiveNames = fs.readdirSync(tempDir).filter((name) => name.includes(".bak."));
-      expect(archiveNames).toHaveLength(1);
-      expect(
-        readSessionArchiveContentSync(
-          path.join(tempDir, expectDefined(archiveNames[0], "manual compact archive name")),
-        ),
-      ).toBe(archiveContent);
     }
   });
 
@@ -3056,226 +2502,153 @@ describe("session accessor seam", () => {
     expect(serializedContext).toContain("kept after");
   });
 
-  it("persists a transcript turn, touches metadata, and publishes after the write", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-lock-order",
-      sessionKey: "agent:main:lock-order",
-      storePath,
-    };
+  it("publishes each committed expected-session turn message with its active sequence", async () => {
+    const scope = transcriptScope(
+      "session-ordered-turn-guarded",
+      "agent:main:ordered-turn-guarded",
+    );
     await upsertSessionEntryCore(scope, {
+      lifecycleRevision: "ordered-turn-revision",
       sessionId: scope.sessionId,
       updatedAt: 10,
     });
-    const updates: Array<{
-      target: unknown;
-      updatedAt: number | undefined;
-    }> = [];
-    const unsubscribe = onSessionTranscriptUpdate((update) => {
-      updates.push({
-        target: update.target,
-        updatedAt: loadSessionEntry(scope)?.updatedAt,
-      });
-    });
-
-    const result = await persistSessionTranscriptTurn(scope, {
-      cwd: tempDir,
-      messages: [
-        {
-          message: {
-            role: "user",
-            content: "hello",
-            timestamp: 100,
-          },
-        },
-        {
-          message: {
-            role: "assistant",
-            content: "hi there",
-            timestamp: 200,
-          },
-        },
-      ],
-      publishWhen: "always",
-      touchSessionEntry: true,
-      updateMode: "file-only",
-    });
-    unsubscribe();
-
-    expect(result.appendedCount).toBe(2);
-    await expect(loadTranscriptEvents(scope)).resolves.toHaveLength(3);
-    expect(loadSessionEntry(scope)).toMatchObject({
-      sessionId: scope.sessionId,
-      updatedAt: expect.any(Number),
-    });
-    expect(result).not.toHaveProperty("sessionFile");
-    expect(loadSessionEntry(scope)?.updatedAt).toBeGreaterThanOrEqual(10);
-    expect(updates).toEqual([
+    await replaceTranscriptEvents(scope, [
+      { type: "session", version: 3, id: scope.sessionId },
       {
-        target: {
-          agentId: "main",
-          sessionId: "session-lock-order",
-          sessionKey: "agent:main:lock-order",
-        },
-        updatedAt: expect.any(Number),
+        type: "message",
+        id: "existing-message",
+        parentId: null,
+        message: { role: "user", content: "existing message", timestamp: 1 },
+      },
+      {
+        type: "message",
+        id: "abandoned-message",
+        parentId: "existing-message",
+        message: { role: "assistant", content: "abandoned reply", timestamp: 2 },
+      },
+      {
+        type: "leaf",
+        id: "select-existing-message",
+        parentId: "abandoned-message",
+        targetId: "existing-message",
+        appendParentId: "existing-message",
       },
     ]);
+
+    const trailingMessages = Array.from({ length: 64 }, (_, index) => ({
+      message: {
+        role: "user",
+        content: `batch continuation ${index}`,
+        timestamp: index + 4,
+      },
+    }));
+    const updates: Array<{
+      target: unknown;
+      message?: unknown;
+      messageId?: string;
+      messageSeq?: number;
+    }> = [];
+    const unsubscribe = onSessionTranscriptUpdate((update) => {
+      expect(loadSessionEntry(scope)?.updatedAt).toBeGreaterThan(10);
+      updates.push(update);
+    });
+    const internalUpdates: Array<{ lifecycleRevision?: string; target?: unknown }> = [];
+    const unsubscribeInternal = onInternalSessionTranscriptUpdate((update) => {
+      if (update.message !== undefined) {
+        internalUpdates.push({
+          lifecycleRevision: update.lifecycleRevision,
+          target: update.target,
+        });
+      }
+    });
+    let result: Awaited<ReturnType<typeof persistSessionTranscriptTurn>>;
+    try {
+      result = await persistSessionTranscriptTurn(scope, {
+        expectedSessionId: scope.sessionId,
+        runId: "run-ordered-turn",
+        touchSessionEntry: true,
+        messages: [
+          {
+            message: {
+              role: "user",
+              content: "first committed message",
+              idempotencyKey: "ordered-turn-first:user",
+              timestamp: 2,
+            },
+          },
+          {
+            message: {
+              role: "assistant",
+              content: "second committed message",
+              idempotencyKey: "ordered-turn-second",
+              timestamp: 3,
+            },
+          },
+          ...trailingMessages,
+        ],
+        updateMode: "inline",
+      });
+    } finally {
+      unsubscribe();
+      unsubscribeInternal();
+    }
+
+    const target = {
+      agentId: scope.agentId,
+      sessionId: scope.sessionId,
+      sessionKey: scope.sessionKey,
+    };
+    expect(result.appendedCount).toBe(66);
+    expect(updates).toEqual([
+      {
+        target,
+        ...target,
+        message: {
+          role: "user",
+          content: "first committed message",
+          idempotencyKey: "ordered-turn-first:user",
+          timestamp: 2,
+        },
+        messageId: result.messages[0]?.messageId,
+        messageSeq: 2,
+      },
+      {
+        target,
+        ...target,
+        message: {
+          role: "assistant",
+          content: "second committed message",
+          idempotencyKey: "ordered-turn-second",
+          timestamp: 3,
+          __openclaw: { runId: "run-ordered-turn" },
+        },
+        messageId: result.messages[1]?.messageId,
+        messageSeq: 3,
+        runId: "run-ordered-turn",
+      },
+      ...trailingMessages.map(({ message }, index) => ({
+        target,
+        agentId: scope.agentId,
+        sessionId: scope.sessionId,
+        sessionKey: scope.sessionKey,
+        message,
+        messageId: result.messages[index + 2]?.messageId,
+        messageSeq: index + 4,
+      })),
+    ]);
+    expect(internalUpdates).toEqual(
+      Array.from({ length: 66 }, () => ({
+        lifecycleRevision: "ordered-turn-revision",
+        target: { ...target, storePath },
+      })),
+    );
   });
 
-  it.each([
-    { guarded: false, name: "ordinary" },
-    { guarded: true, name: "expected-session" },
-  ])(
-    "publishes each committed $name turn message with its active sequence",
-    async ({ guarded }) => {
-      const scope = {
-        agentId: "main",
-        sessionId: `session-ordered-turn-${guarded ? "guarded" : "ordinary"}`,
-        sessionKey: `agent:main:ordered-turn-${guarded ? "guarded" : "ordinary"}`,
-        storePath,
-      };
-      await upsertSessionEntryCore(scope, {
-        lifecycleRevision: "ordered-turn-revision",
-        sessionId: scope.sessionId,
-        updatedAt: 10,
-      });
-      await replaceTranscriptEvents(scope, [
-        { type: "session", version: 3, id: scope.sessionId },
-        {
-          type: "message",
-          id: "existing-message",
-          parentId: null,
-          message: { role: "user", content: "existing message", timestamp: 1 },
-        },
-        {
-          type: "message",
-          id: "abandoned-message",
-          parentId: "existing-message",
-          message: { role: "assistant", content: "abandoned reply", timestamp: 2 },
-        },
-        {
-          type: "leaf",
-          id: "select-existing-message",
-          parentId: "abandoned-message",
-          targetId: "existing-message",
-          appendParentId: "existing-message",
-        },
-      ]);
-
-      const updates: Array<{
-        target: unknown;
-        message?: unknown;
-        messageId?: string;
-        messageSeq?: number;
-      }> = [];
-      const unsubscribe = onSessionTranscriptUpdate((update) => updates.push(update));
-      const internalUpdates: Array<{ lifecycleRevision?: string; target?: unknown }> = [];
-      const unsubscribeInternal = onInternalSessionTranscriptUpdate((update) => {
-        if (update.message !== undefined) {
-          internalUpdates.push({
-            lifecycleRevision: update.lifecycleRevision,
-            target: update.target,
-          });
-        }
-      });
-      let result: Awaited<ReturnType<typeof persistSessionTranscriptTurn>>;
-      try {
-        result = await persistSessionTranscriptTurn(scope, {
-          ...(guarded ? { expectedSessionId: scope.sessionId } : {}),
-          messages: [
-            {
-              message: {
-                role: "user",
-                content: "first committed message",
-                idempotencyKey: "ordered-turn-first:user",
-                timestamp: 2,
-              },
-            },
-            {
-              message: {
-                role: "assistant",
-                content: "second committed message",
-                idempotencyKey: "ordered-turn-second",
-                timestamp: 3,
-              },
-            },
-          ],
-          updateMode: "inline",
-        });
-      } finally {
-        unsubscribe();
-        unsubscribeInternal();
-      }
-
-      expect(result.appendedCount).toBe(2);
-      expect(updates).toEqual([
-        {
-          target: {
-            agentId: scope.agentId,
-            sessionId: scope.sessionId,
-            sessionKey: scope.sessionKey,
-          },
-          sessionKey: scope.sessionKey,
-          agentId: scope.agentId,
-          sessionId: scope.sessionId,
-          message: {
-            role: "user",
-            content: "first committed message",
-            idempotencyKey: "ordered-turn-first:user",
-            timestamp: 2,
-          },
-          messageId: result.messages[0]?.messageId,
-          messageSeq: 2,
-        },
-        {
-          target: {
-            agentId: scope.agentId,
-            sessionId: scope.sessionId,
-            sessionKey: scope.sessionKey,
-          },
-          sessionKey: scope.sessionKey,
-          agentId: scope.agentId,
-          sessionId: scope.sessionId,
-          message: {
-            role: "assistant",
-            content: "second committed message",
-            idempotencyKey: "ordered-turn-second",
-            timestamp: 3,
-          },
-          messageId: result.messages[1]?.messageId,
-          messageSeq: 3,
-        },
-      ]);
-      expect(internalUpdates).toEqual([
-        {
-          lifecycleRevision: "ordered-turn-revision",
-          target: {
-            agentId: scope.agentId,
-            sessionId: scope.sessionId,
-            sessionKey: scope.sessionKey,
-            storePath,
-          },
-        },
-        {
-          lifecycleRevision: "ordered-turn-revision",
-          target: {
-            agentId: scope.agentId,
-            sessionId: scope.sessionId,
-            sessionKey: scope.sessionKey,
-            storePath,
-          },
-        },
-      ]);
-    },
-  );
-
   it("invalidates a legacy multi-message turn when active cursors cannot be proven", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-legacy-unsequenced-turn",
-      sessionKey: "agent:main:legacy-unsequenced-turn",
-      storePath,
-    };
+    const scope = transcriptScope(
+      "session-legacy-unsequenced-turn",
+      "agent:main:legacy-unsequenced-turn",
+    );
     await upsertSessionEntryCore(scope, {
       lifecycleRevision: "legacy-unsequenced-revision",
       sessionId: scope.sessionId,
@@ -3283,11 +2656,10 @@ describe("session accessor seam", () => {
     });
     await persistSessionTranscriptTurn(scope, {
       messages: [
-        {
-          eventId: "legacy-unsequenced-root",
-          parentId: null,
-          message: { role: "user", content: "canonical root" },
-        },
+        transcriptMessage("legacy-unsequenced-root", null, {
+          role: "user",
+          content: "canonical root",
+        }),
       ],
       updateMode: "none",
     });
@@ -3371,30 +2743,24 @@ describe("session accessor seam", () => {
     );
   });
 
-  it.each([
-    { guarded: false, name: "ordinary" },
-    { guarded: true, name: "expected-session" },
-  ])("never publishes rows abandoned inside one $name turn", async ({ guarded }) => {
-    const scope = {
-      agentId: "main",
-      sessionId: `session-diverging-turn-${guarded ? "guarded" : "ordinary"}`,
-      sessionKey: `agent:main:diverging-turn-${guarded ? "guarded" : "ordinary"}`,
-      storePath,
-    };
+  it("never publishes rows abandoned inside one expected-session turn", async () => {
+    const scope = transcriptScope(
+      "session-diverging-turn-guarded",
+      "agent:main:diverging-turn-guarded",
+    );
     await upsertSessionEntryCore(scope, {
       lifecycleRevision: "diverging-turn-revision",
       sessionId: scope.sessionId,
       updatedAt: 10,
     });
-    const expectedSession = guarded ? { expectedSessionId: scope.sessionId } : {};
+    const expectedSession = { expectedSessionId: scope.sessionId };
     await persistSessionTranscriptTurn(scope, {
       ...expectedSession,
       messages: [
-        {
-          eventId: "diverging-turn-root",
-          parentId: null,
-          message: { role: "user", content: "common branch root" },
-        },
+        transcriptMessage("diverging-turn-root", null, {
+          role: "user",
+          content: "common branch root",
+        }),
       ],
       updateMode: "none",
     });
@@ -3411,24 +2777,16 @@ describe("session accessor seam", () => {
       result = await persistSessionTranscriptTurn(scope, {
         ...expectedSession,
         messages: [
-          {
-            eventId: "diverging-turn-abandoned",
-            parentId: "diverging-turn-root",
-            message: {
-              role: "assistant",
-              content: "abandoned branch",
-              idempotencyKey: "diverging-turn-abandoned",
-            },
-          },
-          {
-            eventId: "diverging-turn-active",
-            parentId: "diverging-turn-root",
-            message: {
-              role: "assistant",
-              content: "final active branch",
-              idempotencyKey: "diverging-turn-active",
-            },
-          },
+          transcriptMessage("diverging-turn-abandoned", "diverging-turn-root", {
+            role: "assistant",
+            content: "abandoned branch",
+            idempotencyKey: "diverging-turn-abandoned",
+          }),
+          transcriptMessage("diverging-turn-active", "diverging-turn-root", {
+            role: "assistant",
+            content: "final active branch",
+            idempotencyKey: "diverging-turn-active",
+          }),
         ],
         updateMode: "inline",
       });
@@ -3457,16 +2815,11 @@ describe("session accessor seam", () => {
     );
   });
 
-  it.each([
-    { guarded: false, name: "ordinary" },
-    { guarded: true, name: "expected-session" },
-  ])("does not republish replayed $name turn messages", async ({ guarded }) => {
-    const scope = {
-      agentId: "main",
-      sessionId: `session-replayed-turn-${guarded ? "guarded" : "ordinary"}`,
-      sessionKey: `agent:main:replayed-turn-${guarded ? "guarded" : "ordinary"}`,
-      storePath,
-    };
+  it("does not republish replayed expected-session turn messages", async () => {
+    const scope = transcriptScope(
+      "session-replayed-turn-guarded",
+      "agent:main:replayed-turn-guarded",
+    );
     await upsertSessionEntryCore(scope, {
       sessionId: scope.sessionId,
       updatedAt: 10,
@@ -3477,7 +2830,7 @@ describe("session accessor seam", () => {
       idempotencyKey: "replayed-turn-existing:user",
       timestamp: 1,
     };
-    const expectedSession = guarded ? { expectedSessionId: scope.sessionId } : {};
+    const expectedSession = { expectedSessionId: scope.sessionId };
     await persistSessionTranscriptTurn(scope, {
       ...expectedSession,
       messages: [{ idempotencyLookup: "scan", message: existing }],
@@ -3523,53 +2876,8 @@ describe("session accessor seam", () => {
     ]);
   });
 
-  it("accepts idempotent transcript replays with reordered JSON fields", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-reordered-replay",
-      sessionKey: "agent:main:reordered-replay",
-      storePath,
-    };
-    await upsertSessionEntryCore(scope, {
-      sessionId: scope.sessionId,
-      updatedAt: 10,
-    });
-    const first = await appendTranscriptMessage(scope, {
-      idempotencyLookup: "scan",
-      message: {
-        role: "user",
-        content: "same message",
-        idempotencyKey: "reordered-replay:user",
-        metadata: { first: 1, second: 2 },
-        timestamp: 1,
-      },
-    });
-    const replay = await appendTranscriptMessage(scope, {
-      idempotencyLookup: "scan",
-      message: {
-        timestamp: 2,
-        metadata: { second: 2, first: 1 },
-        optional: undefined,
-        idempotencyKey: "reordered-replay:user",
-        content: "same message",
-        role: "user",
-      },
-    });
-
-    expect(first?.appended).toBe(true);
-    expect(replay).toMatchObject({
-      appended: false,
-      messageId: first?.messageId,
-    });
-  });
-
   it("accepts idempotent transcript replays after storage redaction", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-redacted-replay",
-      sessionKey: "agent:main:redacted-replay",
-      storePath,
-    };
+    const scope = transcriptScope("session-redacted-replay", "agent:main:redacted-replay");
     await upsertSessionEntryCore(scope, {
       sessionId: scope.sessionId,
       updatedAt: 10,
@@ -3597,25 +2905,14 @@ describe("session accessor seam", () => {
     });
   });
 
-  it("allows concurrent SQLite transcript turn and direct appends", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-1",
-      sessionKey: "agent:main:main",
-      storePath,
-    };
+  it("rechecks a turn predicate after a direct transcript commit", async () => {
+    const scope = transcriptScope("session-commit-predicate", "agent:main:commit-predicate");
     await upsertSessionEntryCore(scope, {
       sessionId: scope.sessionId,
       updatedAt: 10,
     });
-    let markShouldAppendEntered!: () => void;
-    const shouldAppendEntered = new Promise<void>((resolve) => {
-      markShouldAppendEntered = resolve;
-    });
-    let resumeShouldAppend!: () => void;
-    const shouldAppendReleased = new Promise<boolean>((resolve) => {
-      resumeShouldAppend = () => resolve(true);
-    });
+    const admissionEntered = createDeferred();
+    const admissionReleased = createDeferred<boolean>();
 
     const turnPromise = persistSessionTranscriptTurn(scope, {
       cwd: tempDir,
@@ -3623,12 +2920,16 @@ describe("session accessor seam", () => {
         {
           message: {
             role: "assistant",
-            content: "batch reply",
-            timestamp: 100,
+            content: "committed reply",
+            timestamp: 200,
           },
           shouldAppend: async () => {
-            markShouldAppendEntered();
-            return await shouldAppendReleased;
+            admissionEntered.resolve();
+            return await admissionReleased.promise;
+          },
+          shouldAppendInTransaction: (readLatestAssistantMessage) => {
+            const latest = readLatestAssistantMessage() as { content?: unknown } | undefined;
+            return latest?.content !== "committed reply";
           },
         },
       ],
@@ -3637,78 +2938,28 @@ describe("session accessor seam", () => {
       updateMode: "file-only",
     });
 
-    await shouldAppendEntered;
-    let unrelatedWriteError: unknown;
-    try {
-      appendSqliteTrajectoryRuntimeEvents({ sessionId: scope.sessionId, storePath }, [
-        createTestTrajectoryEvent(scope.sessionId),
-      ]);
-    } catch (error) {
-      unrelatedWriteError = error;
-    }
-    const queuedAppendPromise = appendTranscriptMessage(scope, {
-      cwd: tempDir,
+    await admissionEntered.promise;
+    appendTranscriptMessageSync(scope, {
+      idempotencyLookup: "caller-checked",
       message: {
-        role: "user",
-        content: "queued prompt",
-        timestamp: 200,
+        role: "assistant",
+        content: "committed reply",
+        stopReason: "stop",
+        timestamp: 100,
       },
     });
-    resumeShouldAppend();
+    admissionReleased.resolve(true);
+    await turnPromise;
 
-    const results = Promise.all([turnPromise, queuedAppendPromise]);
-    await withTestTimeout(results, 1_000, "timed out waiting for queued transcript writes");
-    await results;
-    expect(unrelatedWriteError).toBeUndefined();
-  });
-
-  it("persists expected-session SQLite transcript turns without reentering the writer queue", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-expected",
-      sessionKey: "agent:main:expected",
-      storePath,
-    };
-    await upsertSessionEntryCore(scope, {
-      sessionId: scope.sessionId,
-      updatedAt: 10,
+    const assistantMessages = (await loadTranscriptEvents(scope)).flatMap((event) => {
+      const message = (event as { message?: { role?: unknown } }).message;
+      return message?.role === "assistant" ? [message] : [];
     });
-
-    const turnPromise = persistSessionTranscriptTurn(scope, {
-      cwd: tempDir,
-      expectedSessionId: scope.sessionId,
-      messages: [
-        {
-          message: {
-            role: "assistant",
-            content: "expected reply",
-            timestamp: 100,
-          },
-        },
-      ],
-      publishWhen: "always",
-      touchSessionEntry: true,
-      updateMode: "file-only",
-    });
-
-    await withTestTimeout(
-      turnPromise,
-      1_000,
-      "timed out waiting for expected-session transcript turn",
-    );
-    const result = await turnPromise;
-
-    expect(result.appendedCount).toBe(1);
-    await expect(loadTranscriptEvents(scope)).resolves.toHaveLength(2);
+    expect(assistantMessages).toHaveLength(1);
   });
 
   it("commits admission metadata only for an inserted turn or exact retryable claim", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-admission",
-      sessionKey: "agent:main:admission",
-      storePath,
-    };
+    const scope = transcriptScope("session-admission", "agent:main:admission");
     await upsertSessionEntryCore(scope, {
       sessionId: scope.sessionId,
       status: "done",
@@ -3763,29 +3014,10 @@ describe("session accessor seam", () => {
     if (!retryable) {
       throw new Error("expected retryable admission");
     }
-    const retryableMainRestartRecovery = (retryable as InternalSessionEntry).mainRestartRecovery;
+
     const deduplicated = await persistSessionTranscriptTurn(scope, {
       expectedSessionId: scope.sessionId,
-      expectedSessionState: {
-        abortedLastRun: retryable.abortedLastRun,
-        mainRestartRecoveryCycleId: retryableMainRestartRecovery?.cycleId,
-        mainRestartRecoveryRevision: retryableMainRestartRecovery?.revision,
-        restartRecoveryBeforeAgentReplyState: retryable.restartRecoveryBeforeAgentReplyState,
-        restartRecoveryDeliveryReceiptState: retryable.restartRecoveryDeliveryReceiptState,
-        restartRecoveryDeliveryToolCallId: retryable.restartRecoveryDeliveryToolCallId,
-        restartRecoveryDeliveryRequestFingerprint:
-          retryable.restartRecoveryDeliveryRequestFingerprint,
-        restartRecoveryDeliveryRunId: retryable.restartRecoveryDeliveryRunId,
-        restartRecoveryDeliverySourceRunId: retryable.restartRecoveryDeliverySourceRunId,
-        restartRecoveryRequesterAccountId: retryable.restartRecoveryRequesterAccountId,
-        restartRecoveryRequesterSenderId: retryable.restartRecoveryRequesterSenderId,
-        restartRecoverySameChannelThreadRequired:
-          retryable.restartRecoverySameChannelThreadRequired,
-        restartRecoverySourceIngress: retryable.restartRecoverySourceIngress,
-        restartRecoverySourceReplyDeliveryMode: retryable.restartRecoverySourceReplyDeliveryMode,
-        restartRecoveryTerminalRunIds: retryable.restartRecoveryTerminalRunIds,
-        status: retryable.status,
-      },
+      expectedSessionState: buildRestartRecoveryExpectedState(retryable),
       messages: [
         {
           idempotencyLookup: "scan",
@@ -3841,12 +3073,7 @@ describe("session accessor seam", () => {
   });
 
   it("rejects expected-session transcript turns after a session rebind", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-original",
-      sessionKey: "agent:main:main",
-      storePath,
-    };
+    const scope = transcriptScope("session-original", "agent:main:main");
     await upsertSessionEntryCore(scope, {
       sessionId: scope.sessionId,
       updatedAt: 10,
@@ -3886,70 +3113,8 @@ describe("session accessor seam", () => {
     await expect(loadTranscriptEvents(scope)).resolves.toEqual([]);
   });
 
-  it("rejects an expected-session transcript turn rebound during predicate preparation", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-predicate-original",
-      sessionKey: "agent:main:predicate-rebind",
-      storePath,
-    };
-    await upsertSessionEntryCore(scope, {
-      lifecycleRevision: "predicate-revision",
-      sessionId: scope.sessionId,
-      updatedAt: 10,
-    });
-    let releasePredicate!: () => void;
-    let markPredicateStarted!: () => void;
-    const predicateStarted = new Promise<void>((resolve) => {
-      markPredicateStarted = resolve;
-    });
-    const predicateGate = new Promise<void>((resolve) => {
-      releasePredicate = resolve;
-    });
-    const pendingTurn = persistSessionTranscriptTurn(scope, {
-      expectedLifecycleRevision: "predicate-revision",
-      expectedSessionId: scope.sessionId,
-      messages: [
-        {
-          message: { role: "assistant", content: "late reply", timestamp: 100 },
-          shouldAppend: async () => {
-            markPredicateStarted();
-            await predicateGate;
-            return true;
-          },
-        },
-      ],
-      touchSessionEntry: true,
-      updateMode: "file-only",
-    });
-
-    await predicateStarted;
-    let replacementError: unknown;
-    try {
-      replaceSessionEntrySync(scope, {
-        lifecycleRevision: "replacement-revision",
-        sessionId: "session-predicate-replacement",
-        updatedAt: 20,
-      });
-    } catch (error) {
-      replacementError = error;
-    } finally {
-      releasePredicate();
-    }
-    const result = await pendingTurn;
-
-    expect(replacementError).toBeUndefined();
-    expect(result).toMatchObject({ appendedCount: 0, rejectedReason: "session-rebound" });
-    await expect(loadTranscriptEvents(scope)).resolves.toEqual([]);
-  });
-
   it("exposes only transcript identity to append predicates", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-predicate-context",
-      sessionKey: "agent:main:predicate-context",
-      storePath,
-    };
+    const scope = transcriptScope("session-predicate-context", "agent:main:predicate-context");
     await upsertSessionEntryCore(scope, {
       sessionId: scope.sessionId,
       updatedAt: 10,
@@ -3975,12 +3140,7 @@ describe("session accessor seam", () => {
   });
 
   it("rejects a guarded transcript turn when same-session lifecycle ownership changes", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-same-owner",
-      sessionKey: "agent:main:same-owner",
-      storePath,
-    };
+    const scope = transcriptScope("session-same-owner", "agent:main:same-owner");
     await upsertSessionEntryCore(scope, {
       sessionId: scope.sessionId,
       abortedLastRun: true,
@@ -3993,32 +3153,9 @@ describe("session accessor seam", () => {
     if (!stored) {
       throw new Error("expected guarded session");
     }
-    const expectedSessionState = {
-      abortedLastRun: stored.abortedLastRun,
-      mainRestartRecoveryCycleId: undefined,
-      mainRestartRecoveryRevision: undefined,
-      restartRecoveryBeforeAgentReplyState: stored.restartRecoveryBeforeAgentReplyState,
-      restartRecoveryDeliveryReceiptState: stored.restartRecoveryDeliveryReceiptState,
-      restartRecoveryDeliveryToolCallId: stored.restartRecoveryDeliveryToolCallId,
-      restartRecoveryDeliveryRequestFingerprint: stored.restartRecoveryDeliveryRequestFingerprint,
-      restartRecoveryDeliveryRunId: stored.restartRecoveryDeliveryRunId,
-      restartRecoveryDeliverySourceRunId: stored.restartRecoveryDeliverySourceRunId,
-      restartRecoveryRequesterAccountId: stored.restartRecoveryRequesterAccountId,
-      restartRecoveryRequesterSenderId: stored.restartRecoveryRequesterSenderId,
-      restartRecoverySameChannelThreadRequired: stored.restartRecoverySameChannelThreadRequired,
-      restartRecoverySourceIngress: stored.restartRecoverySourceIngress,
-      restartRecoverySourceReplyDeliveryMode: stored.restartRecoverySourceReplyDeliveryMode,
-      restartRecoveryTerminalRunIds: stored.restartRecoveryTerminalRunIds,
-      status: stored.status,
-    };
-    let releasePredicate!: () => void;
-    let markPredicateStarted!: () => void;
-    const predicateStarted = new Promise<void>((resolve) => {
-      markPredicateStarted = resolve;
-    });
-    const predicateGate = new Promise<void>((resolve) => {
-      releasePredicate = resolve;
-    });
+    const expectedSessionState = buildRestartRecoveryExpectedState(stored);
+    const predicateStarted = createDeferred();
+    const predicateGate = createDeferred();
     const pendingTurn = persistSessionTranscriptTurn(scope, {
       expectedSessionId: scope.sessionId,
       expectedSessionState,
@@ -4026,8 +3163,8 @@ describe("session accessor seam", () => {
         {
           message: { role: "assistant", content: "stale recovery notice", timestamp: 100 },
           shouldAppend: async () => {
-            markPredicateStarted();
-            await predicateGate;
+            predicateStarted.resolve();
+            await predicateGate.promise;
             return true;
           },
         },
@@ -4036,7 +3173,7 @@ describe("session accessor seam", () => {
       updateMode: "file-only",
     });
 
-    await predicateStarted;
+    await predicateStarted.promise;
     replaceSessionEntrySync(scope, {
       abortedLastRun: false,
       restartRecoveryDeliveryRunId: "new-run",
@@ -4045,7 +3182,7 @@ describe("session accessor seam", () => {
       status: "running",
       updatedAt: 20,
     });
-    releasePredicate();
+    predicateGate.resolve();
     const result = await pendingTurn;
 
     expect(result).toMatchObject({ appendedCount: 0, rejectedReason: "session-rebound" });
@@ -4053,12 +3190,7 @@ describe("session accessor seam", () => {
   });
 
   it("rejects expected-session transcript turns after lifecycle ownership changes", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-original",
-      sessionKey: "agent:main:main",
-      storePath,
-    };
+    const scope = transcriptScope("session-original", "agent:main:main");
     await upsertSessionEntryCore(scope, {
       lifecycleRevision: "original-revision",
       sessionId: scope.sessionId,
@@ -4099,113 +3231,52 @@ describe("session accessor seam", () => {
     await expect(loadTranscriptEvents(scope)).resolves.toEqual([]);
   });
 
-  it("routes SQLite transcript turn appends through an active owned write context", async () => {
-    const scope = {
+  it("keeps the persisted transcript owner when a caller supplies a stale session key", async () => {
+    const sessionId = "session-canonical-owner";
+    const canonicalScope = {
       agentId: "main",
-      sessionFile: transcriptPath,
-      sessionId: "session-owned-publish",
-      sessionKey: "agent:main:owned-publish",
-      storePath,
-    };
-    let ownedWriteCount = 0;
-
-    await withOwnedSessionTranscriptWrites(
-      {
-        sessionFile: scope.sessionKey,
-        sessionKey: scope.sessionKey,
-        sessionTarget: scope,
-        withTranscriptWrite: async (run) => {
-          ownedWriteCount += 1;
-          return await run();
-        },
-      },
-      async () =>
-        await persistSessionTranscriptTurn(scope, {
-          cwd: tempDir,
-          messages: [
-            {
-              message: {
-                role: "assistant",
-                content: "owned batch",
-                timestamp: 100,
-              },
-            },
-          ],
-          publishWhen: "always",
-          touchSessionEntry: true,
-          updateMode: "file-only",
-        }),
-    );
-
-    expect(ownedWriteCount).toBe(1);
-    await expect(loadTranscriptEvents(scope)).resolves.toHaveLength(2);
-  });
-
-  it("fences matching sync transcript mutations with the admitted writer claim", async () => {
-    const scope = {
-      agentId: "main",
-      sessionId: "session-owned-fence",
-      sessionKey: "agent:main:owned-fence",
-      storePath,
-    };
-    replaceSessionEntrySync(scope, {
-      activeWriterRunId: "current-run",
-      sessionId: scope.sessionId,
-      updatedAt: 1,
-    } as InternalSessionEntry);
-
-    await withOwnedSessionTranscriptWrites(
-      {
-        sessionFile: scope.sessionKey,
-        sessionKey: scope.sessionKey,
-        sessionTarget: {
-          ...scope,
-          expectedWriterRunId: "superseded-run",
-        },
-        withTranscriptWrite: async (run) => await run(),
-      },
-      async () => {
-        expect(ensureSessionEntrySync(scope, { sessionId: scope.sessionId, updatedAt: 2 })).toBe(
-          true,
-        );
-        expect(() => replaceTranscriptEventsSync(scope, [])).toThrow(
-          SessionTranscriptWriterClaimReboundError,
-        );
-      },
-    );
-
-    expect(loadSessionEntry(scope)?.updatedAt).toBe(1);
-    await expect(loadTranscriptEvents(scope)).resolves.toEqual([]);
-  });
-
-  it("resolves store-backed runtime transcript targets from structured identity", async () => {
-    const staleSessionFile = path.join(tempDir, "session-1.jsonl");
-    const scope = {
-      agentId: "main",
-      sessionId: "session-1",
+      sessionId,
       sessionKey: "agent:main:main",
       storePath,
     };
+    await upsertSessionEntryCore(canonicalScope, { sessionId, updatedAt: 10 });
 
-    await upsertSessionEntryCore(scope, {
-      sessionId: scope.sessionId,
-      sessionFile: staleSessionFile,
-      updatedAt: 10,
+    const target = await resolveSessionTranscriptRuntimeTarget({
+      ...canonicalScope,
+      sessionKey: "agent:main:telegram:default:direct:fixture-peer",
+    });
+    await appendTranscriptEvent(target, {
+      id: "canonical-owner-event",
+      timestamp: new Date(20).toISOString(),
+      type: "metadata",
     });
 
-    const readTarget = await resolveSessionTranscriptRuntimeTarget(scope);
-    const writeTarget = await resolveSessionTranscriptRuntimeTarget(scope);
-
-    expect(readTarget).toEqual(scope);
-    expect(writeTarget).toEqual(scope);
-    expect(loadSessionEntry(scope)).not.toHaveProperty("sessionFile");
+    const database = openOpenClawAgentDatabase({
+      agentId: "main",
+      path: expectDefined(
+        resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
+        "session database path",
+      ),
+    });
+    expect(
+      database.db
+        .prepare("SELECT session_key, entry_valid FROM session_nodes ORDER BY session_key")
+        .all(),
+    ).toEqual([{ session_key: canonicalScope.sessionKey, entry_valid: 1 }]);
+    expect(
+      database.db
+        .prepare("SELECT session_key FROM session_windows WHERE session_id = ?")
+        .get(sessionId),
+    ).toEqual({ session_key: canonicalScope.sessionKey });
+    expect(target.sessionKey).toBe(canonicalScope.sessionKey);
   });
 
-  it("drops imported legacy session transcript paths from canonical rows", async () => {
+  it("drops imported legacy transcript paths and untrusted owners from canonical rows", async () => {
     const sessionKey = "agent:main:main";
     await importSqliteSessionRows({
       agentId: "main",
       entry: {
+        owner: { actor: { type: "human", id: "spoofed" } },
         sessionFile: path.join(tempDir, "legacy-transcript.jsonl"),
         sessionId: "session-1",
         updatedAt: 10,
@@ -4214,36 +3285,33 @@ describe("session accessor seam", () => {
       storePath,
     });
 
-    expect(
-      loadExactSessionEntry({
-        agentId: "main",
-        sessionKey,
-        storePath,
-      })?.entry,
-    ).not.toHaveProperty("sessionFile");
+    const entry = loadExactSessionEntry({
+      agentId: "main",
+      sessionKey,
+      storePath,
+    })?.entry;
+    expect(entry).not.toHaveProperty("sessionFile");
+    expect(entry).not.toHaveProperty("owner");
   });
 
   it("tracks replacement and deletion transcript mutations", async () => {
     const dateNow = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
-    const scope = {
-      agentId: "main",
-      sessionId: "session-1",
-      sessionKey: "agent:main:main",
-      storePath,
-    };
+    const scope = transcriptScope("session-1", "agent:main:main");
     await upsertSessionEntryCore(scope, {
       sessionId: scope.sessionId,
       updatedAt: 10,
     });
-    await replaceTranscriptEvents(scope, [
+    const events = [
       { sessionId: scope.sessionId, type: "session" },
-      { timestamp: "1970-01-01T00:00:00.001Z", type: "custom" },
-    ]);
+      { timestamp: "1970-01-01T00:00:00.001Z", type: "custom", text: "🦞 café\u0000尾" },
+    ];
+    await replaceTranscriptEvents(scope, events);
 
     const replaced = readTranscriptStatsSync(scope);
     expect(replaced).toMatchObject({
       eventCount: 2,
       lastMutationAtMs: expect.any(Number),
+      sizeBytes: Buffer.byteLength(events.map((event) => JSON.stringify(event)).join("\n")),
     });
     expect(replaced.lastMutationAtMs).toBeGreaterThanOrEqual(1_700_000_000_000);
 
@@ -4260,6 +3328,7 @@ describe("session accessor seam", () => {
     const imported = readTranscriptStatsSync(scope);
     expect(imported.lastMutationAtMs).toBe(replaced.lastMutationAtMs);
     expect(imported.lastObservedMutationAtMs).toBe(replaced.lastMutationAtMs);
+    expect(imported.sizeBytes).toBe(replaced.sizeBytes);
 
     await replaceTranscriptEvents(scope, []);
 
@@ -4268,47 +3337,127 @@ describe("session accessor seam", () => {
     expect(cleared).toMatchObject({
       eventCount: 0,
       lastMutationAtMs: expect.any(Number),
+      sizeBytes: 0,
     });
     expect(cleared.lastMutationAtMs).toBeGreaterThan(imported.lastMutationAtMs ?? 0);
   });
 
-  it("preserves transcript generation on append and rotates it on replacement", async () => {
+  it("creates entries with initialized SQLite transcripts and scoped session metadata", async () => {
     const scope = {
       agentId: "main",
-      sessionId: "generation-session",
-      sessionKey: "agent:main:generation-session",
+      sessionKey: "agent:main:main",
       storePath,
     };
-    const databasePath = resolveSqliteTargetFromSessionStorePath(storePath, {
-      agentId: scope.agentId,
-    }).path;
-    expect(databasePath).toBeDefined();
-    const readGeneration = () =>
-      openOpenClawAgentDatabase({ agentId: scope.agentId, path: databasePath })
-        .db.prepare("SELECT generation FROM transcript_rewrite_watermarks WHERE session_id = ?")
-        .get(scope.sessionId) as { generation: string } | undefined;
 
-    await appendTranscriptMessage(scope, {
-      message: { role: "user", content: "first" },
-    });
-    const first = readGeneration()?.generation;
-    expect(first).toMatch(/^[0-9a-f]{32}$/);
+    const created = await createSessionEntryWithTranscript(
+      scope,
+      ({ existingEntry, targetEntry, labelInUse }) => {
+        expect(existingEntry).toBeUndefined();
+        expect(targetEntry).toBeUndefined();
+        expect(labelInUse).toBe(false);
+        return {
+          ok: true,
+          entry: {
+            sessionId: "session-1",
+            updatedAt: 10,
+          },
+        };
+      },
+    );
 
-    await appendTranscriptMessage(scope, {
-      message: { role: "assistant", content: "second" },
-    });
-    expect(readGeneration()?.generation).toBe(first);
+    expect(created.ok).toBe(true);
+    if (!created.ok) {
+      throw new Error("expected session creation to succeed");
+    }
+    expect(created.sessionFile).toBe(scope.sessionKey);
+    expect(created.entry).not.toHaveProperty("sessionFile");
+    await expect(
+      loadTranscriptEvents({
+        agentId: "main",
+        sessionId: "session-1",
+        sessionKey: "agent:main:main",
+        storePath,
+      }),
+    ).resolves.toEqual([expect.objectContaining({ id: "session-1", type: "session" })]);
+  });
 
-    await replaceTranscriptEvents(scope, [
-      { sessionId: scope.sessionId, type: "session" },
-      { id: "replacement", parentId: null, type: "custom" },
+  it("opens a borrowed read view with raw exact-key probes and deferred enumeration", async () => {
+    const mixedKey = "agent:main:matrix:channel:!RoomAbC:example.org";
+    const skillsSnapshot = { prompt: "saved skill prompt", skills: [] };
+    await upsertSessionEntryCore(
+      { sessionKey: mixedKey, storePath },
+      { sessionId: "mixed-session", updatedAt: 10, skillsSnapshot },
+    );
+
+    const view = openSessionEntryReadView({ storePath });
+
+    expect(view.get(mixedKey)?.sessionId).toBe("mixed-session");
+    expect(view.get(mixedKey)?.skillsSnapshot).toEqual(skillsSnapshot);
+    // Raw probe contract: unlike loadSessionEntry, no folded-alias or
+    // canonical-key resolution happens on get.
+    expect(view.get(mixedKey.toLowerCase())).toBeUndefined();
+    expect(view.entries()).toEqual([
+      {
+        sessionKey: mixedKey,
+        entry: expect.objectContaining({ sessionId: "mixed-session" }),
+      },
     ]);
-    const replaced = readGeneration()?.generation;
-    expect(replaced).toMatch(/^[0-9a-f]{32}$/);
-    expect(replaced).not.toBe(first);
+    const metadata = openSessionEntryReadView({ storePath, projection: "list" });
+    expect(metadata.get(mixedKey)?.skillsSnapshot).toBeUndefined();
+    expect(metadata.entries()).toEqual([{ sessionKey: mixedKey, entry: metadata.get(mixedKey) }]);
+  });
 
-    await replaceTranscriptEvents(scope, []);
-    expect(readGeneration()?.generation).not.toBe(replaced);
+  it("returns an implicit candidate fallback without persisting it", () => {
+    const resolved = resolveSessionEntryCandidateTarget({
+      agentId: "main",
+      candidateKeys: ["agent:main:missing"],
+      cfg: { session: { store: storePath } },
+      fallback: {
+        sessionKey: "agent:main:current",
+        entry: {
+          sessionId: "",
+          updatedAt: 40,
+        },
+      },
+    });
+
+    expect(resolved).toEqual({
+      agentId: "main",
+      candidateKey: "agent:main:current",
+      entry: {
+        sessionId: "",
+        updatedAt: 40,
+      },
+      persisted: false,
+      sessionKey: "agent:main:current",
+    });
+    expect(fs.existsSync(storePath)).toBe(false);
+  });
+
+  it("reads imported transcripts before opening the SQLite transaction", async () => {
+    const agentId = "main";
+    const sessionId = "session-1";
+    const database = openOpenClawAgentDatabase({
+      agentId,
+      path: expectDefined(
+        resolveSqliteTargetFromSessionStorePath(storePath, { agentId }).path,
+        "session database path",
+      ),
+    });
+    let readInsideTransaction: boolean | undefined;
+
+    await importSqliteSessionRows({
+      agentId,
+      entry: { sessionId, updatedAt: 10 },
+      readTranscriptEvents: (append) => {
+        readInsideTransaction = database.db.isTransaction;
+        append({ sessionId, type: "session" });
+      },
+      sessionKey: "agent:main:main",
+      storePath,
+    });
+
+    expect(readInsideTransaction).toBe(false);
   });
 
   it("ignores an explicit legacy read file and resolves SQLite identity", () => {
@@ -4328,33 +3477,6 @@ describe("session accessor seam", () => {
     expect(target).not.toHaveProperty("sessionFile");
   });
 
-  it("does not expose legacy custom transcript paths as read fallbacks after SQLite migration", async () => {
-    const legacyTranscript = path.join(tempDir, "custom-topic-transcript.jsonl");
-    const sessionKey = "agent:main:telegram:group:1:topic:9";
-    await upsertSessionEntryCore(
-      { sessionKey, storePath },
-      {
-        sessionId: "custom-topic-session",
-        sessionFile: legacyTranscript,
-        updatedAt: 10,
-      },
-    );
-
-    const target = resolveSessionTranscriptReadTarget({
-      agentId: "main",
-      sessionId: "custom-topic-session",
-      sessionKey,
-      storePath,
-    });
-
-    expect(target).toEqual({
-      agentId: "main",
-      sessionId: "custom-topic-session",
-      sessionKey,
-      storePath,
-    });
-  });
-
   it("preserves a matching preloaded entry identity without rereading the session row", () => {
     const sessionKey = "agent:main:preloaded-read";
     const target = resolveSessionTranscriptReadTarget({
@@ -4368,32 +3490,6 @@ describe("session accessor seam", () => {
     expect(target).toEqual({
       agentId: "main",
       sessionId: "preloaded-session",
-      sessionKey,
-      storePath,
-    });
-  });
-
-  it("does not trust a preloaded entry for a different session id", async () => {
-    const sessionKey = "agent:main:mismatched-preloaded-read";
-    await upsertSessionEntryCore(
-      { sessionKey, storePath },
-      {
-        sessionId: "stored-session",
-        updatedAt: 10,
-      },
-    );
-
-    const target = resolveSessionTranscriptReadTarget({
-      agentId: "main",
-      sessionEntry: { sessionId: "different-session" },
-      sessionId: "stored-session",
-      sessionKey,
-      storePath,
-    });
-
-    expect(target).toEqual({
-      agentId: "main",
-      sessionId: "stored-session",
       sessionKey,
       storePath,
     });

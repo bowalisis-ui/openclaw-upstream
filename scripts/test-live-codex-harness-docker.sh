@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Bash 5.3+ can deadlock writing heredoc pipes on macOS before the reader starts.
+if [[ ${OSTYPE:-} == darwin* && $BASH != /bin/bash ]] && ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 3))); then
+  exec /bin/bash "$0" "$@"
+fi
 set -euo pipefail
 
 SCRIPT_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,18 +37,6 @@ DOCKER_CACHE_CONTAINER_DIR="/tmp/openclaw-cache"
 DOCKER_CLI_TOOLS_CONTAINER_DIR="/tmp/openclaw-npm-global"
 DOCKER_EXTRA_ENV_FILES=()
 DOCKER_AUTH_PRESTAGED=0
-
-openclaw_live_codex_harness_append_build_extension() {
-  local extension="${1:?extension required}"
-  local current="${OPENCLAW_DOCKER_BUILD_EXTENSIONS:-${OPENCLAW_EXTENSIONS:-}}"
-  case " $current " in
-    *" $extension "*)
-      ;;
-    *)
-      export OPENCLAW_DOCKER_BUILD_EXTENSIONS="${current:+$current }$extension"
-      ;;
-  esac
-}
 
 case "$CODEX_HARNESS_AUTH_MODE" in
   codex-auth | api-key)
@@ -191,16 +183,13 @@ tmp_dir="$(mktemp -d)"
 openclaw_live_stage_source_tree "$tmp_dir"
 openclaw_live_stage_node_modules "$tmp_dir"
 openclaw_live_link_runtime_tree "$tmp_dir"
-if [ -d /app/dist-runtime/extensions/codex ]; then
-  export OPENCLAW_BUNDLED_PLUGINS_DIR=/app/dist-runtime/extensions
-elif [ -d /app/dist/extensions/codex ]; then
-  export OPENCLAW_BUNDLED_PLUGINS_DIR=/app/dist/extensions
-elif [ -f "$tmp_dir/extensions/codex/openclaw.plugin.json" ]; then
-  export OPENCLAW_BUNDLED_PLUGINS_DIR="$tmp_dir/extensions"
-else
+if [ ! -f "$tmp_dir/extensions/codex/openclaw.plugin.json" ]; then
   echo "ERROR: staged Codex plugin not found for live harness." >&2
   exit 1
 fi
+# Source Gateway and plugin must share one prepared-runtime owner; built artifacts own a
+# separate lifecycle and are validated by the packaged-plugin Docker lane instead.
+export OPENCLAW_BUNDLED_PLUGINS_DIR="$tmp_dir/extensions"
 openclaw_live_stage_state_dir "$tmp_dir/.openclaw-state"
 if [ -n "${OPENCLAW_LIVE_CODEX_TRUSTED_HARNESS_DIR:-}" ] && [ -d "$OPENCLAW_LIVE_CODEX_TRUSTED_HARNESS_DIR" ]; then
   for harness_file in src/gateway/gateway-codex-harness.live-helpers.ts; do
@@ -235,7 +224,7 @@ run_codex_harness_target() {
   export OPENCLAW_LIVE_CODEX_HARNESS_MODEL="$model"
   export OPENCLAW_LIVE_CODEX_HARNESS_THINKING="$thinking"
   echo "==> Codex harness target: model=$model thinking=$thinking"
-  node --import tsx scripts/test-live.mts -- ${OPENCLAW_LIVE_CODEX_TEST_FILES:-src/gateway/gateway-codex-harness.live.test.ts}
+  openclaw_live_run_staged_script scripts/test-live -- ${OPENCLAW_LIVE_CODEX_TEST_FILES:-src/gateway/gateway-codex-harness.live.test.ts}
 }
 if [ -n "${OPENCLAW_LIVE_CODEX_HARNESS_TARGETS:-}" ]; then
   IFS=',' read -r -a harness_targets <<<"$OPENCLAW_LIVE_CODEX_HARNESS_TARGETS"
@@ -255,7 +244,7 @@ else
 fi
 EOF
 
-openclaw_live_codex_harness_append_build_extension codex
+openclaw_live_require_build_extension codex
 # The release package image intentionally excludes externalized plugins such as
 # Codex. This lane must rebuild the live image so the plugin-owned harness is
 # present under the bundled plugin runtime directory.

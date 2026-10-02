@@ -1,7 +1,3 @@
-import {
-  validateAndSanitizeRemoteModelCatalogBundle,
-  type RemoteModelCatalogBundle,
-} from "@openclaw/model-catalog-core";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { compareOpenClawVersions } from "../config/version.js";
 import { readResponseWithLimit } from "../infra/http-body.js";
@@ -13,12 +9,16 @@ import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db.js
 import { VERSION } from "../version.js";
 import { bundledCatalogGeneratedAt } from "./bundled-catalog-stamp.js";
 import {
+  parseRemoteModelCatalogWireBundle,
+  type RemoteModelCatalogWireBundle,
+} from "./remote-bundle.js";
+import { isRemoteModelCatalogRefreshEnabled, resolveRemoteCatalogUrl } from "./remote-config.js";
+import {
   markRemoteModelCatalogChecked,
   readRemoteModelCatalog,
   writeRemoteModelCatalog,
 } from "./remote-store.js";
 
-const DEFAULT_REMOTE_MODEL_CATALOG_URL = "https://catalog.openclaw.ai/models/v1/catalog.json";
 export const REMOTE_MODEL_CATALOG_TTL_MS = 6 * 60 * 60_000;
 const REMOTE_MODEL_CATALOG_TIMEOUT_MS = 15_000;
 const REMOTE_MODEL_CATALOG_MAX_BYTES = 4 * 1024 * 1024;
@@ -30,28 +30,25 @@ type RemoteModelCatalogRefreshResult =
   | { status: "disabled"; providers: 0; models: 0 }
   | { status: "error"; error: string; providers: 0; models: 0 };
 
-export function isRemoteModelCatalogRefreshEnabled(config: OpenClawConfig): boolean {
-  return config.models?.catalogRefresh?.enabled !== false;
-}
-
-export function resolveRemoteCatalogUrl(config: OpenClawConfig): string {
-  return config.models?.catalogRefresh?.url?.trim() || DEFAULT_REMOTE_MODEL_CATALOG_URL;
-}
-
-function bundleCounts(bundle: RemoteModelCatalogBundle): RefreshCounts {
-  const providers = Object.values(bundle.providers);
+function bundleCounts(bundle: RemoteModelCatalogWireBundle): RefreshCounts {
   return {
-    providers: providers.length,
-    models: providers.reduce((total, provider) => total + provider.models.length, 0),
+    providers: Object.keys(bundle.providers).length,
+    models:
+      bundle.schemaVersion === 2
+        ? bundle.models.length
+        : Object.values(bundle.providers).reduce(
+            (total, provider) => total + provider.models.length,
+            0,
+          ),
   };
 }
 
 function storedCounts(bundleJson: string): RefreshCounts & { generatedAt: number } {
-  const bundle = validateAndSanitizeRemoteModelCatalogBundle(JSON.parse(bundleJson));
+  const bundle = parseRemoteModelCatalogWireBundle(JSON.parse(bundleJson));
   return { ...bundleCounts(bundle), generatedAt: bundle.generatedAt };
 }
 
-function assertCompatibleMinVersion(bundle: RemoteModelCatalogBundle): void {
+function assertCompatibleMinVersion(bundle: RemoteModelCatalogWireBundle): void {
   if (!bundle.minVersion) {
     return;
   }
@@ -164,7 +161,7 @@ export async function refreshRemoteModelCatalog(params: {
       const body = await readResponseWithLimit(guarded.response, REMOTE_MODEL_CATALOG_MAX_BYTES, {
         chunkTimeoutMs: REMOTE_MODEL_CATALOG_TIMEOUT_MS,
       });
-      const bundle = validateAndSanitizeRemoteModelCatalogBundle(
+      const bundle = parseRemoteModelCatalogWireBundle(
         JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)),
       );
       assertCompatibleMinVersion(bundle);

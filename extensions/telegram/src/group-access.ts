@@ -1,7 +1,7 @@
-// Telegram plugin module implements group access behavior.
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import type { ChannelGroupPolicy } from "openclaw/plugin-sdk/config-contracts";
+import { firstDefined } from "openclaw/plugin-sdk/allow-from";
 import type {
+  ChannelGroupPolicy,
+  OpenClawConfig,
   TelegramAccountConfig,
   TelegramDirectConfig,
   TelegramGroupConfig,
@@ -9,7 +9,6 @@ import type {
 } from "openclaw/plugin-sdk/config-contracts";
 import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
 import { isSenderAllowed, type NormalizedAllowFrom } from "./bot-access.js";
-import { firstDefined } from "./bot-access.js";
 
 type TelegramGroupBaseBlockReason =
   | "group-disabled"
@@ -58,33 +57,10 @@ export const evaluateTelegramGroupBaseAccess = (params: {
   if (params.topicConfig?.enabled === false) {
     return { allowed: false, reason: "topic-disabled" };
   }
-  if (!params.isGroup) {
-    // For DMs, check allowFrom override if present
-    if (params.enforceAllowOverride && params.hasGroupAllowOverride) {
-      if (
-        !isGroupAllowOverrideAuthorized({
-          effectiveGroupAllow: params.effectiveGroupAllow,
-          senderId: params.senderId,
-          senderUsername: params.senderUsername,
-          requireSenderForAllowOverride: params.requireSenderForAllowOverride,
-        })
-      ) {
-        return { allowed: false, reason: "group-override-unauthorized" };
-      }
-    }
-    return { allowed: true };
-  }
-  if (!params.enforceAllowOverride || !params.hasGroupAllowOverride) {
-    return { allowed: true };
-  }
-
   if (
-    !isGroupAllowOverrideAuthorized({
-      effectiveGroupAllow: params.effectiveGroupAllow,
-      senderId: params.senderId,
-      senderUsername: params.senderUsername,
-      requireSenderForAllowOverride: params.requireSenderForAllowOverride,
-    })
+    params.enforceAllowOverride &&
+    params.hasGroupAllowOverride &&
+    !isGroupAllowOverrideAuthorized(params)
   ) {
     return { allowed: false, reason: "group-override-unauthorized" };
   }
@@ -106,16 +82,7 @@ type TelegramGroupPolicyAccessResult =
       groupPolicy: "open" | "disabled" | "allowlist";
     };
 
-export const resolveTelegramRuntimeGroupPolicy = (params: {
-  providerConfigPresent: boolean;
-  groupPolicy?: TelegramAccountConfig["groupPolicy"];
-  defaultGroupPolicy?: TelegramAccountConfig["groupPolicy"];
-}) =>
-  resolveOpenProviderRuntimeGroupPolicy({
-    providerConfigPresent: params.providerConfigPresent,
-    groupPolicy: params.groupPolicy,
-    defaultGroupPolicy: params.defaultGroupPolicy,
-  });
+export const resolveTelegramRuntimeGroupPolicy = resolveOpenProviderRuntimeGroupPolicy;
 
 export const resolveTelegramEffectiveGroupPolicy = (params: {
   cfg: OpenClawConfig;

@@ -4,8 +4,9 @@ import {
   createPluginRuntimeMediaMock,
   createPluginRuntimeMock,
 } from "openclaw/plugin-sdk/channel-test-helpers";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { expect, vi } from "vitest";
-import type { OpenClawConfig, PluginRuntime } from "../runtime-api.js";
 import type { ResolvedZaloAccount } from "../types.js";
 
 type LifecycleMonitorSetupParams = {
@@ -346,12 +347,10 @@ export async function postWebhookReplay(params: {
   path: string;
   secret: string;
   payload: Record<string, unknown>;
-  settleBeforeReplay?: boolean;
+  beforeReplay?: () => Promise<void>;
 }) {
   const first = await postWebhookUpdate(params);
-  if (params.settleBeforeReplay) {
-    await settleAsyncWork();
-  }
+  await params.beforeReplay?.();
   const replay = await postWebhookUpdate(params);
   return { first, replay };
 }

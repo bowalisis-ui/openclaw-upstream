@@ -5,12 +5,22 @@ import {
   NODE_MCP_TOOL_CALL_GATEWAY_TIMEOUT_MS,
   NODE_MCP_TOOL_CALL_TIMEOUT_MS,
   NODE_MCP_TOOLS_CALL_COMMAND,
+  NODE_PLUGIN_TOOL_CALL_GATEWAY_TIMEOUT_MS,
+  NODE_PLUGIN_TOOL_CALL_TIMEOUT_MS,
 } from "../infra/node-commands.js";
-import { setPluginToolMeta } from "../plugins/tools.js";
-import { sanitizeServerName } from "./agent-bundle-mcp-names.js";
+import {
+  createPluginToolAllowlist,
+  type PluginToolAllowlist,
+} from "../plugins/tool-grant-allowlist.js";
+import { setPluginToolMeta } from "../plugins/tool-metadata.js";
+import { sanitizeNodeIdFragment, sanitizeServerName } from "./agent-bundle-mcp-names.js";
 import { compileGlobPatterns, matchesAnyGlobPattern } from "./glob-pattern.js";
+import {
+  projectMcpCallToolResult,
+  setMcpCodeModeGuestResultFromAgentResult,
+} from "./mcp-content.js";
 import type { AgentToolResult } from "./runtime/index.js";
-import { DEFAULT_PLUGIN_TOOLS_ALLOWLIST_ENTRY, normalizeToolPolicyName } from "./tool-policy.js";
+import { normalizeToolPolicyName } from "./tool-policy.js";
 import { jsonResult } from "./tools/common.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { callGatewayTool } from "./tools/gateway.js";
@@ -28,51 +38,11 @@ function isAgentToolResult(value: unknown): value is AgentToolResult<unknown> {
   return isRecord(value) && Array.isArray(value.content);
 }
 
-function readNodeInvokePayload(value: unknown): unknown {
-  return isRecord(value) && "payload" in value ? value.payload : value;
-}
-
-function mapMcpPayloadToAgentToolResult(payload: unknown): AgentToolResult<unknown> {
-  if (!isRecord(payload)) {
-    return jsonResult(payload);
-  }
-  const rawContent = Array.isArray(payload.content) ? payload.content : [];
-  const content: AgentToolResult<unknown>["content"] = [];
-  for (const block of rawContent) {
-    if (!isRecord(block)) {
-      continue;
-    }
-    if (block.type === "text" && typeof block.text === "string") {
-      content.push({ type: "text", text: block.text });
-    } else if (
-      block.type === "image" &&
-      typeof block.data === "string" &&
-      typeof block.mimeType === "string"
-    ) {
-      content.push({ type: "image", data: block.data, mimeType: block.mimeType });
-    }
-  }
-  const structuredText = isRecord(payload.structuredContent)
-    ? JSON.stringify(payload.structuredContent, null, 2)
-    : "";
-  if (structuredText) {
-    content.push({ type: "text", text: structuredText });
-  }
-  return {
-    content,
-    details: payload,
-  };
-}
-
-function normalizePolicyNames(values: readonly string[] | undefined): Set<string> {
-  return new Set((values ?? []).map((value) => normalizeToolPolicyName(value)).filter(Boolean));
-}
-
 function toolPolicyAllows(params: {
   pluginId: string;
   toolName: string;
   exposedToolName?: string;
-  allowlist: Set<string>;
+  allowlist: PluginToolAllowlist;
   denylist: ReturnType<typeof compileGlobPatterns>;
   registered: boolean;
 }): boolean {
@@ -87,7 +57,7 @@ function toolPolicyAllows(params: {
   ) {
     return false;
   }
-  if (params.allowlist.size === 0 || params.allowlist.has(DEFAULT_PLUGIN_TOOLS_ALLOWLIST_ENTRY)) {
+  if (params.allowlist.includesDefaults) {
     return true;
   }
   // pluginId is node-supplied for unregistered descriptors, so it must not
@@ -95,38 +65,10 @@ function toolPolicyAllows(params: {
   // The reserved node-mcp id is safe: real plugins can never register it.
   const pluginIdTrusted = params.registered || pluginId === "node-mcp";
   return (
-    params.allowlist.has("*") ||
-    params.allowlist.has("group:plugins") ||
-    (pluginIdTrusted && params.allowlist.has(pluginId)) ||
-    params.allowlist.has(toolName) ||
-    params.allowlist.has(exposedToolName)
+    (pluginIdTrusted && params.allowlist.allowsPlugin(pluginId)) ||
+    params.allowlist.allowsToolName(toolName) ||
+    params.allowlist.allowsToolName(exposedToolName)
   );
-}
-
-function describeNodeToolLocation(params: {
-  description: string;
-  displayName?: string;
-  nodeId: string;
-}): string {
-  const label = params.displayName?.trim() || params.nodeId;
-  return `${params.description} (node: ${label})`;
-}
-
-function sanitizeToolNameFragment(value: string): string {
-  const fragment = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 32);
-  if (!fragment) {
-    return "node";
-  }
-  return /^[a-z]/.test(fragment) ? fragment : `node_${fragment}`.slice(0, 32);
-}
-
-function isProviderSafeToolName(value: string): boolean {
-  return NODE_PLUGIN_TOOL_NAME_RE.test(value);
 }
 
 function prependToolNameFragment(baseName: string, fragment: string, suffix: string): string {
@@ -148,13 +90,13 @@ function resolveUniqueToolName(params: {
   if (params.duplicateCount === 1 && !params.existingNormalized.has(params.normalizedName)) {
     return params.baseName;
   }
-  const nodeFragment = sanitizeToolNameFragment(params.nodeId);
+  const nodeFragment = sanitizeNodeIdFragment(params.nodeId);
   for (let index = 0; index < 100; index += 1) {
     const suffix = index === 0 ? "" : `_${index + 1}`;
     const candidate = prependToolNameFragment(params.baseName, nodeFragment, suffix);
     const normalized = normalizeToolPolicyName(candidate);
     if (
-      isProviderSafeToolName(candidate) &&
+      NODE_PLUGIN_TOOL_NAME_RE.test(candidate) &&
       normalized &&
       !params.existingNormalized.has(normalized)
     ) {
@@ -173,7 +115,7 @@ export function createNodePluginTools(params: {
   const existingNormalized = new Set(
     [...(params.existingToolNames ?? [])].map((name) => normalizeToolPolicyName(name)),
   );
-  const allowlist = normalizePolicyNames(params.toolAllowlist);
+  const allowlist = createPluginToolAllowlist(params.toolAllowlist);
   const denylist = compileGlobPatterns({
     raw: params.toolDenylist,
     normalize: normalizeToolPolicyName,
@@ -221,17 +163,19 @@ export function createNodePluginTools(params: {
     const tool: AnyAgentTool = {
       name: toolName,
       label: toolName,
-      description: describeNodeToolLocation({
-        description: descriptor.description,
-        displayName: entry.displayName,
-        nodeId: entry.nodeId,
-      }),
+      description: `${descriptor.description} (node: ${entry.displayName?.trim() || entry.nodeId})`,
       parameters: descriptor.parameters as never,
-      ...(mcpTool ? { executionMode: "sequential" as const } : {}),
+      ...(mcpTool
+        ? { executionMode: "sequential" as const, resultContentSource: "network" as const }
+        : {}),
       execute: async (toolCallId, toolParams, signal) => {
         const raw = await callGatewayTool(
           "node.invoke",
-          mcpTool ? { timeoutMs: NODE_MCP_TOOL_CALL_GATEWAY_TIMEOUT_MS } : {},
+          {
+            timeoutMs: mcpTool
+              ? NODE_MCP_TOOL_CALL_GATEWAY_TIMEOUT_MS
+              : NODE_PLUGIN_TOOL_CALL_GATEWAY_TIMEOUT_MS,
+          },
           {
             nodeId: entry.nodeId,
             command: entry.command,
@@ -242,17 +186,23 @@ export function createNodePluginTools(params: {
                   arguments: toolParams,
                 }
               : toolParams,
-            ...(mcpTool ? { timeoutMs: NODE_MCP_TOOL_CALL_TIMEOUT_MS } : {}),
+            timeoutMs: mcpTool ? NODE_MCP_TOOL_CALL_TIMEOUT_MS : NODE_PLUGIN_TOOL_CALL_TIMEOUT_MS,
             idempotencyKey: toolCallId,
             ...(params.agentSessionKey ? { sessionKey: params.agentSessionKey } : {}),
           },
           { scopes: ["operator.write"], ...(signal ? { signal } : {}) },
         );
-        const payload = readNodeInvokePayload(raw);
+        const payload = isRecord(raw) && "payload" in raw ? raw.payload : raw;
         if (mcpTool) {
-          return mapMcpPayloadToAgentToolResult(payload);
+          return isRecord(payload)
+            ? projectMcpCallToolResult(payload, {
+                mcpServer: mcpTool.server,
+                mcpTool: mcpTool.tool,
+              })
+            : jsonResult(payload);
         }
-        return isAgentToolResult(payload) ? payload : jsonResult(payload);
+        const result = isAgentToolResult(payload) ? payload : jsonResult(payload);
+        return descriptor.mcp ? setMcpCodeModeGuestResultFromAgentResult(result) : result;
       },
     };
     setPluginToolMeta(tool, {

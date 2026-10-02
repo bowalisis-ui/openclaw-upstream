@@ -1,4 +1,3 @@
-// Validates and normalizes provider asset attachments for music generation.
 import { canonicalizeBase64 } from "@openclaw/media-core/base64";
 import { maxBytesForKind } from "@openclaw/media-core/constants";
 import { extensionForMime } from "@openclaw/media-core/mime";
@@ -162,9 +161,7 @@ export async function downloadGeneratedMusicAsset(params: {
         new Error(`${params.provider} generated music download exceeds ${maxBytesLocal} bytes`),
     };
     const buffer = params.validateBinaryResponse
-      ? Buffer.from(
-          await readProviderBinaryResponse(handle.response, deadline.label, "audio", readOptions),
-        )
+      ? await readProviderBinaryResponse(handle.response, deadline.label, "audio", readOptions)
       : await readResponseWithLimit(handle.response, maxBytes, readOptions);
     return {
       buffer,

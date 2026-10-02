@@ -23,11 +23,12 @@ describe("resolveSlackUserAllowlist", () => {
     const fixture = "lookup-fixture";
     slackClientMocks.usersList.mockResolvedValue({ members: [] });
 
-    await resolveSlackUserAllowlist({
+    const result = await resolveSlackUserAllowlist({
       token: fixture,
       entries: ["@missing-user"],
     });
 
+    expect(result).toEqual([{ input: "@missing-user", resolved: false }]);
     expect(slackClientMocks.createSlackLookupClient).toHaveBeenCalledOnce();
     expect(slackClientMocks.createSlackLookupClient).toHaveBeenCalledWith(fixture);
     expect(slackClientMocks.usersList).toHaveBeenCalledOnce();
@@ -75,19 +76,47 @@ describe("resolveSlackUserAllowlist", () => {
     });
   });
 
-  it("keeps unresolved users", async () => {
-    const client = {
-      users: {
-        list: vi.fn().mockResolvedValue({ members: [] }),
-      },
-    };
-
+  it("preserves workspace-qualified user ids without listing a workspace", async () => {
+    const list = vi.fn();
     const res = await resolveSlackUserAllowlist({
       token: "xoxb-test",
-      entries: ["@missing-user"],
-      client: client as never,
+      entries: ["team:T11111111:user:U01234567", "team:T22222222:user:U01234567"],
+      client: { users: { list } } as never,
     });
 
-    expect(res[0]).toEqual({ input: "@missing-user", resolved: false });
+    expect(res.map((entry) => entry.id)).toEqual([
+      "team:T11111111:user:U01234567",
+      "team:T22222222:user:U01234567",
+    ]);
+    expect(list).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { input: "TEAM:%5411111111:USER:%5501234567", resolved: true },
+    { input: "team:T11111111:channel:C01234567", resolved: false },
+    { input: "team:T11111111:user:%ZZ", resolved: false },
+    { input: " team:T11111111:user:U01234567", resolved: false },
+  ])(
+    "keeps qualified target ordering and lookup boundaries for $input",
+    async ({ input, resolved }) => {
+      slackClientMocks.usersList.mockResolvedValue({ members: [] });
+      const first = "team:T22222222:user:U01234567";
+      const last = "team:T33333333:user:U01234567";
+
+      const result = await resolveSlackUserAllowlist({
+        token: "lookup-fixture",
+        entries: [first, input, last],
+      });
+
+      expect(result).toEqual([
+        { input: first, resolved: true, id: first },
+        resolved
+          ? { input, resolved: true, id: "team:T11111111:user:U01234567" }
+          : { input, resolved: false },
+        { input: last, resolved: true, id: last },
+      ]);
+      expect(slackClientMocks.createSlackLookupClient).toHaveBeenCalledTimes(resolved ? 0 : 1);
+      expect(slackClientMocks.usersList).toHaveBeenCalledTimes(resolved ? 0 : 1);
+    },
+  );
 });

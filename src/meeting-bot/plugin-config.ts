@@ -47,7 +47,6 @@ export type MeetingPluginConfig = MeetingRealtimeEngineConfig & {
   chromeNode: { node?: string };
   realtime: MeetingRealtimeEngineConfig["realtime"] & {
     strategy: "agent" | "bidi";
-    agentId?: string;
     toolPolicy: RealtimeVoiceAgentConsultToolPolicy;
   };
 };
@@ -69,10 +68,6 @@ function resolveBoolean(value: unknown, fallback: boolean): boolean {
 
 function resolvePositiveNumber(value: unknown, fallback: number): number {
   return asPositiveFiniteNumber(value) ?? fallback;
-}
-
-function resolveTimer(value: unknown, fallback: number): number {
-  return resolvePositiveTimerTimeoutMs(resolvePositiveNumber(value, fallback), fallback);
 }
 
 function resolveMode(value: unknown): MeetingPluginMode {
@@ -190,8 +185,14 @@ export function createMeetingPluginConfigSchema(options: MeetingPluginConfigOpti
         guestName: normalizeOptionalString(chrome.guestName) ?? defaults.chrome.guestName,
         reuseExistingTab: resolveBoolean(chrome.reuseExistingTab, defaults.chrome.reuseExistingTab),
         autoJoin: resolveBoolean(chrome.autoJoin, defaults.chrome.autoJoin),
-        joinTimeoutMs: resolveTimer(chrome.joinTimeoutMs, defaults.chrome.joinTimeoutMs),
-        waitForInCallMs: resolveTimer(chrome.waitForInCallMs, defaults.chrome.waitForInCallMs),
+        joinTimeoutMs: resolvePositiveTimerTimeoutMs(
+          chrome.joinTimeoutMs,
+          defaults.chrome.joinTimeoutMs,
+        ),
+        waitForInCallMs: resolvePositiveTimerTimeoutMs(
+          chrome.waitForInCallMs,
+          defaults.chrome.waitForInCallMs,
+        ),
         audioInputCommand: audioInputCommandOverride ?? generatedCommands.inputCommand,
         audioOutputCommand: audioOutputCommandOverride ?? generatedCommands.outputCommand,
         audioInputCommandOverride,
@@ -205,7 +206,7 @@ export function createMeetingPluginConfigSchema(options: MeetingPluginConfigOpti
           chrome.bargeInPeakThreshold,
           defaults.chrome.bargeInPeakThreshold,
         ),
-        bargeInCooldownMs: resolveTimer(
+        bargeInCooldownMs: resolvePositiveTimerTimeoutMs(
           chrome.bargeInCooldownMs,
           defaults.chrome.bargeInCooldownMs,
         ),

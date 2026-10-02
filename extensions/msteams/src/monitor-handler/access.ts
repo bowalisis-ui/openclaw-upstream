@@ -1,9 +1,11 @@
-// Msteams plugin module implements access behavior.
-import { formatAllowlistMatchMeta } from "openclaw/plugin-sdk/allow-from";
+import {
+  formatAllowlistMatchMeta,
+  resolveAllowlistMatchSimple,
+} from "openclaw/plugin-sdk/allow-from";
 import { logInboundDrop } from "openclaw/plugin-sdk/channel-inbound";
 import {
   channelIngressRoutes,
-  resolveStableChannelMessageIngress,
+  type ChannelIngressContextBinding,
   type StableChannelIngressIdentityParams,
 } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -14,12 +16,14 @@ import {
   resolveDefaultGroupPolicy,
   type OpenClawConfig,
 } from "../../runtime-api.js";
-import type { StoredConversationReference } from "../conversation-store.js";
-import type { MSTeamsConversationStore } from "../conversation-store.js";
+import type {
+  StoredConversationReference,
+  MSTeamsConversationStore,
+} from "../conversation-store.js";
 import { formatUnknownError } from "../errors.js";
 import { normalizeMSTeamsConversationId } from "../inbound.js";
 import type { MSTeamsMonitorLogger } from "../monitor-types.js";
-import { resolveMSTeamsAllowlistMatch, resolveMSTeamsRouteConfig } from "../policy.js";
+import { resolveMSTeamsRouteConfig } from "../policy.js";
 import { looksLikeMSTeamsConversationId } from "../resolve-allowlist.js";
 import { getMSTeamsRuntime } from "../runtime.js";
 import type { MSTeamsTurnContext } from "../sdk-types.js";
@@ -28,6 +32,9 @@ const MSTEAMS_SENDER_NAME_KIND = "plugin:msteams-sender-name" as const;
 const MSTEAMS_CONVERSATION_ID_KIND = "plugin:msteams-conversation-id" as const;
 const msteamsIngressIdentity = {
   key: "sender-id",
+  // Bot Framework authenticates the connector and vouches for the activity, without this
+  // plugin independently proving exact ownership of every from.id representation.
+  authentication: "asserted",
   normalize: normalizeIngressValue,
   aliases: [
     {
@@ -35,11 +42,12 @@ const msteamsIngressIdentity = {
       kind: MSTEAMS_SENDER_NAME_KIND,
       normalizeEntry: normalizeSenderNameIngressValue,
       normalizeSubject: normalizeSenderNameIngressValue,
-      dangerous: true,
+      authentication: "mutable",
     },
     {
       key: "conversation-id",
       kind: MSTEAMS_CONVERSATION_ID_KIND,
+      authentication: "asserted",
       normalizeEntry: normalizeAllowlistConversationId,
       normalizeSubject: normalizeAllowlistConversationId,
     },
@@ -112,12 +120,21 @@ export async function resolveMSTeamsSenderAccess(params: {
   cfg: OpenClawConfig;
   activity: MSTeamsTurnContext["activity"];
   hasControlCommand?: boolean;
+  conversationThreadId?: string;
+  contextBinding?: ChannelIngressContextBinding;
 }) {
   const activity = params.activity;
   const msteamsCfg = params.cfg.channels?.msteams;
   const conversationId = normalizeMSTeamsConversationId(activity.conversation?.id ?? "unknown");
   const convType = normalizeOptionalLowercaseString(activity.conversation?.conversationType);
   const isDirectMessage = convType === "personal" || (!convType && !activity.conversation?.isGroup);
+  // Bot Framework uses non-personal types and group/team/channel markers for shared scopes.
+  // Consumers fail closed when those asserted facts contradict direct-message classification.
+  const hasConflictingConversationScope =
+    isDirectMessage &&
+    (activity.conversation?.isGroup === true ||
+      activity.channelData?.team !== undefined ||
+      activity.channelData?.channel !== undefined);
   const senderId = activity.from?.aadObjectId ?? activity.from?.id ?? "unknown";
   const senderName = activity.from?.name ?? activity.from?.id ?? senderId;
 
@@ -145,10 +162,31 @@ export async function resolveMSTeamsSenderAccess(params: {
     allowNameMatching,
   });
 
-  const resolved = await resolveStableChannelMessageIngress({
+  const resolved = await core.channel.inbound.ingress.resolveStable({
     channelId: "msteams",
     accountId: pairing.accountId,
-    identity: msteamsIngressIdentity,
+    identity: {
+      ...msteamsIngressIdentity,
+      resolveParticipant: () => {
+        const tenantId = activity.channelData?.tenant?.id ?? activity.conversation?.tenantId;
+        const aadId = activity.from?.aadObjectId;
+        if (tenantId && aadId) {
+          return {
+            domain: `entra:${tenantId.toLowerCase()}`,
+            idKind: "object-id",
+            id: aadId.toLowerCase(),
+          };
+        }
+        // Bot Framework sender ids are scoped to the receiving application, not local accountId.
+        return msteamsCfg?.appId && activity.from?.id
+          ? {
+              domain: `bot:${msteamsCfg.appId.toLowerCase()}`,
+              idKind: "channel-account-id",
+              id: activity.from.id,
+            }
+          : undefined;
+      },
+    },
     cfg: params.cfg,
     readStoreAllowFrom: pairing.readAllowFromStore,
     subject: {
@@ -161,8 +199,9 @@ export async function resolveMSTeamsSenderAccess(params: {
     conversation: {
       kind: isDirectMessage ? "direct" : convType === "channel" ? "channel" : "group",
       id: conversationId,
-      parentId: activity.channelData?.team?.id,
+      threadId: params.conversationThreadId,
     },
+    ...(params.contextBinding ? { contextBinding: params.contextBinding } : {}),
     route: channelIngressRoutes(
       !isDirectMessage &&
         channelGate.allowlistConfigured && {
@@ -195,8 +234,10 @@ export async function resolveMSTeamsSenderAccess(params: {
   });
   return {
     ...resolved,
+    channelIngress: resolved,
     pairing,
     isDirectMessage,
+    hasConflictingConversationScope,
     conversationId,
     senderId,
     senderName,
@@ -237,6 +278,7 @@ export async function admitMSTeamsMessage(params: {
     senderName,
     pairing,
     isDirectMessage,
+    hasConflictingConversationScope,
     channelGate,
     senderAccess,
     commandAccess,
@@ -247,6 +289,14 @@ export async function admitMSTeamsMessage(params: {
   const effectiveDmAllowFrom = senderAccess.effectiveAllowFrom;
   const effectiveGroupAllowFrom = senderAccess.effectiveGroupAllowFrom;
 
+  if (hasConflictingConversationScope) {
+    params.log.info("dropping message (conflicting conversation scope)", {
+      conversationId: params.conversationId,
+    });
+    params.log.debug?.("dropping message (conflicting conversation scope)");
+    return null;
+  }
+
   if (isDirectMessage && msteamsCfg && senderAccess.decision !== "allow") {
     if (senderAccess.reasonCode === "dm_policy_disabled") {
       params.log.info("dropping dm (dms disabled)", {
@@ -256,7 +306,7 @@ export async function admitMSTeamsMessage(params: {
       params.log.debug?.("dropping dm (dms disabled)");
       return null;
     }
-    const allowMatch = resolveMSTeamsAllowlistMatch({
+    const allowMatch = resolveAllowlistMatchSimple({
       allowFrom: effectiveDmAllowFrom,
       senderId,
       senderName,
@@ -342,7 +392,7 @@ export async function admitMSTeamsMessage(params: {
       return null;
     }
     if (!senderAccess.allowed) {
-      const allowMatch = resolveMSTeamsAllowlistMatch({
+      const allowMatch = resolveAllowlistMatchSimple({
         allowFrom: effectiveGroupAllowFrom,
         senderId,
         senderName,

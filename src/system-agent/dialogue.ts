@@ -1,7 +1,7 @@
-// OpenClaw dialogue parses direct commands and optionally asks the assistant planner.
 import type { RuntimeEnv } from "../runtime.js";
 import type { SystemAgentAssistantPlan, SystemAgentAssistantPlanner } from "./assistant.js";
 import { SystemAgentInferenceUnavailableError } from "./inference-error.js";
+import { isInvalidConfigSetOperation } from "./operations-internal.js";
 import {
   describeSystemAgentPersistentOperation,
   parseSystemAgentOperation,
@@ -86,6 +86,9 @@ export async function resolveSystemAgentOperation(
 
 function shouldAskAssistant(input: string, operation: SystemAgentOperation): boolean {
   if (operation.kind !== "none") {
+    return false;
+  }
+  if (isInvalidConfigSetOperation(operation)) {
     return false;
   }
   const trimmed = input.trim().toLowerCase();

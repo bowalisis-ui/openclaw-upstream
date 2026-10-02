@@ -1,4 +1,4 @@
-// Control UI module implements connect error behavior.
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import {
   ConnectErrorDetailCodes,
   describePairingConnectRequirement,
@@ -7,7 +7,7 @@ import {
   readPairingConnectErrorDetails,
 } from "../../../../packages/gateway-protocol/src/connect-error-details.js";
 import { resolveGatewayErrorDetailCode } from "../../api/gateway.ts";
-import { normalizeLowercaseStringOrEmpty } from "../../lib/string-coerce.ts";
+import { formatUiError } from "../../lib/format-error.ts";
 
 type ErrorWithMessageAndDetails = {
   message?: unknown;
@@ -94,8 +94,9 @@ function formatErrorFromMessageAndDetails(error: ErrorWithMessageAndDetails): st
 }
 
 export function formatConnectError(error: unknown): string {
-  if (error && typeof error === "object") {
-    return formatErrorFromMessageAndDetails(error as ErrorWithMessageAndDetails);
-  }
-  return normalizeErrorMessage(error);
+  const message =
+    error && typeof error === "object"
+      ? formatErrorFromMessageAndDetails(error as ErrorWithMessageAndDetails)
+      : normalizeErrorMessage(error);
+  return formatUiError(message);
 }

@@ -1,34 +1,34 @@
 // Gateway chat runtime projects agent events into chat/session subscriber
 // streams, lifecycle persistence, heartbeat visibility, and live UI updates.
 import { performance } from "node:perf_hooks";
-import type {
-  ChatEvent,
-  ChatRunStartupPhase,
+import { readStringValue } from "@openclaw/normalization-core/string-coerce";
+import { Value } from "typebox/value";
+import { GATEWAY_CLIENT_CAPS } from "../../packages/gateway-protocol/src/client-info.js";
+import {
+  ChatStatusEventSchema,
+  projectChatErrorDetail,
+  type ChatEvent,
 } from "../../packages/gateway-protocol/src/schema/logs-chat.js";
 import { isAgentLifecycleYieldedWaiting } from "../agents/agent-lifecycle-parent-state.js";
 import {
+  AGENT_RUN_TERMINAL_RETRY_GRACE_MS,
   buildAgentRunTerminalOutcomeFromLifecycleEvent,
   classifyAgentRunTerminalOutcome,
+  isDefinitiveRunLifecycle,
 } from "../agents/agent-run-terminal-outcome.js";
-import { resolveDefaultAgentId } from "../agents/agent-scope.js";
+import { isActiveEmbeddedRunId } from "../agents/embedded-agent-runner/runs.js";
 import { isTimeoutError, resolveFailoverReasonFromError } from "../agents/failover-error.js";
 import type { FailoverReason } from "../agents/failover/signal.js";
-import { resolveToolSearchCodeDisplayTarget } from "../agents/tool-display-common.js";
+import { isMainSessionRecoveryLifecycleEvent } from "../agents/main-session-recovery/main-session-recovery-lifecycle.js";
 import { readToolValidationErrorSummary } from "../agents/tool-error-summary.js";
-import { DEFAULT_HEARTBEAT_ACK_MAX_CHARS, stripHeartbeatToken } from "../auto-reply/heartbeat.js";
 import { normalizeVerboseLevel } from "../auto-reply/thinking.js";
 import { normalizeAgentPlanSteps } from "../channels/streaming.js";
 import { getRuntimeConfig } from "../config/io.js";
-import { sessionEntryForkedFromParent } from "../config/sessions/session-entry-lineage.js";
-import {
-  type AgentEventPayload,
-  type AgentEventRuntimePayload,
-  getAgentEventLifecycleGeneration,
-} from "../infra/agent-events.js";
+import type { AgentEventPayload, AgentEventRuntimePayload } from "../infra/agent-events.js";
 import { getAgentRunContext, getAgentRunContextOwnerStatus } from "../infra/agent-run-registry.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { resolveHeartbeatVisibility } from "../infra/heartbeat-visibility.js";
-import { logError } from "../logger.js";
+import { boundedJsonUtf8Bytes } from "../infra/json-utf8-bytes.js";
+import { logError, logWarn } from "../logger.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import {
   isAcpSessionKey,
@@ -37,13 +37,41 @@ import {
 } from "../sessions/session-key-utils.js";
 import { resolveAssistantEventPhase } from "../shared/chat-message-content.js";
 import { setSafeTimeout } from "../utils/timer-delay.js";
+import { resolveAssistantTextInput } from "./agent-event-assistant-text.js";
+import {
+  appendChatCanvasBlocks,
+  appendChatCanvasBlocksToMessage,
+  extractChatToolResultCanvasPreview,
+} from "./chat-display-projection.canvas.js";
 import {
   projectLiveAssistantBufferedText,
-  resolveAssistantLiveChatInput,
-  resolveMergedAssistantText,
   shouldSuppressAssistantEventForLiveChat,
 } from "./live-chat-projector.js";
-import type { GatewayBroadcastFn, GatewayBroadcastToConnIdsFn } from "./server-broadcast-types.js";
+import type {
+  GatewayBroadcastFn,
+  GatewayBroadcastOpts,
+  GatewayBroadcastToConnIdsFn,
+} from "./server-broadcast-types.js";
+import {
+  normalizeHeartbeatChatFinalText,
+  resolveHeartbeatFlag,
+  shouldHideHeartbeatChatOutput,
+} from "./server-chat-heartbeat.js";
+import {
+  createSessionEventSnapshotBuilder,
+  createSessionLifecyclePublisher,
+  type SessionEventSnapshotDependencies,
+} from "./server-chat-lifecycle-publication.js";
+import {
+  mergeAgentTextPayload,
+  mergeChatTextPayload,
+  assistantWireProjection,
+  cancelPendingLiveTextFlush,
+  chatWireProjection,
+  liveTextDelivery,
+  prepareAgentWirePayload,
+  scheduleLiveTextFlush,
+} from "./server-chat-live-text.js";
 import { isChatAbortMarkerCurrent } from "./server-chat-state.js";
 import type {
   BufferedAgentEvent,
@@ -53,28 +81,23 @@ import type {
   SessionMessageSubscriberRegistry,
   ToolEventRecipientRegistry,
 } from "./server-chat-state.js";
-import { loadGatewaySessionLifecycleSnapshot } from "./server-chat.load-gateway-session-row.runtime.js";
-import { persistGatewaySessionLifecycleEvent } from "./server-chat.persist-session-lifecycle.runtime.js";
+import { roundedChatSendTimingMs } from "./server-methods/chat-server-timing.js";
 import { hasSessionChangeReceivers } from "./session-change-receivers.js";
-import {
-  deriveGatewaySessionLifecycleProjectionPatch,
-  isRestartRecoveryLifecycleEvent,
-  isStaleLifecycleEventForSession,
-} from "./session-lifecycle-state.js";
-import {
-  resolveSessionSubscriptionKey,
-  resolveSessionSubscriptionKeys,
-} from "./session-subscription-keys.js";
-import { loadSessionEntryReadOnly } from "./session-utils.js";
+import { withPreparedSessionEventRow } from "./session-event-prepared-row.js";
+import { prepareSessionEventProjection } from "./session-event-projection.js";
+import { persistGatewaySessionLifecycleEvent } from "./session-lifecycle-state.js";
+import { tryResolveSessionCompatibilityOwnerAgentId } from "./session-request-agent.js";
+import type { SessionRowReadView } from "./session-row-prepared-read.js";
+import type { SessionRowProjection } from "./session-row-projection.js";
+import { resolveSessionSubscriptionKeys } from "./session-subscription-keys.js";
+import { loadGatewaySessionEntryReadOnly } from "./session-utils.js";
 import { formatForLog } from "./ws-log.js";
 
 export {
   createChatAbortMarker,
-  createChatRunRegistry,
   createChatRunState,
   createSessionEventSubscriberRegistry,
   createSessionMessageSubscriberRegistry,
-  createToolEventRecipientRegistry,
 } from "./server-chat-state.js";
 export type {
   ChatAbortMarker,
@@ -93,94 +116,11 @@ const CHAT_STATE_BY_TERMINAL_CLASSIFICATION = {
   cancellation: "aborted",
   failure: "error",
 } as const;
-
-function readChatRunStartupPhase(value: unknown): ChatRunStartupPhase | undefined {
-  switch (value) {
-    case "preparing_workspace":
-    case "provisioning_environment":
-    case "preparing_context":
-    case "starting_model":
-      return value;
-    default:
-      return undefined;
-  }
-}
-
-function projectToolSearchCodeEventForChannelPayload<T extends { data?: unknown }>(payload: T): T {
-  const data = payload.data;
-  if (!data || typeof data !== "object") {
-    return payload;
-  }
-  const record = data as Record<string, unknown>;
-  if (record.name !== "tool_search_code") {
-    return payload;
-  }
-  const target = resolveToolSearchCodeDisplayTarget(record.args);
-  if (!target) {
-    return payload;
-  }
-  const projectedName = target.displayToolName ?? target.toolName;
-  if (!projectedName || projectedName === "tool_search_code") {
-    return payload;
-  }
-
-  // Channel/node subscribers render from event data, not the richer display
-  // helper used by Control UI. Project obvious bridge calls so verbose
-  // surfaces name the concrete tool while keeping the bridge identity available.
-  const projectedData: Record<string, unknown> = { ...record, name: projectedName };
-  if (target.displayArgs) {
-    projectedData.args = target.displayArgs;
-  } else if (target.detail) {
-    projectedData.args = { detail: target.detail };
-  }
-  if (target.bridgeVerb) {
-    projectedData.bridgeToolName = "tool_search_code";
-    projectedData.bridgeTargetToolName = target.toolName;
-    projectedData.bridgeVerb = target.bridgeVerb;
-  }
-  return { ...payload, data: projectedData };
-}
-
-function resolveHeartbeatAckMaxChars(): number {
-  return DEFAULT_HEARTBEAT_ACK_MAX_CHARS;
-}
-
-function resolveHeartbeatContext(runId: string, sourceRunId?: string) {
-  const primary = getAgentRunContext(runId);
-  if (primary?.isHeartbeat) {
-    return primary;
-  }
-  if (sourceRunId && sourceRunId !== runId) {
-    const source = getAgentRunContext(sourceRunId);
-    if (source?.isHeartbeat) {
-      return source;
-    }
-  }
-  return primary;
-}
-
-/**
- * Check if heartbeat ACK/noise should be hidden from interactive chat surfaces.
- */
-function shouldHideHeartbeatChatOutput(runId: string, sourceRunId?: string): boolean {
-  const runContext = resolveHeartbeatContext(runId, sourceRunId);
-  if (!runContext?.isHeartbeat) {
-    return false;
-  }
-
-  try {
-    const cfg = getRuntimeConfig();
-    const visibility = resolveHeartbeatVisibility({ cfg, channel: "webchat" });
-    return !visibility.showOk;
-  } catch {
-    // Default to suppressing if we can't load config
-    return true;
-  }
-}
-
-function shouldSuppressHeartbeatToolEvents(runId: string, sourceRunId?: string): boolean {
-  return Boolean(resolveHeartbeatContext(runId, sourceRunId)?.isHeartbeat);
-}
+const RESTART_RECOVERY_LIFECYCLE_PHASES = new Set(["start", "end", "error"]);
+// Canvas document retention and native Quick Chat both keep at most 32 widgets.
+// Keep the newest handles, independently of tool-progress verbosity and eviction.
+const MAX_LIVE_CANVAS_BLOCKS = 32;
+const MAX_LIVE_CANVAS_BYTES = 64 * 1024;
 
 function shouldMirrorAssistantEventToHiddenSessionMessages(data: unknown): boolean {
   if (!data || typeof data !== "object") {
@@ -199,38 +139,14 @@ function shouldMirrorAgentEventToHiddenSessionMessages(evt: AgentEventPayload): 
   return evt.stream === "thinking" || evt.stream === "approval" || evt.stream === "lifecycle";
 }
 
-function normalizeHeartbeatChatFinalText(params: {
-  runId: string;
-  sourceRunId?: string;
-  text: string;
-}): { suppress: boolean; text: string } {
-  if (!shouldHideHeartbeatChatOutput(params.runId, params.sourceRunId)) {
-    return { suppress: false, text: params.text };
-  }
-
-  const stripped = stripHeartbeatToken(params.text, {
-    mode: "heartbeat",
-    maxAckChars: resolveHeartbeatAckMaxChars(),
-  });
-  if (!stripped.didStrip) {
-    return { suppress: false, text: params.text };
-  }
-  if (stripped.shouldSkip) {
-    return { suppress: true, text: "" };
-  }
-  return { suppress: false, text: stripped.text };
-}
-
-/**
- * Keep this aligned with the agent.wait lifecycle-error grace so chat surfaces
- * do not finalize a run before fallback or retry reuses the same runId.
- */
-const AGENT_LIFECYCLE_ERROR_RETRY_GRACE_MS = 15_000;
 const LIVE_TEXT_PACING_MS = 75;
 
-export type ChatEventBroadcast = GatewayBroadcastFn;
-
-export type NodeSendToSession = (sessionKey: string, event: string, payload: unknown) => void;
+export type NodeSendToSession = (
+  sessionKey: string,
+  event: string,
+  payload: unknown,
+  opts?: GatewayBroadcastOpts,
+) => void;
 
 // Derived from ChatErrorEventSchema.errorKind (gateway-protocol); keep set in sync.
 type ChatErrorKind = NonNullable<Extract<ChatEvent, { state: "error" }>["errorKind"]>;
@@ -310,33 +226,14 @@ function excludeConnIds(
   return filtered;
 }
 
-type BroadcastDelta = { deltaText: string; replace?: true };
-
-function resolveBroadcastDelta(params: {
-  text: string;
-  previousBroadcastText: string | undefined;
-}): BroadcastDelta | undefined {
-  if (!params.text) {
-    return undefined;
-  }
-  const previous = params.previousBroadcastText;
-  if (previous === undefined) {
-    return { deltaText: params.text };
-  }
-  if (!params.text.startsWith(previous)) {
-    return { deltaText: params.text, replace: true };
-  }
-  const deltaText = params.text.slice(previous.length);
-  return deltaText ? { deltaText } : undefined;
-}
-
 export type AgentEventHandlerOptions = {
-  broadcast: ChatEventBroadcast;
+  broadcast: GatewayBroadcastFn;
   broadcastToConnIds: GatewayBroadcastToConnIdsFn;
   nodeSendToSession: NodeSendToSession;
+  nodeHasSessionSubscribers: (sessionKey: string) => boolean;
   agentRunSeq: Map<string, number>;
   chatRunState: ChatRunState;
-  resolveSessionKeyForRun: (runId: string) => string | undefined;
+  resolveSessionKeyForRun: (runId: string, options?: { agentId?: string }) => string | undefined;
   clearAgentRunContext: (
     runId: string,
     lifecycleGeneration?: string,
@@ -345,7 +242,9 @@ export type AgentEventHandlerOptions = {
   toolEventRecipients: ToolEventRecipientRegistry;
   sessionEventSubscribers: SessionEventSubscriberRegistry;
   sessionMessageSubscribers: SessionMessageSubscriberRegistry;
-  loadGatewaySessionLifecycleSnapshotForEvent?: typeof loadGatewaySessionLifecycleSnapshot;
+  loadGatewaySessionLifecycleSnapshotForEvent?: SessionEventSnapshotDependencies["loadGatewaySessionLifecycleSnapshotForEvent"];
+  getSessionRowProjection?: () => SessionRowProjection | undefined;
+  persistGatewaySessionLifecycleEventForEvent?: typeof persistGatewaySessionLifecycleEvent;
   lifecycleErrorRetryGraceMs?: number;
   isChatSendRunActive?: (runId: string) => boolean;
   clearTrackedActiveRun?: (params: {
@@ -353,7 +252,7 @@ export type AgentEventHandlerOptions = {
     clientRunId: string;
     sessionKey: string;
   }) => void;
-  markTrackedRunTerminalPersisted?: (params: {
+  settleTrackedTerminal?: (params: {
     runId: string;
     clientRunId: string;
     sessionKey: string;
@@ -363,7 +262,6 @@ export type AgentEventHandlerOptions = {
     clientRunId: string;
     sessionKey: string;
     sessionId?: string;
-    observedAt: number;
     persistence: Promise<void>;
   }) => void;
   resolveActiveLifecycleGenerationForRun?: (runId: string) => string | undefined;
@@ -372,77 +270,27 @@ export type AgentEventHandlerOptions = {
     clientRunId: string;
     summary: string | undefined;
   }) => void;
-  resolveSessionActiveRunState?: (params: {
-    requestedKey: string;
-    canonicalKey: string;
-    sessionId?: string;
-    agentId?: string;
-  }) => { active: boolean; runIds: string[] };
+  resolveSessionActiveRunState?: SessionEventSnapshotDependencies["resolveSessionActiveRunState"];
 };
 
 type AgentEventHandler = ((event: AgentEventPayload) => void) & {
   dispose: () => void;
 };
 
-const AGENT_TEXT_THROTTLE_STREAMS = ["assistant", "thinking"] as const;
-
-type AgentTextThrottleStream = (typeof AGENT_TEXT_THROTTLE_STREAMS)[number];
-type LiveTextStream = "chat" | "agent";
-type PendingLiveTextFlush = { timer: NodeJS.Timeout; flush: () => void };
-type InternalChatRunRecord = ReturnType<ChatRunState["getOrCreate"]> & {
-  pendingTextFlushes?: Partial<Record<LiveTextStream, PendingLiveTextFlush>>;
+type ChatRunRecord = ReturnType<ChatRunState["getOrCreate"]>;
+type AgentTextThrottleStream = keyof NonNullable<ChatRunRecord["agentText"]>;
+type LivePayloadOptions = {
+  agentId?: string;
+  controlUiVisible?: boolean;
+  dropIfSlow?: boolean;
+  liveText?: GatewayBroadcastOpts["liveText"];
 };
-
-function internalChatRunRecord(
-  record: ReturnType<ChatRunState["getOrCreate"]>,
-): InternalChatRunRecord {
-  return record;
-}
-
-function cancelPendingLiveTextFlush(run: InternalChatRunRecord, stream: LiveTextStream): void {
-  const pending = run.pendingTextFlushes?.[stream];
-  if (!pending) {
-    return;
-  }
-  clearTimeout(pending.timer);
-  delete run.pendingTextFlushes?.[stream];
-  if (run.pendingTextFlushes && Object.keys(run.pendingTextFlushes).length === 0) {
-    delete run.pendingTextFlushes;
-  }
-}
-
-function scheduleLiveTextFlush(
-  run: InternalChatRunRecord,
-  stream: LiveTextStream,
-  delayMs: number,
-  flush: () => void,
-): void {
-  const pendingFlushes = (run.pendingTextFlushes ??= {});
-  const existing = pendingFlushes[stream];
-  if (existing) {
-    existing.flush = flush;
-    return;
-  }
-  const timer = setSafeTimeout(() => {
-    const pending = run.pendingTextFlushes?.[stream];
-    if (!pending || pending.timer !== timer) {
-      return;
-    }
-    cancelPendingLiveTextFlush(run, stream);
-    pending.flush();
-  }, delayMs);
-  timer.unref?.();
-  pendingFlushes[stream] = { timer, flush };
-}
-
-function roundedChatSendTimingMs(value: number): number {
-  return Math.max(0, Math.round(value * 1000) / 1000);
-}
 
 export function createAgentEventHandler({
   broadcast,
   broadcastToConnIds,
   nodeSendToSession,
+  nodeHasSessionSubscribers,
   agentRunSeq,
   chatRunState,
   resolveSessionKeyForRun,
@@ -450,34 +298,47 @@ export function createAgentEventHandler({
   toolEventRecipients,
   sessionEventSubscribers,
   sessionMessageSubscribers,
-  loadGatewaySessionLifecycleSnapshotForEvent = loadGatewaySessionLifecycleSnapshot,
-  lifecycleErrorRetryGraceMs = AGENT_LIFECYCLE_ERROR_RETRY_GRACE_MS,
+  loadGatewaySessionLifecycleSnapshotForEvent = () => ({ row: null }),
+  getSessionRowProjection,
+  persistGatewaySessionLifecycleEventForEvent = persistGatewaySessionLifecycleEvent,
+  lifecycleErrorRetryGraceMs = AGENT_RUN_TERMINAL_RETRY_GRACE_MS,
   isChatSendRunActive = () => false,
   clearTrackedActiveRun,
-  markTrackedRunTerminalPersisted,
+  settleTrackedTerminal,
   trackTrackedRunTerminalPersistence,
   resolveActiveLifecycleGenerationForRun = () => undefined,
   updateRunToolErrorSummary,
   resolveSessionActiveRunState,
 }: AgentEventHandlerOptions): AgentEventHandler {
-  const shouldProcessOwnedEvent = (evt: AgentEventRuntimePayload): boolean => {
-    const claimId = evt.contextClaimId;
-    if (!claimId) {
-      return true;
-    }
-    const lifecycleGeneration = evt.lifecycleGeneration;
-    if (!lifecycleGeneration || lifecycleGeneration !== getAgentEventLifecycleGeneration()) {
-      return false;
-    }
-    // A missing claim means detach or supersession revoked this terminal event.
-    return getAgentRunContextOwnerStatus(evt.runId, claimId, lifecycleGeneration) === "active";
-  };
+  const shouldProcessOwnedEvent = (
+    runId: string,
+    claimId: string | undefined,
+    lifecycleGeneration: string | undefined,
+  ): boolean =>
+    !claimId ||
+    Boolean(
+      lifecycleGeneration &&
+      getAgentRunContextOwnerStatus(runId, claimId, lifecycleGeneration) === "active",
+    );
   const clearRunContextForEvent = (evt: AgentEventRuntimePayload): void => {
     if (evt.contextClaimId) {
       clearAgentRunContext(evt.runId, evt.lifecycleGeneration, evt.contextClaimId);
       return;
     }
     clearAgentRunContext(evt.runId);
+  };
+  const resolveEventSession = (evt: AgentEventRuntimePayload) => {
+    const chatLink = evt.contextClaimId ? undefined : chatRunState.registry.peek(evt.runId);
+    const sessionAgentId = chatLink?.agentId ?? evt.agentId;
+    const eventSessionKey =
+      evt.deliverySessionKey ??
+      (typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined);
+    const sessionKey =
+      chatLink?.sessionKey ??
+      eventSessionKey ??
+      getAgentRunContext(evt.runId)?.sessionKey ??
+      resolveSessionKeyForRun(evt.runId, sessionAgentId ? { agentId: sessionAgentId } : undefined);
+    return { chatLink, sessionAgentId, eventSessionKey, sessionKey };
   };
 
   type TerminalLifecycleOptions = {
@@ -496,7 +357,7 @@ export function createAgentEventHandler({
   const cancelPendingChatDeltaFlush = (clientRunId: string) => {
     const record = chatRunState.runs.get(clientRunId);
     if (record) {
-      cancelPendingLiveTextFlush(internalChatRunRecord(record), "chat");
+      cancelPendingLiveTextFlush(record, "chat");
     }
   };
 
@@ -522,188 +383,56 @@ export function createAgentEventHandler({
     event: AgentEventPayload,
   ): { suppress: boolean } => {
     try {
-      const { entry } = loadSessionEntryReadOnly(sessionKey, {
+      const { entry } = loadGatewaySessionEntryReadOnly(sessionKey, {
         ...(agentId ? { agentId } : {}),
         clone: false,
       });
-      return { suppress: isRestartRecoveryLifecycleEvent({ entry, event }) };
+      return { suppress: isMainSessionRecoveryLifecycleEvent({ entry, event }) };
     } catch {
       return { suppress: false };
     }
   };
 
-  // Native, ACP, and spawn-owned dashboard sessions can carry spawnedBy.
-  // Short-circuit everyone else so high-volume chat streams do not touch the
-  // session store. Results are cached per sessionKey because
-  // spawnedBy is immutable once set and resolveSpawnedBy sits on the hot event
-  // path (delta, flush, final, agent, seq-gap).
-  const spawnedByCache = new Map<string, string | null>();
   const resolveSpawnedBy = (sessionKey: string): string | null => {
-    if (spawnedByCache.has(sessionKey)) {
-      return spawnedByCache.get(sessionKey)!;
-    }
-    // Non-lineage keys return null without polluting the cache; only eligible
-    // child-session results (positive or null) are worth memoising.
-    const isDashboardSession =
-      parseAgentSessionKey(sessionKey)?.rest.startsWith("dashboard:") === true;
+    const parsed = parseAgentSessionKey(sessionKey);
+    const isDashboardSession = parsed?.rest.startsWith("dashboard:") === true;
     if (!isSubagentSessionKey(sessionKey) && !isAcpSessionKey(sessionKey) && !isDashboardSession) {
       return null;
     }
-    let result: string | null = null;
-    try {
-      result = loadGatewaySessionLifecycleSnapshotForEvent(sessionKey).row?.spawnedBy ?? null;
-    } catch {
-      // result stays null
-    }
-    spawnedByCache.set(sessionKey, result);
-    return result;
+    const agentId =
+      parsed?.agentId ?? tryResolveSessionCompatibilityOwnerAgentId(getRuntimeConfig(), sessionKey);
+    return agentId
+      ? (getSessionRowProjection?.()?.readPreparedSpawnedBy({ key: sessionKey, agentId }) ?? null)
+      : null;
   };
 
-  const buildSessionEventSnapshot = (
-    sessionKey: string,
-    evt?: AgentEventPayload,
-    agentId?: string,
-    includeActiveRunState = false,
-  ) => {
-    const snapshotOptions = agentId ? { agentId } : undefined;
-    const lifecycleSnapshot = loadGatewaySessionLifecycleSnapshotForEvent(
-      sessionKey,
-      snapshotOptions,
-    );
-    const { lifecycleRunId, row } = lifecycleSnapshot;
-    const omitUnscopedGlobalGoal = sessionKey === "global" && !agentId;
-    const lifecyclePatch =
-      evt &&
-      !isStaleLifecycleEventForSession({
-        owningSessionId: evt.sessionId,
-        currentSessionId: row?.sessionId,
-        eventRunId: evt.runId,
-        currentRunId: lifecycleRunId,
-        eventStartedAt: evt.data?.startedAt,
-        currentStartedAt: row?.startedAt,
-      })
-        ? deriveGatewaySessionLifecycleProjectionPatch({
-            entry: row
-              ? {
-                  updatedAt: row.updatedAt ?? undefined,
-                  status: row.status,
-                  lastRunError: row.lastRunError,
-                  startedAt: row.startedAt,
-                  endedAt: row.endedAt,
-                  runtimeMs: row.runtimeMs,
-                  abortedLastRun: row.abortedLastRun,
-                }
-              : undefined,
-            event: evt,
-          })
-        : {};
-    const activeRunState = includeActiveRunState
-      ? resolveSessionActiveRunState?.({
-          requestedKey: sessionKey,
-          canonicalKey: row?.key ?? sessionKey,
-          ...(row?.sessionId ? { sessionId: row.sessionId } : {}),
-          ...(agentId ? { agentId } : {}),
-        })
-      : undefined;
-    // Agent lifecycle broadcasts merge into cached session rows in the UI.
-    // Always replace run identity so a newer start cannot inherit a completed run.
-    const activeRunFields = activeRunState
-      ? { hasActiveRun: activeRunState.active, activeRunIds: activeRunState.runIds }
-      : {};
-    const clearsLastRunError =
-      Object.hasOwn(lifecyclePatch, "lastRunError") && lifecyclePatch.lastRunError === undefined;
-    const session = row
-      ? {
-          ...row,
-          ...lifecyclePatch,
-          ...activeRunFields,
-          // JSON drops undefined values, so a start/success must send null to
-          // evict a prior failure reason from the subscribed client row.
-          ...(clearsLastRunError ? { lastRunError: null } : {}),
-        }
-      : undefined;
-    if (session && omitUnscopedGlobalGoal) {
-      delete session.goal;
-    }
-    const snapshotSource = session ?? lifecyclePatch;
-    return {
-      ...(session ? { session } : {}),
-      updatedAt: snapshotSource.updatedAt,
-      sessionId: row?.sessionId,
-      kind: row?.kind,
-      channel: row?.channel,
-      subject: row?.subject,
-      groupChannel: row?.groupChannel,
-      space: row?.space,
-      chatType: row?.chatType,
-      origin: row?.origin,
-      spawnedBy: row?.spawnedBy,
-      spawnedWorkspaceDir: row?.spawnedWorkspaceDir,
-      spawnedCwd: row?.spawnedCwd,
-      forkedFromParent: sessionEntryForkedFromParent(row ?? undefined) ? true : undefined,
-      spawnDepth: row?.spawnDepth,
-      subagentRole: row?.subagentRole,
-      subagentControlScope: row?.subagentControlScope,
-      label: row?.label,
-      displayName: row?.displayName,
-      deliveryContext: row?.deliveryContext,
-      parentSessionKey: row?.parentSessionKey,
-      childSessions: row?.childSessions,
-      thinkingLevel: row?.thinkingLevel,
-      fastMode: row?.fastMode,
-      toolOverrides: row?.toolOverrides,
-      verboseLevel: row?.verboseLevel,
-      traceLevel: row?.traceLevel,
-      reasoningLevel: row?.reasoningLevel,
-      elevatedLevel: row?.elevatedLevel,
-      sendPolicy: row?.sendPolicy,
-      systemSent: row?.systemSent,
-      inputTokens: row?.inputTokens,
-      outputTokens: row?.outputTokens,
-      lastChannel: row?.lastChannel,
-      lastTo: row?.lastTo,
-      lastAccountId: row?.lastAccountId,
-      lastThreadId: row?.lastThreadId,
-      totalTokens: row?.totalTokens,
-      totalTokensFresh: row?.totalTokensFresh,
-      ...(omitUnscopedGlobalGoal ? {} : { goal: row?.goal ?? null }),
-      contextTokens: row?.contextTokens,
-      estimatedCostUsd: row?.estimatedCostUsd,
-      responseUsage: row?.responseUsage,
-      // Carry the row-built channel-aware effective mode so the chat snapshot
-      // matches the session-event/list projections.
-      effectiveResponseUsage: row?.effectiveResponseUsage,
-      modelProvider: row?.modelProvider,
-      model: row?.model,
-      ...activeRunFields,
-      status: snapshotSource.status,
-      lastRunError: snapshotSource.lastRunError ?? null,
-      startedAt: snapshotSource.startedAt,
-      endedAt: snapshotSource.endedAt,
-      runtimeMs: snapshotSource.runtimeMs,
-      abortedLastRun: snapshotSource.abortedLastRun,
-    };
-  };
+  const buildSessionEventSnapshot = createSessionEventSnapshotBuilder({
+    loadGatewaySessionLifecycleSnapshotForEvent,
+    resolveSessionActiveRunState,
+  });
+
+  const publishSessionLifecycle = createSessionLifecyclePublisher({
+    broadcastToConnIds,
+    sessionEventSubscribers,
+    getSessionRowProjection,
+    persistGatewaySessionLifecycleEventForEvent,
+    buildSnapshot: (sessionKey, event, agentId, phase, read) =>
+      buildSessionEventSnapshot(sessionKey, event, agentId, true, phase === "start", event, read),
+  });
 
   const resolveSessionDeliveryKeys = (sessionKey: string, agentId?: string) => {
-    const canonicalKey = resolveSessionSubscriptionKey(sessionKey, agentId ?? "");
-    if (canonicalKey === sessionKey) {
-      return [canonicalKey];
+    if (sessionKey.trim().toLowerCase() !== "global") {
+      return [sessionKey];
     }
-    const defaultAgentId = resolveDefaultAgentId(getRuntimeConfig());
-    return resolveSessionSubscriptionKeys(sessionKey, agentId ?? defaultAgentId, defaultAgentId);
+    const compatibilityOwnerAgentId = tryResolveSessionCompatibilityOwnerAgentId(
+      getRuntimeConfig(),
+      sessionKey,
+    );
+    const deliveryAgentId = agentId ?? compatibilityOwnerAgentId;
+    return deliveryAgentId
+      ? resolveSessionSubscriptionKeys(sessionKey, deliveryAgentId, compatibilityOwnerAgentId)
+      : [];
   };
-  const sendNodeSessionPayloadForAgent = (
-    sessionKey: string,
-    event: string,
-    payload: unknown,
-    agentId?: string,
-  ) => {
-    for (const deliverySessionKey of resolveSessionDeliveryKeys(sessionKey, agentId)) {
-      nodeSendToSession(deliverySessionKey, event, payload);
-    }
-  };
-
   const emitFirstAssistantChatSendTiming = (chatLink: ChatRunEntry | undefined) => {
     const timing = chatLink?.chatSendTiming;
     if (!timing || timing.firstAssistantEventSent) {
@@ -735,7 +464,7 @@ export function createAgentEventHandler({
     evt: AgentEventRuntimePayload,
     opts?: TerminalLifecycleOptions,
   ) => {
-    if (!shouldProcessOwnedEvent(evt)) {
+    if (!shouldProcessOwnedEvent(evt.runId, evt.contextClaimId, evt.lifecycleGeneration)) {
       return;
     }
     const lifecyclePhase =
@@ -749,17 +478,13 @@ export function createAgentEventHandler({
     const currentLifecycleGeneration =
       activeLifecycleGeneration ?? currentRunContext?.lifecycleGeneration;
 
-    const chatLink = evt.contextClaimId ? undefined : chatRunState.registry.peek(evt.runId);
-    const sessionAgentId = chatLink?.agentId ?? evt.agentId;
-    const eventSessionKey =
-      evt.deliverySessionKey ??
-      (typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined);
+    const { chatLink, sessionAgentId, eventSessionKey, sessionKey } = resolveEventSession(evt);
     const isControlUiVisible =
       evt.controlUiVisible ?? currentRunContext?.isControlUiVisible ?? true;
     const projectSessionLifecycle =
       evt.projectSessionLifecycle ?? currentRunContext?.projectSessionLifecycle ?? true;
-    const sessionKey =
-      chatLink?.sessionKey ?? eventSessionKey ?? resolveSessionKeyForRun(evt.runId);
+    const projectSessionMessages =
+      evt.projectSessionMessages ?? currentRunContext?.projectSessionMessages ?? true;
     const restartRecoverySessionKey = eventSessionKey ?? sessionKey;
     const restartRecoveryAgentId = evt.agentId ?? sessionAgentId;
     const clientRunId = chatLink?.clientRunId ?? evt.runId;
@@ -768,6 +493,7 @@ export function createAgentEventHandler({
       isChatAbortMarkerCurrent(chatRunState.runs.get(clientRunId)?.abortMarker, chatLink) ||
       isChatAbortMarkerCurrent(chatRunState.runs.get(evt.runId)?.abortMarker, chatLink);
     const lifecycleAborted = evt.data?.aborted === true;
+    const replyDispatchOwnsCompletion = evt.data?.completionSource === "reply-dispatch";
     const deliverySessionKeys = sessionKey
       ? resolveSessionDeliveryKeys(sessionKey, sessionAgentId)
       : [];
@@ -798,22 +524,23 @@ export function createAgentEventHandler({
     if (isSupersededRestartRecoveryEvent) {
       return;
     }
+    clearPendingTerminalLifecycleError(evt.runId, evt.lifecycleGeneration);
+    let terminalPersistence: Promise<void> | undefined;
 
     if (
+      !replyDispatchOwnsCompletion &&
       !suppressRestartRecoveryProjection &&
       sessionKey &&
       (isControlUiVisible ||
-        deliverySessionKeys.some(
-          (deliverySessionKey) => sessionMessageSubscribers.get(deliverySessionKey).size > 0,
-        ))
+        (projectSessionMessages &&
+          deliverySessionKeys.some(
+            (deliverySessionKey) => sessionMessageSubscribers.get(deliverySessionKey).size > 0,
+          )))
     ) {
       if (!isAborted) {
+        // peek() (chatLink) and this shift() run in one synchronous frame, so
+        // the shifted head is exactly the peeked entry.
         const finished = chatLink ? chatRunState.registry.shift(evt.runId) : undefined;
-        if (chatLink && !finished) {
-          clearRunContextForEvent(evt);
-          return;
-        }
-
         const terminalSessionKey = finished?.sessionKey ?? sessionKey;
         const terminalRunId = finished?.clientRunId ?? eventRunId;
         const terminalAgentId = finished?.agentId ?? sessionAgentId;
@@ -832,8 +559,8 @@ export function createAgentEventHandler({
           timeoutPhase: evt.data?.timeoutPhase,
           error: evt.data?.error,
         });
-        const terminalState =
-          CHAT_STATE_BY_TERMINAL_CLASSIFICATION[classifyAgentRunTerminalOutcome(terminalOutcome)];
+        const terminalClassification = classifyAgentRunTerminalOutcome(terminalOutcome);
+        const terminalState = CHAT_STATE_BY_TERMINAL_CLASSIFICATION[terminalClassification];
         if (!(opts?.skipChatErrorFinal && terminalState === "error")) {
           emitChatTerminal(
             terminalSessionKey,
@@ -843,14 +570,24 @@ export function createAgentEventHandler({
             terminalState,
             terminalOutcome.error ?? evt.data?.error,
             terminalOutcome.stopReason,
-            readChatErrorKind(evt.data?.errorKind) ??
-              resolveChatErrorKindFromError(evt.data?.error),
+            // Timeout is a recorded classification, not event metadata: the
+            // lifecycle producer emits no errorKind, so without this the UI
+            // shows a generic "failed" while sessions.list says "timeout".
+            terminalClassification === "timeout"
+              ? "timeout"
+              : (readChatErrorKind(evt.data?.errorKind) ??
+                  resolveChatErrorKindFromError(evt.data?.error)),
             {
               agentId: terminalAgentId,
               controlUiVisible: isControlUiVisible,
+              isHeartbeat: resolveHeartbeatFlag(clientRunId, evt.runId, evt.isHeartbeat),
               firstAssistantTimingEntry: finished,
               abortErrorMessage: readToolValidationErrorSummary(evt.data?.toolErrorSummary),
               yielded: yieldedWaiting ? true : undefined,
+              errorObservation: evt.data?.errorObservation,
+              assistantTranscriptIdempotencyKey: readStringValue(
+                evt.data?.assistantTranscriptIdempotencyKey,
+              ),
             },
           );
         }
@@ -860,31 +597,49 @@ export function createAgentEventHandler({
     }
 
     toolEventRecipients.markFinal(evt.runId);
-    chatRunState.clearRun(clientRunId);
-    if (suppressRestartRecoveryProjection && chatLink) {
-      chatRunState.registry.remove(evt.runId, clientRunId, sessionKey);
+    // Payload dispatch owns its chat terminal and registration until delivery
+    // settles; lifecycle observers still receive the runtime's terminal below.
+    if (!replyDispatchOwnsCompletion) {
+      chatRunState.clearRun(clientRunId);
+      if (suppressRestartRecoveryProjection && chatLink) {
+        chatRunState.registry.remove(evt.runId, clientRunId, sessionKey);
+      }
+      if (!evt.contextClaimId) {
+        clearRunContextForEvent(evt);
+      }
+      agentRunSeq.delete(evt.runId);
+      agentRunSeq.delete(clientRunId);
     }
-    clearRunContextForEvent(evt);
-    agentRunSeq.delete(evt.runId);
-    agentRunSeq.delete(clientRunId);
 
     if (sessionKey) {
       clearTrackedActiveRun?.({ runId: evt.runId, clientRunId, sessionKey });
       if (!suppressRestartRecoveryProjection && projectSessionLifecycle) {
-        const persistence = persistGatewaySessionLifecycleEvent({
+        const projection = getSessionRowProjection?.();
+        const persistence = persistGatewaySessionLifecycleEventForEvent({
           sessionKey,
           agentId: sessionAgentId,
-          event: evt,
+          event: {
+            ...evt,
+            ...(evt.contextClaimId ? { contextClaimId: evt.contextClaimId } : {}),
+            ...(eventRunId !== evt.runId ? { clientRunId: eventRunId } : {}),
+            ...(evt.lifecycleGeneration ? { lifecycleGeneration: evt.lifecycleGeneration } : {}),
+            ...(evt.mainSessionRestartRecovery === true
+              ? { mainSessionRestartRecovery: true as const }
+              : {}),
+          },
         });
+        terminalPersistence = persistence;
         trackTrackedRunTerminalPersistence?.({
           runId: evt.runId,
           clientRunId,
           sessionKey,
           sessionId: evt.sessionId,
-          observedAt: evt.ts,
           persistence,
         });
-        const broadcastSessionChange = (snapshotEvent?: AgentEventPayload) => {
+        const broadcastSessionChange = (
+          snapshotEvent?: AgentEventPayload,
+          read?: SessionRowReadView,
+        ) => {
           if (parseCronRunScopeSuffix(sessionKey).runId) {
             return;
           }
@@ -901,34 +656,64 @@ export function createAgentEventHandler({
               runId: evt.runId,
               ...(eventRunId !== evt.runId ? { clientRunId: eventRunId } : {}),
               ts: evt.ts,
-              ...buildSessionEventSnapshot(sessionKey, snapshotEvent, sessionAgentId, true),
+              ...buildSessionEventSnapshot(
+                sessionKey,
+                snapshotEvent,
+                sessionAgentId,
+                true,
+                true,
+                evt,
+                read,
+              ),
             },
             sessionEventConnIds,
-            { dropIfSlow: true },
+            {
+              dropIfSlow: true,
+              ...(read && projection
+                ? { prepareSessionProjection: prepareSessionEventProjection(projection, read) }
+                : {}),
+            },
           );
-        };
-        const markPersisted = () => {
-          markTrackedRunTerminalPersisted?.({
-            runId: evt.runId,
-            clientRunId,
-            sessionKey,
-          });
         };
         // Terminal writes serialize with restart markers. Reload only after the
         // write so subscribers see the canonical post-race session state.
         void persistence
-          .then(() => {
-            markPersisted();
-            broadcastSessionChange();
-          })
-          .catch((err: unknown) => {
+          .then(
+            async () => {
+              await withPreparedSessionEventRow(projection, sessionKey, sessionAgentId, (read) =>
+                broadcastSessionChange(undefined, read),
+              );
+            },
+            async (err: unknown) => {
+              logError(
+                `gateway: terminal session persistence failed session=${formatForLog(sessionKey)} run=${formatForLog(evt.runId)} error=${formatForLog(err)}`,
+              );
+              await withPreparedSessionEventRow(projection, sessionKey, sessionAgentId, (read) =>
+                broadcastSessionChange(evt, read),
+              );
+            },
+          )
+          .catch((error: unknown) => {
             logError(
-              `gateway: terminal session persistence failed session=${formatForLog(sessionKey)} run=${formatForLog(evt.runId)} error=${formatForLog(err)}`,
+              `gateway: terminal session snapshot publication failed: ${formatErrorMessage(error)}`,
             );
-            // Persistence recovery remains tracked by the controller entry, but
-            // subscribers still need a terminal projection instead of hanging.
-            broadcastSessionChange(evt);
           });
+      } else {
+        settleTrackedTerminal?.({
+          runId: evt.runId,
+          clientRunId,
+          sessionKey,
+        });
+      }
+    }
+    if (!replyDispatchOwnsCompletion && evt.contextClaimId) {
+      // The queued write's commit guard requires this exact claim to stay active.
+      // Abort or replacement can still revoke it before the write settles.
+      if (terminalPersistence) {
+        const clearOwnedRunContext = () => clearRunContextForEvent(evt);
+        void terminalPersistence.then(clearOwnedRunContext, clearOwnedRunContext);
+      } else {
+        clearRunContextForEvent(evt);
       }
     }
   };
@@ -957,21 +742,28 @@ export function createAgentEventHandler({
     sourceRunId: string,
     seq: number,
     text: string,
-    opts?: { controlUiVisible?: boolean; firstAssistantTimingEntry?: ChatRunEntry },
+    opts?: {
+      controlUiVisible?: boolean;
+      firstAssistantTimingEntry?: ChatRunEntry;
+      isHeartbeat?: boolean;
+    },
   ) => {
     cancelPendingChatDeltaFlush(clientRunId);
     const run = chatRunState.getOrCreate(clientRunId);
-    const broadcastDelta = resolveBroadcastDelta({
-      text,
-      previousBroadcastText: run.deltaLastBroadcastText,
-    });
+    const broadcastDelta = chatRunState.takeBufferDelta(clientRunId, text);
     if (!broadcastDelta) {
       return;
     }
     const now = Date.now();
     run.deltaSentAt = now;
-    run.deltaLastBroadcastText = text;
     const spawnedBy = resolveSpawnedBy(sessionKey);
+    const deliveryKey = JSON.stringify([
+      "chat",
+      sessionKey,
+      agentId,
+      opts?.controlUiVisible ?? true,
+    ]);
+    const canvasBlocks = run.canvasBlocks;
     const payload = {
       runId: clientRunId,
       sessionKey,
@@ -981,19 +773,36 @@ export function createAgentEventHandler({
       state: "delta" as const,
       deltaText: broadcastDelta.deltaText,
       ...(broadcastDelta.replace ? { replace: true as const } : {}),
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text }],
-        timestamp: now,
-      },
+      message: appendChatCanvasBlocksToMessage(
+        { role: "assistant", content: [{ type: "text", text }], timestamp: now },
+        canvasBlocks ?? [],
+      ),
     };
     emitFirstAssistantChatSendTiming(
       opts?.firstAssistantTimingEntry ?? chatRunState.registry.peek(sourceRunId),
     );
-    sendChatPayload(sessionKey, payload, {
+    sendLivePayload("chat", sessionKey, payload, {
       agentId,
       controlUiVisible: opts?.controlUiVisible ?? true,
       dropIfSlow: true,
+      liveText: liveTextDelivery(
+        chatRunState,
+        clientRunId,
+        broadcastDelta.replace
+          ? undefined
+          : {
+              key: deliveryKey,
+              merge: mergeChatTextPayload,
+            },
+        run.bufferIsCurrent,
+        chatWireProjection({
+          key: deliveryKey,
+          text,
+          now,
+          canvasBlocks,
+          replace: broadcastDelta.replace,
+        }),
+      ),
     });
   };
 
@@ -1005,14 +814,21 @@ export function createAgentEventHandler({
     seq: number,
     delayMs: number,
     controlUiVisible: boolean | undefined,
+    isHeartbeat: boolean | undefined,
   ) => {
-    const run = internalChatRunRecord(chatRunState.getOrCreate(clientRunId));
+    const run = chatRunState.getOrCreate(clientRunId);
     const flush = () => {
-      const projected = chatRunState.resolveBuffer(clientRunId);
-      if (projected.suppress || shouldHideHeartbeatChatOutput(clientRunId, sourceRunId)) {
+      if (run.bufferIsCurrent?.() === false) {
+        chatRunState.clearRun(clientRunId);
+        agentRunSeq.delete(sourceRunId);
         return;
       }
-      broadcastChatDelta(sessionKey, agentId, clientRunId, sourceRunId, seq, projected.text, {
+      const projected = chatRunState.resolveBuffer(clientRunId);
+      if (shouldHideHeartbeatChatOutput(clientRunId, sourceRunId, isHeartbeat)) {
+        return;
+      }
+      const mergedText = projected.suppress ? "" : projected.text;
+      broadcastChatDelta(sessionKey, agentId, clientRunId, sourceRunId, seq, mergedText, {
         controlUiVisible,
       });
     };
@@ -1025,54 +841,55 @@ export function createAgentEventHandler({
     clientRunId: string,
     sourceRunId: string,
     seq: number,
-    text: string,
-    delta?: unknown,
-    opts?: { controlUiVisible?: boolean },
+    input: NonNullable<ReturnType<typeof resolveAssistantTextInput>>,
+    opts?: { controlUiVisible?: boolean; isCurrent?: () => boolean; isHeartbeat?: boolean },
   ) => {
     const run = chatRunState.getOrCreate(clientRunId);
     const previousRawText = run.rawBuffer ?? "";
-    const mergedRawText = resolveMergedAssistantText({
-      previousText: previousRawText,
-      nextText: text,
-      nextDelta: typeof delta === "string" ? delta : "",
-    });
-    if (!mergedRawText) {
+    const mergedRawText = chatRunState.updateBuffer(clientRunId, input);
+    if (!mergedRawText && !previousRawText) {
       return;
     }
     const now = Date.now();
-    run.rawBuffer = mergedRawText;
-    run.bufferUpdatedAt = now;
-    const waitedMs = now - (run.deltaSentAt ?? 0);
-    if (waitedMs < LIVE_TEXT_PACING_MS) {
+    run.bufferIsCurrent = opts?.isCurrent;
+    if (!mergedRawText) {
+      broadcastChatDelta(sessionKey, agentId, clientRunId, sourceRunId, seq, "", opts);
+      return;
+    }
+    if (run.deltaSentAt !== undefined) {
       scheduleChatDeltaFlush(
         sessionKey,
         agentId,
         clientRunId,
         sourceRunId,
         seq,
-        LIVE_TEXT_PACING_MS - waitedMs,
+        LIVE_TEXT_PACING_MS - (now - run.deltaSentAt),
         opts?.controlUiVisible,
+        opts?.isHeartbeat,
       );
       return;
     }
     const projected = chatRunState.resolveBuffer(clientRunId);
-    const mergedText = projected.text;
-    if (projected.suppress || shouldHideHeartbeatChatOutput(clientRunId, sourceRunId)) {
+    if (shouldHideHeartbeatChatOutput(clientRunId, sourceRunId, opts?.isHeartbeat)) {
       return;
     }
+    const mergedText = projected.suppress ? "" : projected.text;
     broadcastChatDelta(sessionKey, agentId, clientRunId, sourceRunId, seq, mergedText, opts);
   };
 
   const resolveBufferedChatTextState = (
     clientRunId: string,
     sourceRunId: string,
-    options?: { suppressLeadFragments?: boolean },
+    options?: { final?: boolean; suppressLeadFragments?: boolean; isHeartbeat?: boolean },
   ) => {
-    const bufferedText = chatRunState.resolveBuffer(clientRunId).text.trim();
+    const bufferedText = chatRunState
+      .resolveBuffer(clientRunId, { final: options?.final })
+      .text.trim();
     const normalizedHeartbeatText = normalizeHeartbeatChatFinalText({
       runId: clientRunId,
       sourceRunId,
       text: bufferedText,
+      isHeartbeat: options?.isHeartbeat,
     });
     const projected = projectLiveAssistantBufferedText(normalizedHeartbeatText.text.trim(), {
       suppressLeadFragments: options?.suppressLeadFragments,
@@ -1089,44 +906,93 @@ export function createAgentEventHandler({
     clientRunId: string,
     sourceRunId: string,
     seq: number,
-    opts?: { controlUiVisible?: boolean; firstAssistantTimingEntry?: ChatRunEntry },
+    opts?: {
+      controlUiVisible?: boolean;
+      firstAssistantTimingEntry?: ChatRunEntry;
+      isHeartbeat?: boolean;
+    },
+    resolved?: { text: string; shouldSuppressSilent: boolean },
   ) => {
     cancelPendingChatDeltaFlush(clientRunId);
-    const { text, shouldSuppressSilent } = resolveBufferedChatTextState(clientRunId, sourceRunId, {
-      suppressLeadFragments: true,
-    });
+    const streamed = resolved
+      ? projectLiveAssistantBufferedText(resolved.text, { suppressLeadFragments: true })
+      : undefined;
+    const { text, shouldSuppressSilent } = streamed
+      ? {
+          text: streamed.text.trim(),
+          shouldSuppressSilent: resolved?.shouldSuppressSilent || streamed.suppress,
+        }
+      : resolveBufferedChatTextState(clientRunId, sourceRunId, {
+          suppressLeadFragments: true,
+          isHeartbeat: opts?.isHeartbeat,
+        });
     const shouldSuppressHeartbeatStreaming = shouldHideHeartbeatChatOutput(
       clientRunId,
       sourceRunId,
+      opts?.isHeartbeat,
     );
-    if (!text || shouldSuppressSilent || shouldSuppressHeartbeatStreaming) {
+    if (shouldSuppressHeartbeatStreaming) {
       return;
     }
 
-    broadcastChatDelta(sessionKey, agentId, clientRunId, sourceRunId, seq, text, opts);
+    // Suppression replaces a prior visible snapshot; omission would leave the UI
+    // materializing stale text at a message-less final. Empty untouched runs no-op.
+    const mergedText = shouldSuppressSilent ? "" : text;
+    broadcastChatDelta(sessionKey, agentId, clientRunId, sourceRunId, seq, mergedText, opts);
   };
 
-  const sendChatPayload = (
-    sessionKey: string,
-    payload: unknown,
-    opts?: { agentId?: string; controlUiVisible?: boolean; dropIfSlow?: boolean },
+  const sendLivePayload = (
+    event: "agent" | "chat",
+    sessionKey: string | undefined,
+    payload: ChatEvent | AgentEventPayload,
+    opts?: LivePayloadOptions,
   ) => {
-    const deliverySessionKeys = resolveSessionDeliveryKeys(sessionKey, opts?.agentId);
-    if (opts?.controlUiVisible ?? true) {
-      broadcast("chat", payload, {
-        dropIfSlow: opts?.dropIfSlow,
-        sessionKeys: deliverySessionKeys,
-      });
-      sendNodeSessionPayloadForAgent(sessionKey, "chat", payload, opts?.agentId);
+    const visible = opts?.controlUiVisible ?? true;
+    const deliverySessionKeys = sessionKey
+      ? resolveSessionDeliveryKeys(sessionKey, opts?.agentId)
+      : undefined;
+    const liveText = opts?.liveText ?? liveTextDelivery(chatRunState, payload.runId);
+    const broadcastOpts: GatewayBroadcastOpts = {
+      dropIfSlow: event === "agent" && visible ? undefined : opts?.dropIfSlow,
+      excludeClientCapability:
+        event === "agent" &&
+        "stream" in payload &&
+        payload.stream === "assistant" &&
+        (typeof payload.data.text === "string" || typeof payload.data.delta === "string")
+          ? GATEWAY_CLIENT_CAPS.CHAT_ONLY_ASSISTANT_TEXT
+          : undefined,
+      sessionKeys: deliverySessionKeys,
+      liveText:
+        liveText &&
+        event === "chat" &&
+        "state" in payload &&
+        (payload.state === "final" || payload.state === "error")
+          ? { ...liveText, settle: true }
+          : liveText,
+    };
+    if (visible) {
+      broadcast(event, payload, broadcastOpts);
+      if (deliverySessionKeys?.[0]) {
+        nodeSendToSession(deliverySessionKeys[0], event, payload, broadcastOpts);
+      }
       return;
     }
-    const recipients = new Set(
-      deliverySessionKeys.flatMap((deliveryKey) => [...sessionMessageSubscribers.get(deliveryKey)]),
-    );
+    const recipients = new Set<string>();
+    for (const deliveryKey of deliverySessionKeys ?? []) {
+      for (const connId of sessionMessageSubscribers.get(deliveryKey)) {
+        recipients.add(connId);
+      }
+    }
     if (recipients.size > 0) {
-      broadcastToConnIds("chat", payload, recipients, {
-        dropIfSlow: opts?.dropIfSlow,
-        sessionKeys: deliverySessionKeys,
+      // Queued progress carries no session row; hydrate only after pacing and
+      // current subscription selection, using the captured event's owner.
+      const deliveredPayload =
+        event === "agent" && sessionKey
+          ? { ...payload, ...buildSessionEventSnapshot(sessionKey, undefined, opts?.agentId) }
+          : payload;
+      broadcastToConnIds(event, deliveredPayload, recipients, {
+        ...broadcastOpts,
+        sessionSubscriptionVerified: true,
       });
     }
   };
@@ -1146,24 +1012,59 @@ export function createAgentEventHandler({
       firstAssistantTimingEntry?: ChatRunEntry;
       abortErrorMessage?: string;
       yielded?: true;
+      errorObservation?: unknown;
+      assistantTranscriptIdempotencyKey?: string;
+      isHeartbeat?: boolean;
     },
   ) => {
     const { text, shouldSuppressSilent } = resolveBufferedChatTextState(clientRunId, sourceRunId, {
+      final: true,
       suppressLeadFragments: false,
+      isHeartbeat: opts?.isHeartbeat,
     });
     // Flush any paced delta so streaming clients receive the complete text
     // before the final event.
     // Only flush if the buffered text differs from the last broadcast to avoid duplicates.
-    flushBufferedChatDeltaIfNeeded(sessionKey, opts?.agentId, clientRunId, sourceRunId, seq, opts);
-    chatRunState.clearRun(clientRunId);
+    flushBufferedChatDeltaIfNeeded(sessionKey, opts?.agentId, clientRunId, sourceRunId, seq, opts, {
+      text,
+      shouldSuppressSilent,
+    });
     const spawnedBy = resolveSpawnedBy(sessionKey);
+    const terminalPayload = {
+      runId: clientRunId,
+      sessionKey,
+      ...(opts?.agentId ? { agentId: opts.agentId } : {}),
+      ...(spawnedBy && { spawnedBy }),
+      seq,
+    };
+    const createTerminalMessage = (canvasBlocks: NonNullable<ChatRunRecord["canvasBlocks"]>) =>
+      appendChatCanvasBlocksToMessage(
+        {
+          role: "assistant",
+          content: text ? [{ type: "text", text }] : [],
+          timestamp: Date.now(),
+          ...(opts?.assistantTranscriptIdempotencyKey
+            ? {
+                __openclaw: {
+                  runId: clientRunId,
+                  idempotencyKey: opts.assistantTranscriptIdempotencyKey,
+                },
+              }
+            : {}),
+        },
+        canvasBlocks,
+      );
     if (jobState !== "error") {
+      const run = chatRunState.runs.get(clientRunId);
+      const canvasBlocks = run?.canvasBlocks ?? [];
+      // Empty tool-only turns can render widgets; explicit silent/control replies
+      // still suppress their message, even when an earlier tool hosted a widget.
+      const canvasOnly =
+        jobState === "done" &&
+        canvasBlocks.length > 0 &&
+        !(run?.rawBuffer ?? run?.buffer ?? "").trim();
       const payload = {
-        runId: clientRunId,
-        sessionKey,
-        ...(opts?.agentId ? { agentId: opts.agentId } : {}),
-        ...(spawnedBy && { spawnedBy }),
-        seq,
+        ...terminalPayload,
         state: jobState === "done" ? ("final" as const) : ("aborted" as const),
         ...(jobState === "aborted" && opts?.abortErrorMessage
           ? { errorMessage: opts.abortErrorMessage }
@@ -1171,183 +1072,189 @@ export function createAgentEventHandler({
         ...(stopReason && { stopReason }),
         ...(jobState === "done" && opts?.yielded ? { yielded: true as const } : {}),
         message:
-          text && !shouldSuppressSilent
-            ? {
-                role: "assistant",
-                content: [{ type: "text", text }],
-                timestamp: Date.now(),
-              }
+          (text && !shouldSuppressSilent) || canvasOnly
+            ? createTerminalMessage(canvasBlocks)
             : undefined,
       };
-      sendChatPayload(sessionKey, payload, opts);
+      if (payload.message) {
+        emitFirstAssistantChatSendTiming(opts?.firstAssistantTimingEntry);
+      }
+      sendLivePayload("chat", sessionKey, payload, opts);
+      chatRunState.clearRun(clientRunId);
       return;
     }
+    const errorDetail = projectChatErrorDetail(opts?.errorObservation);
     const payload = {
-      runId: clientRunId,
-      sessionKey,
-      ...(opts?.agentId ? { agentId: opts.agentId } : {}),
-      ...(spawnedBy && { spawnedBy }),
-      seq,
+      ...terminalPayload,
       state: "error" as const,
+      ...(opts?.assistantTranscriptIdempotencyKey && text && !shouldSuppressSilent
+        ? {
+            message: createTerminalMessage(chatRunState.runs.get(clientRunId)?.canvasBlocks ?? []),
+          }
+        : {}),
       errorMessage: error ? formatForLog(error) : undefined,
       ...(errorKind && { errorKind }),
+      ...(errorDetail ? { errorDetail } : {}),
       ...(stopReason && { stopReason }),
     };
-    sendChatPayload(sessionKey, payload, opts);
+    sendLivePayload("chat", sessionKey, payload, opts);
+    chatRunState.clearRun(clientRunId);
   };
 
   const sendAgentPayload = (
     sessionKey: string | undefined,
     payload: AgentEventPayload & { spawnedBy?: string },
-    opts?: { agentId?: string; controlUiVisible?: boolean; dropIfSlow?: boolean },
+    opts?: LivePayloadOptions & { coalesce?: boolean; isCurrent?: () => boolean; settle?: true },
   ) => {
-    if (opts?.controlUiVisible ?? true) {
-      broadcast("agent", payload, {
-        sessionKeys: sessionKey ? resolveSessionDeliveryKeys(sessionKey, opts?.agentId) : undefined,
-      });
-      if (sessionKey) {
-        sendNodeSessionPayloadForAgent(sessionKey, "agent", payload, opts?.agentId);
-      }
-      return;
-    }
-    if (!sessionKey) {
-      return;
-    }
-    const deliverySessionKeys = resolveSessionDeliveryKeys(sessionKey, opts?.agentId);
-    const recipients = new Set(
-      deliverySessionKeys.flatMap((deliveryKey) => [...sessionMessageSubscribers.get(deliveryKey)]),
+    const stream = resolveAgentTextThrottleStream(payload);
+    const deliveryKey = JSON.stringify([
+      "agent",
+      stream,
+      payload.data.itemId,
+      sessionKey,
+      opts?.agentId,
+      opts?.controlUiVisible ?? true,
+    ]);
+    const liveText = liveTextDelivery(
+      chatRunState,
+      payload.runId,
+      stream && opts?.coalesce
+        ? {
+            key: deliveryKey,
+            merge: mergeAgentTextPayload,
+          }
+        : undefined,
+      opts?.isCurrent,
+      assistantWireProjection(payload, sessionKey, opts?.agentId, opts?.controlUiVisible ?? true),
     );
-    if (recipients.size > 0) {
-      broadcastToConnIds("agent", payload, recipients, {
-        dropIfSlow: opts?.dropIfSlow,
-        sessionKeys: deliverySessionKeys,
-      });
+    if (liveText && opts?.settle) {
+      liveText.settle = true;
     }
-  };
-
-  const sendNodeAgentPayload = (
-    sessionKey: string | undefined,
-    payload: AgentEventPayload & { spawnedBy?: string },
-    agentId?: string,
-  ) => {
-    if (sessionKey) {
-      sendNodeSessionPayloadForAgent(sessionKey, "agent", payload, agentId);
-    }
+    sendLivePayload("agent", sessionKey, payload, { ...opts, liveText });
   };
 
   const flushBufferedAgentDeltaIfNeeded = (clientRunId: string) => {
     const run = chatRunState.runs.get(clientRunId);
     if (run) {
-      cancelPendingLiveTextFlush(internalChatRunRecord(run), "agent");
+      cancelPendingLiveTextFlush(run, "agent");
     }
-    const bufferedEntries = AGENT_TEXT_THROTTLE_STREAMS.flatMap((currentStream) => {
-      const state = run?.agentText?.[currentStream];
-      const buffered = state?.bufferedEvent;
+    const states = Object.values(run?.agentText ?? {});
+    states.sort(
+      (a, b) => (a.bufferedEvent?.payload.seq ?? 0) - (b.bufferedEvent?.payload.seq ?? 0),
+    );
+    for (const state of states) {
+      const buffered = state.bufferedEvent;
       if (!buffered) {
-        return [];
+        continue;
       }
-      return [{ stream: currentStream, buffered }];
-    });
-    bufferedEntries.sort((a, b) => a.buffered.payload.seq - b.buffered.payload.seq);
-    for (const { stream: currentStream, buffered } of bufferedEntries) {
-      sendAgentPayload(buffered.sessionKey, buffered.payload, { agentId: buffered.agentId });
-      const state = run?.agentText?.[currentStream];
-      if (state) {
-        delete state.bufferedEvent;
-        state.lastSentAt = Date.now();
+      delete state.bufferedEvent;
+      if (buffered.isCurrent?.() === false) {
+        continue;
       }
+      state.lastSentAt = Date.now();
+      sendAgentPayload(buffered.sessionKey, buffered.payload, {
+        agentId: buffered.agentId,
+        controlUiVisible: buffered.controlUiVisible,
+        dropIfSlow: buffered.controlUiVisible === false,
+        coalesce: true,
+        isCurrent: buffered.isCurrent,
+      });
     }
   };
 
   const resolveAgentTextThrottleStream = (
     evt: AgentEventPayload,
-  ): AgentTextThrottleStream | null =>
-    evt.stream === "assistant" ? "assistant" : evt.stream === "thinking" ? "thinking" : null;
+  ): AgentTextThrottleStream | null => {
+    if (evt.stream === "assistant" || evt.stream === "thinking") {
+      const stream = evt.stream === "assistant" ? "assistant" : "thinking";
+      return typeof evt.data.delta === "string" || evt.data.replace === true ? stream : null;
+    }
+    const { kind, phase, status, itemId, progressText } = evt.data;
+    // Growing previews share text pacing; completion and selection remain ordering barriers.
+    return evt.stream === "item" &&
+      phase === "update" &&
+      (kind === "preamble" || (kind === "answer_candidate" && status === "candidate")) &&
+      typeof itemId === "string" &&
+      typeof progressText === "string"
+      ? kind
+      : null;
+  };
 
   const shouldCoalesceAgentTextEvent = (evt: AgentEventPayload) =>
-    resolveAgentTextThrottleStream(evt) !== null &&
-    typeof evt.data?.text === "string" &&
-    typeof evt.data.delta === "string" &&
-    evt.data.delta.length > 0 &&
     !(Array.isArray(evt.data.mediaUrls) && evt.data.mediaUrls.length > 0) &&
     typeof evt.data.mediaUrl !== "string" &&
     evt.data.replace !== true &&
-    (evt.stream !== "assistant" || !shouldSuppressAssistantEventForLiveChat(evt.data));
-
-  const mergeBufferedAgentPayload = (
-    previous: BufferedAgentEvent,
-    next: BufferedAgentEvent,
-  ): BufferedAgentEvent => {
-    if (previous.payload.stream !== next.payload.stream) {
-      return next;
-    }
-    const previousDelta = previous.payload.data.delta;
-    const nextDelta = next.payload.data.delta;
-    if (typeof previousDelta !== "string" || typeof nextDelta !== "string") {
-      return next;
-    }
-    return {
-      ...next,
-      payload: {
-        ...next.payload,
-        data: {
-          ...next.payload.data,
-          delta: `${previousDelta}${nextDelta}`,
-        },
-      },
-    };
-  };
+    (evt.stream === "item" ||
+      (typeof evt.data.text === "string" &&
+        typeof evt.data.delta === "string" &&
+        evt.data.delta.length > 0 &&
+        (evt.stream !== "assistant" || !shouldSuppressAssistantEventForLiveChat(evt.data))));
 
   const sendOrBufferAgentTextEvent = (
     clientRunId: string,
-    sessionKey: string | undefined,
-    agentId: string | undefined,
-    payload: AgentEventPayload & { spawnedBy?: string },
+    next: BufferedAgentEvent,
+    settle?: true,
   ) => {
+    const { payload } = next;
     const stream = resolveAgentTextThrottleStream(payload);
-    if (!stream) {
-      sendAgentPayload(sessionKey, payload, { agentId });
-      return;
-    }
     const now = Date.now();
-    const run = chatRunState.getOrCreate(clientRunId);
-    const agentText = (run.agentText ??= {});
-    const state = (agentText[stream] ??= {});
-    const last = state.lastSentAt;
-    if (last !== undefined && now - last < LIVE_TEXT_PACING_MS) {
-      const nextBuffered: BufferedAgentEvent = sessionKey
-        ? { sessionKey, agentId, payload }
-        : { agentId, payload };
-      state.bufferedEvent = state.bufferedEvent
-        ? mergeBufferedAgentPayload(state.bufferedEvent, nextBuffered)
-        : nextBuffered;
-      scheduleLiveTextFlush(
-        internalChatRunRecord(run),
-        "agent",
-        LIVE_TEXT_PACING_MS - (now - last),
-        () => flushBufferedAgentDeltaIfNeeded(clientRunId),
+    const run = stream ? chatRunState.getOrCreate(clientRunId) : undefined;
+    const state = run && stream ? ((run.agentText ??= {})[stream] ??= {}) : undefined;
+    const last = state?.lastSentAt;
+    const previous = state?.bufferedEvent;
+    // Even an overdue wake owns delivery; flushing on ingress defeats batching
+    // while a busy event loop is still draining provider notifications.
+    if (
+      run &&
+      state &&
+      last !== undefined &&
+      shouldCoalesceAgentTextEvent(payload) &&
+      (!previous ||
+        (previous.payload.data.itemId === payload.data.itemId &&
+          previous.sessionKey === next.sessionKey &&
+          previous.agentId === next.agentId &&
+          previous.controlUiVisible === next.controlUiVisible &&
+          previous.isCurrent?.() !== false))
+    ) {
+      // Deltas accumulate, while item progress replaces its cumulative snapshot.
+      state.bufferedEvent = {
+        ...next,
+        payload: previous ? mergeAgentTextPayload(previous.payload, payload) : payload,
+      };
+      scheduleLiveTextFlush(run, "agent", LIVE_TEXT_PACING_MS - (now - last), () =>
+        flushBufferedAgentDeltaIfNeeded(clientRunId),
       );
       return;
     }
     flushBufferedAgentDeltaIfNeeded(clientRunId);
-    sendAgentPayload(sessionKey, payload, { agentId });
-    state.lastSentAt = now;
+    sendAgentPayload(next.sessionKey, payload, {
+      agentId: next.agentId,
+      controlUiVisible: next.controlUiVisible,
+      dropIfSlow: next.controlUiVisible === false,
+      isCurrent: next.isCurrent,
+      settle,
+    });
+    if (state) {
+      state.lastSentAt = now;
+    }
   };
 
-  const resolveToolVerboseLevel = (runId: string, sessionKey?: string) => {
-    const runContext = getAgentRunContext(runId);
-    const runVerbose = normalizeVerboseLevel(runContext?.verboseLevel);
-    if (!sessionKey) {
-      return runVerbose ?? "off";
-    }
+  const resolveToolVerboseLevel = (
+    event: AgentEventRuntimePayload,
+    sessionKey: string,
+    agentId: string | undefined,
+  ) => {
+    const runContext = getAgentRunContext(event.runId);
+    const runVerbose = normalizeVerboseLevel(runContext?.verboseLevel ?? event.verboseLevel);
+    const registeredAt = runContext?.registeredAt ?? event.registeredAt;
     try {
-      const { cfg, entry } = loadSessionEntryReadOnly(sessionKey);
+      const { cfg, entry } = loadGatewaySessionEntryReadOnly(sessionKey, { agentId, clone: false });
       const sessionVerbose = normalizeVerboseLevel(entry?.verboseLevel);
       const sessionUpdatedAt = typeof entry?.updatedAt === "number" ? entry.updatedAt : undefined;
       const sessionChangedAfterRunStarted =
         sessionUpdatedAt !== undefined &&
-        runContext?.registeredAt !== undefined &&
-        sessionUpdatedAt >= runContext.registeredAt;
+        registeredAt !== undefined &&
+        sessionUpdatedAt >= registeredAt;
       if (sessionVerbose && (!runVerbose || sessionChangedAfterRunStarted)) {
         return sessionVerbose;
       }
@@ -1361,35 +1268,81 @@ export function createAgentEventHandler({
     }
   };
 
+  const sendNodeToolPayload = (
+    event: AgentEventRuntimePayload,
+    sessionKey: string,
+    agentId: string | undefined,
+    payload: AgentEventPayload,
+  ) => {
+    const deliveryKeys = resolveSessionDeliveryKeys(sessionKey, agentId).filter(
+      nodeHasSessionSubscribers,
+    );
+    const firstDeliveryKey = deliveryKeys[0];
+    if (!firstDeliveryKey) {
+      return;
+    }
+    const verbose = resolveToolVerboseLevel(event, sessionKey, agentId);
+    if (verbose === "off") {
+      return;
+    }
+    let channelPayload = payload;
+    if (verbose !== "full") {
+      const data = { ...event.data };
+      delete data.result;
+      delete data.partialResult;
+      channelPayload = { ...payload, data };
+    }
+    const nodePayload = {
+      ...channelPayload,
+      ...buildSessionEventSnapshot(sessionKey, undefined, agentId),
+    };
+    // Registration is demand only; each send still validates its pairing generation.
+    nodeSendToSession(firstDeliveryKey, "agent", nodePayload, { sessionKeys: deliveryKeys });
+  };
+
   const handleEvent = (event: AgentEventPayload) => {
     const evt = event as AgentEventRuntimePayload;
-    if (!shouldProcessOwnedEvent(evt)) {
+    const isCurrent = shouldProcessOwnedEvent.bind(
+      null,
+      evt.runId,
+      evt.contextClaimId,
+      evt.lifecycleGeneration,
+    );
+    if (!isCurrent()) {
       return;
     }
     const lifecyclePhase =
       evt.stream === "lifecycle" && typeof evt.data?.phase === "string" ? evt.data.phase : null;
 
-    const chatLink = evt.contextClaimId ? undefined : chatRunState.registry.peek(evt.runId);
-    const sessionAgentId = chatLink?.agentId ?? evt.agentId;
-    const eventSessionKey =
-      evt.deliverySessionKey ??
-      (typeof evt.sessionKey === "string" && evt.sessionKey.trim() ? evt.sessionKey : undefined);
+    const { chatLink, sessionAgentId, eventSessionKey, sessionKey } = resolveEventSession(evt);
     const runContext = getAgentRunContext(evt.runId);
     const activeLifecycleGeneration = resolveActiveLifecycleGenerationForRun(evt.runId);
     const isControlUiVisible = evt.controlUiVisible ?? runContext?.isControlUiVisible ?? true;
     const projectSessionLifecycle =
       evt.projectSessionLifecycle ?? runContext?.projectSessionLifecycle ?? true;
-    const isHeartbeat = runContext?.isHeartbeat;
-    const sessionKey =
-      chatLink?.sessionKey ?? eventSessionKey ?? resolveSessionKeyForRun(evt.runId);
-    const restartRecoverySessionKey = eventSessionKey ?? sessionKey;
+    const projectSessionMessages =
+      evt.projectSessionMessages ?? runContext?.projectSessionMessages ?? true;
+    const restartRecoverySessionKey = RESTART_RECOVERY_LIFECYCLE_PHASES.has(lifecyclePhase ?? "")
+      ? (eventSessionKey ?? sessionKey)
+      : undefined;
     const restartRecoveryAgentId = evt.agentId ?? sessionAgentId;
     const clientRunId = chatLink?.clientRunId ?? evt.runId;
+    const isHeartbeat = runContext?.isHeartbeat ?? evt.isHeartbeat;
+    const heartbeatPolicy = resolveHeartbeatFlag(clientRunId, evt.runId, evt.isHeartbeat);
+    // A detached worker may reuse its correlation id under a new claim.
+    // Retire its old text before the new owner can append or flush it.
+    if (chatRunState.runs.get(clientRunId)?.bufferIsCurrent?.() === false) {
+      chatRunState.clearRun(clientRunId);
+      agentRunSeq.delete(evt.runId);
+    }
     const eventRunId = chatLink?.clientRunId ?? evt.runId;
-    const eventForClients = chatLink ? { ...evt, runId: eventRunId } : evt;
+    const eventForClients = prepareAgentWirePayload(evt, eventRunId, chatRunState, isCurrent);
     const isAborted =
       isChatAbortMarkerCurrent(chatRunState.runs.get(clientRunId)?.abortMarker, chatLink) ||
       isChatAbortMarkerCurrent(chatRunState.runs.get(evt.runId)?.abortMarker, chatLink);
+    const recordsEmbeddedProgress = !chatLink && isActiveEmbeddedRunId(evt.runId);
+    const recordsInFlightProgress =
+      (Boolean(chatLink) && isControlUiVisible) || recordsEmbeddedProgress;
 
     const restartRecoveryState = restartRecoverySessionKey
       ? resolveRestartRecoveryLifecycleState(restartRecoverySessionKey, restartRecoveryAgentId, evt)
@@ -1430,52 +1383,46 @@ export function createAgentEventHandler({
           ...eventForClients,
           ...(isHeartbeat !== undefined && { isHeartbeat }),
         };
-    const hasSessionMessageSubscribers = sessionKey
-      ? resolveSessionDeliveryKeys(sessionKey, sessionAgentId).some(
-          (deliverySessionKey) => sessionMessageSubscribers.get(deliverySessionKey).size > 0,
-        )
-      : false;
+    const hasSessionMessageSubscribers =
+      projectSessionMessages && sessionKey
+        ? resolveSessionDeliveryKeys(sessionKey, sessionAgentId).some(
+            (deliverySessionKey) => sessionMessageSubscribers.get(deliverySessionKey).size > 0,
+          )
+        : false;
     const last = agentRunSeq.get(evt.runId) ?? 0;
     const isToolEvent = evt.stream === "tool";
     const isItemEvent = evt.stream === "item";
-    const toolVerbose = isToolEvent ? resolveToolVerboseLevel(evt.runId, sessionKey) : "off";
-    const suppressHeartbeatToolEvents =
-      isToolEvent && shouldSuppressHeartbeatToolEvents(clientRunId, evt.runId);
-    const shouldCoalesceAgentEvent = shouldCoalesceAgentTextEvent(evt);
-    // Channel/node subscribers respect verbose; authenticated Control UI
-    // recipients need tool result payloads to render live tool cards.
-    const channelToolPayload =
-      isToolEvent && toolVerbose !== "full"
-        ? (() => {
-            const data = evt.data ? { ...evt.data } : {};
-            delete data.result;
-            delete data.partialResult;
-            return { ...agentPayload, data };
-          })()
-        : agentPayload;
-    if (last > 0 && evt.seq !== last + 1 && isControlUiVisible) {
+    const suppressHeartbeatToolEvents = isToolEvent && heartbeatPolicy === true;
+    if (last > 0 && evt.seq !== last + 1) {
       flushBufferedAgentDeltaIfNeeded(clientRunId);
-      broadcast(
-        "agent",
-        {
-          runId: eventRunId,
-          stream: "error",
-          ts: Date.now(),
-          sessionKey,
-          ...(spawnedBy && { spawnedBy }),
-          ...(isHeartbeat !== undefined && { isHeartbeat }),
-          data: {
-            reason: "seq gap",
-            expected: last + 1,
-            received: evt.seq,
+      if (isControlUiVisible) {
+        broadcast(
+          "agent",
+          {
+            runId: eventRunId,
+            stream: "error",
+            ts: Date.now(),
+            sessionKey,
+            ...(spawnedBy && { spawnedBy }),
+            ...(isHeartbeat !== undefined && { isHeartbeat }),
+            data: {
+              reason: "seq gap",
+              expected: last + 1,
+              received: evt.seq,
+            },
           },
-        },
-        {
-          sessionKeys: sessionKey
-            ? resolveSessionDeliveryKeys(sessionKey, sessionAgentId)
-            : undefined,
-        },
-      );
+          {
+            sessionKeys: sessionKey
+              ? resolveSessionDeliveryKeys(sessionKey, sessionAgentId)
+              : undefined,
+            liveText: liveTextDelivery(chatRunState, clientRunId),
+          },
+        );
+      }
+      const run = chatRunState.runs.get(clientRunId);
+      if (run) {
+        run.liveTextEpoch = {};
+      }
     }
     agentRunSeq.set(evt.runId, evt.seq);
     if (evt.stream === "assistant") {
@@ -1490,30 +1437,41 @@ export function createAgentEventHandler({
         ...(explanation ? { explanation } : {}),
       };
     }
-    if (
-      chatLink &&
-      isControlUiVisible &&
-      !isAborted &&
-      ((isToolEvent && !suppressHeartbeatToolEvents) || isItemEvent)
-    ) {
+    if (recordsInFlightProgress && !isAborted && !suppressHeartbeatToolEvents) {
       // Persist the client-facing identity after run/session remapping. Route
       // changes discard transient UI rows, so history replay must use the same
       // payload identity as live delivery or tool results cannot reconcile.
-      chatRunState.recordProgressEvent(clientRunId, agentPayload);
+      chatRunState.recordProgressEvent(
+        clientRunId,
+        agentPayload,
+        recordsEmbeddedProgress ? "summary" : "full",
+      );
     }
-    if (evt.stream === "run_status") {
-      const phase = readChatRunStartupPhase(evt.data?.phase);
-      if (phase && chatLink && isControlUiVisible && sessionKey && !isAborted) {
-        const payload = {
-          runId: clientRunId,
-          sessionKey,
-          ...(sessionAgentId ? { agentId: sessionAgentId } : {}),
-          ...(spawnedBy && { spawnedBy }),
-          seq: evt.seq,
-          state: "status" as const,
-          phase,
-        } satisfies ChatEvent;
-        sendChatPayload(sessionKey, payload, {
+    if (evt.stream === "run_status" && chatLink && isControlUiVisible && sessionKey && !isAborted) {
+      const payload = {
+        runId: clientRunId,
+        sessionKey,
+        ...(sessionAgentId ? { agentId: sessionAgentId } : {}),
+        ...(spawnedBy && { spawnedBy }),
+        seq: evt.seq,
+        state: "status" as const,
+        ...(evt.data.phase === "retrying"
+          ? {
+              phase: "starting_model",
+              ...(evt.data.reason === "rate_limit"
+                ? {
+                    retry: {
+                      attempt: evt.data.attempt,
+                      maxAttempts: evt.data.maxAttempts,
+                      reason: evt.data.reason,
+                    },
+                  }
+                : {}),
+            }
+          : { phase: evt.data.phase }),
+      };
+      if (Value.Check(ChatStatusEventSchema, payload)) {
+        sendLivePayload("chat", sessionKey, payload, {
           agentId: sessionAgentId,
           controlUiVisible: true,
           dropIfSlow: true,
@@ -1577,15 +1535,21 @@ export function createAgentEventHandler({
             sessionKeys: sessionKey
               ? resolveSessionDeliveryKeys(sessionKey, sessionAgentId)
               : undefined,
+            liveText: liveTextDelivery(chatRunState, clientRunId),
           },
         );
       }
-      if (!isControlUiVisible && sessionKey && !suppressHeartbeatToolEvents) {
-        sendAgentPayload(
-          sessionKey,
-          { ...agentPayload, ...buildSessionEventSnapshot(sessionKey, undefined, sessionAgentId) },
-          { agentId: sessionAgentId, controlUiVisible: false, dropIfSlow: true },
-        );
+      if (
+        !isControlUiVisible &&
+        sessionKey &&
+        hasSessionMessageSubscribers &&
+        !suppressHeartbeatToolEvents
+      ) {
+        sendAgentPayload(sessionKey, agentPayload, {
+          agentId: sessionAgentId,
+          controlUiVisible: false,
+          dropIfSlow: true,
+        });
       }
       // Session subscribers power operator UIs that attach to an existing
       // in-flight session after the run has already started. Those clients do
@@ -1605,14 +1569,16 @@ export function createAgentEventHandler({
               ...buildSessionEventSnapshot(sessionKey, undefined, sessionAgentId),
             },
             sessionSubscribers,
-            { dropIfSlow: true },
+            { dropIfSlow: true, liveText: liveTextDelivery(chatRunState, clientRunId) },
           );
         }
       }
     } else {
       const itemPhase = isItemEvent && typeof evt.data?.phase === "string" ? evt.data.phase : "";
+      // The runtime error frame drains this text before retry cleanup retires its group.
       if (
-        itemPhase === "start" &&
+        (itemPhase === "start" ||
+          (lifecyclePhase === "error" && evt.data.completionSource !== "reply-dispatch")) &&
         (isControlUiVisible || hasSessionMessageSubscribers) &&
         !isAborted
       ) {
@@ -1625,76 +1591,83 @@ export function createAgentEventHandler({
             evt.seq,
             {
               controlUiVisible: isControlUiVisible,
+              isHeartbeat: heartbeatPolicy,
             },
           );
         }
         flushBufferedAgentDeltaIfNeeded(clientRunId);
       }
-      if (isControlUiVisible) {
-        if (shouldCoalesceAgentEvent) {
-          sendOrBufferAgentTextEvent(clientRunId, sessionKey, sessionAgentId, agentPayload);
-        } else {
-          flushBufferedAgentDeltaIfNeeded(clientRunId);
-          sendAgentPayload(sessionKey, agentPayload, {
+      if (
+        isControlUiVisible ||
+        (sessionKey &&
+          hasSessionMessageSubscribers &&
+          (isItemEvent ||
+            shouldMirrorAgentEventToHiddenSessionMessages(evt) ||
+            (!isAborted &&
+              evt.stream === "assistant" &&
+              shouldMirrorAssistantEventToHiddenSessionMessages(evt.data))))
+      ) {
+        sendOrBufferAgentTextEvent(
+          clientRunId,
+          {
+            sessionKey,
             agentId: sessionAgentId,
             controlUiVisible: isControlUiVisible,
-          });
-          const textThrottleStream = resolveAgentTextThrottleStream(evt);
-          if (
-            textThrottleStream &&
-            (typeof evt.data.delta === "string" || evt.data.replace === true)
-          ) {
-            const agentText = (chatRunState.getOrCreate(clientRunId).agentText ??= {});
-            (agentText[textThrottleStream] ??= {}).lastSentAt = Date.now();
-          }
-        }
-      } else if (
-        sessionKey &&
-        hasSessionMessageSubscribers &&
-        (shouldMirrorAgentEventToHiddenSessionMessages(evt) ||
-          (!isAborted &&
-            evt.stream === "assistant" &&
-            shouldMirrorAssistantEventToHiddenSessionMessages(evt.data)))
-      ) {
-        sendAgentPayload(
-          sessionKey,
-          { ...agentPayload, ...buildSessionEventSnapshot(sessionKey, undefined, sessionAgentId) },
-          { agentId: sessionAgentId, controlUiVisible: false, dropIfSlow: true },
-        );
-      }
-      if (!isControlUiVisible && isItemEvent && sessionKey && hasSessionMessageSubscribers) {
-        sendAgentPayload(
-          sessionKey,
-          { ...agentPayload, ...buildSessionEventSnapshot(sessionKey, undefined, sessionAgentId) },
-          { agentId: sessionAgentId, controlUiVisible: false, dropIfSlow: true },
+            payload: agentPayload,
+            // The client payload loses non-enumerable ownership on spread.
+            // Delayed sends must still belong to the original run claim.
+            isCurrent,
+          },
+          lifecyclePhase === "end" && !isAborted && evt.data.aborted !== true ? true : undefined,
         );
       }
     }
 
     if ((isControlUiVisible || hasSessionMessageSubscribers) && sessionKey) {
+      if (
+        isToolEvent &&
+        evt.data.phase === "result" &&
+        !evt.data.isError &&
+        !isAborted &&
+        !suppressHeartbeatToolEvents
+      ) {
+        const result = extractChatToolResultCanvasPreview(evt.data.result);
+        if (result?.preview.surface === "assistant_message") {
+          const blocks = appendChatCanvasBlocks(
+            chatRunState.runs.get(clientRunId)?.canvasBlocks ?? [],
+            [{ preview: result.preview, rawText: null }],
+          ).slice(-MAX_LIVE_CANVAS_BLOCKS);
+          if (!boundedJsonUtf8Bytes(blocks, MAX_LIVE_CANVAS_BYTES).complete) {
+            do {
+              blocks.shift();
+            } while (
+              blocks.length > 0 &&
+              !boundedJsonUtf8Bytes(blocks, MAX_LIVE_CANVAS_BYTES).complete
+            );
+            logWarn(
+              "Live chat canvas preview omitted: display descriptors exceed the 64 KiB limit.",
+            );
+          }
+          const run = chatRunState.getOrCreate(clientRunId);
+          // Commit even an empty suffix: newer documents already consumed retention
+          // slots, so keeping old handles could resurrect documents Canvas pruned.
+          run.canvasBlocks = blocks;
+          // Tool-only turns need the same claim retirement as buffered text.
+          run.bufferIsCurrent = isCurrent;
+        }
+      }
       // Send tool events to node/channel subscribers only when verbose is enabled;
       // WS clients already received the event above via broadcastToConnIds.
-      if (
-        isControlUiVisible &&
-        isToolEvent &&
-        !suppressHeartbeatToolEvents &&
-        toolVerbose !== "off"
-      ) {
-        sendNodeAgentPayload(
-          sessionKey,
-          projectToolSearchCodeEventForChannelPayload({
-            ...channelToolPayload,
-            ...buildSessionEventSnapshot(sessionKey, undefined, sessionAgentId),
-          }),
-          sessionAgentId,
-        );
+      if (isControlUiVisible && isToolEvent && !suppressHeartbeatToolEvents) {
+        sendNodeToolPayload(evt, sessionKey, sessionAgentId, agentPayload);
       }
       const assistantLiveChatInput =
-        evt.stream === "assistant" ? resolveAssistantLiveChatInput(evt.data) : undefined;
+        evt.stream === "assistant" ? resolveAssistantTextInput(evt.data) : undefined;
+      const suppressAssistant = shouldSuppressAssistantEventForLiveChat(evt.data);
       if (
         !isAborted &&
         assistantLiveChatInput &&
-        !shouldSuppressAssistantEventForLiveChat(evt.data)
+        (!suppressAssistant || assistantLiveChatInput.itemId)
       ) {
         emitChatDelta(
           sessionKey,
@@ -1702,10 +1675,13 @@ export function createAgentEventHandler({
           clientRunId,
           evt.runId,
           evt.seq,
-          assistantLiveChatInput.text,
-          assistantLiveChatInput.delta,
+          suppressAssistant
+            ? { ...assistantLiveChatInput, text: "", delta: "" }
+            : assistantLiveChatInput,
           {
             controlUiVisible: isControlUiVisible,
+            isCurrent,
+            isHeartbeat: heartbeatPolicy,
           },
         );
       }
@@ -1713,30 +1689,22 @@ export function createAgentEventHandler({
 
     if (lifecyclePhase === "error") {
       const skipChatErrorFinal = isChatSendRunActive(evt.runId) && !chatLink;
-      const isFallbackExhaustedFailure = evt.data?.fallbackExhaustedFailure === true;
-      // Per-attempt provider errors keep the retry grace so fallback can reuse
-      // the runId. Once the runner marks fallback as exhausted, clear chat state
-      // immediately so webchat sessions do not stay in progress until the timer.
-      if (isAborted || isFallbackExhaustedFailure || lifecycleErrorRetryGraceMs <= 0) {
+      const definitiveTerminal = isDefinitiveRunLifecycle({
+        phase: lifecyclePhase,
+        data: evt.data,
+      });
+      // Only retryable failures get grace. Definitive cancellation and timeout
+      // must persist before dispatch closes the run and the sidebar reads its status.
+      if (isAborted || definitiveTerminal || lifecycleErrorRetryGraceMs <= 0) {
         // finalizeLifecycleEvent clears the buffer itself, after emitChatTerminal
         // has flushed the throttled tail and resolved the terminal message.
         finalizeLifecycleEvent(evt, { skipChatErrorFinal, restartRecoveryState });
       } else {
-        // Deliver the throttled tail before isolating the buffer so a fallback
-        // attempt cannot merge onto the failed attempt's text.
-        if (sessionKey) {
-          flushBufferedChatDeltaIfNeeded(
-            sessionKey,
-            sessionAgentId,
-            clientRunId,
-            evt.runId,
-            evt.seq,
-            {
-              controlUiVisible: isControlUiVisible,
-            },
-          );
+        if (evt.data.completionSource !== "reply-dispatch") {
+          // Runtime retries isolate failed text; reply-dispatch retains its
+          // post-hook payloads and abort state until its own completion settles.
+          chatRunState.clearRun(clientRunId);
         }
-        chatRunState.clearRun(clientRunId);
         scheduleTerminalLifecycleError(evt, { skipChatErrorFinal, restartRecoveryState });
       }
       return;
@@ -1747,36 +1715,20 @@ export function createAgentEventHandler({
       return;
     }
 
-    if (projectSessionLifecycle && sessionKey && lifecyclePhase === "start") {
-      void persistGatewaySessionLifecycleEvent({
+    if (
+      projectSessionLifecycle &&
+      sessionKey &&
+      (lifecyclePhase === "start" ||
+        (lifecyclePhase === "model" && runContext && isControlUiVisible))
+    ) {
+      publishSessionLifecycle({
+        event: evt,
+        phase: lifecyclePhase,
         sessionKey,
         agentId: sessionAgentId,
-        event: evt,
-      }).catch((err: unknown) => {
-        // Surface the swallowed start-phase persistence failure: a silent write
-        // failure drops the run's start marker from restart-recovery accounting
-        // with no operator trace, matching the terminal-phase log below.
-        logError(
-          `gateway: start session persistence failed session=${formatForLog(sessionKey)} run=${formatForLog(evt.runId)} error=${formatForLog(err)}`,
-        );
+        clientRunId: eventRunId,
+        runContext,
       });
-      const sessionEventConnIds = sessionEventSubscribers.getAll();
-      if (hasSessionChangeReceivers(sessionEventConnIds)) {
-        broadcastToConnIds(
-          "sessions.changed",
-          {
-            sessionKey,
-            ...(sessionAgentId ? { agentId: sessionAgentId } : {}),
-            phase: lifecyclePhase,
-            runId: evt.runId,
-            ...(eventRunId !== evt.runId ? { clientRunId: eventRunId } : {}),
-            ts: evt.ts,
-            ...buildSessionEventSnapshot(sessionKey, evt, sessionAgentId, true),
-          },
-          sessionEventConnIds,
-          { dropIfSlow: true },
-        );
-      }
     }
   };
 

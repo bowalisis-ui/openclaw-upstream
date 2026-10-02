@@ -3,17 +3,22 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { prepareSystemAgentRunAdmission } from "../agents/admitted-run-context.js";
+import { extractAgentRunTerminalError, extractAgentRunText } from "../agents/agent-run-result.js";
+import { resolveAgentEffectiveModelPrimary } from "../agents/agent-scope.js";
 import { resolveCliBackendConfig, type ResolvedCliBackend } from "../agents/cli-backends.js";
 import { normalizeCliModel } from "../agents/cli-runner/helpers.js";
+import type { EmbeddedAgentRunResult } from "../agents/embedded-agent.js";
 import { SessionManager } from "../agents/sessions/index.js";
+import { resolveAgentTimeoutMs } from "../agents/timeout.js";
 import { resolveStateDir } from "../config/paths.js";
 import type { CliSessionBinding } from "../config/sessions.js";
-import { buildAgentMainSessionKey } from "../routing/session-key.js";
+import { CommandLane } from "../process/lanes.js";
+import { buildAgentMainSessionKey, toAgentStoreSessionKey } from "../routing/session-key.js";
 import { SYSTEM_AGENT_ID } from "./agent-id.js";
-import { SYSTEM_AGENT_SYSTEM_PROMPT } from "./assistant-prompts.js";
+import { buildSystemAgentSystemPrompt } from "./assistant-prompts.js";
 import { SystemAgentInferenceUnavailableError } from "./inference-error.js";
 import type { SystemAgentConfiguredRoute } from "./inference-route.js";
-import type { SystemAgentOperation } from "./operations.js";
+import type { SystemAgentProposalRef } from "./operator-approval.js";
 import type { SystemAgentOverview } from "./overview.js";
 import {
   resolveSystemAgentExpectedAgentHarnessRuntimeArtifact,
@@ -31,10 +36,6 @@ import {
  * Turns share one persistent session so the conversation has genuine
  * multi-turn memory. Inference setup must succeed before this runner is entered.
  */
-// Flat budget for both route classes: agent-loop turns run multi-step tool
-// calls, so even metered external routes need the full window, and 120s
-// already covers local startup + generation (planner evidence).
-const AGENT_TURN_TIMEOUT_MS = 120_000;
 const SYSTEM_AGENT_TOOL_NAME = "openclaw";
 
 export type SystemAgentTurnDirective =
@@ -53,6 +54,8 @@ export type SystemAgentTurnRunner = (params: {
   surface: "cli" | "gateway";
   /** Host-verified: the user's current message is an explicit approval. */
   approvalArmed: boolean;
+  /** The host authorizes delegated proposals; chat replies cannot self-approve. */
+  operatorApprovalOnly?: boolean;
   session: SystemAgentSession;
 }) => Promise<SystemAgentTurnReply | null>;
 
@@ -61,7 +64,7 @@ export type SystemAgentSession = {
   /** Exact live-tested inference owner for this ephemeral conversation. */
   verifiedInference: SystemAgentVerifiedInferenceBinding;
   /** Host-owned pending-proposal fingerprint; see system-agent-tool.ts. */
-  proposalRef: { current?: string; operation?: SystemAgentOperation };
+  proposalRef: SystemAgentProposalRef;
   /** Native CLI continuity, bound to the exact configured model/auth owner route. */
   cliSession?: {
     routeKey: string;
@@ -84,12 +87,6 @@ export function createSystemAgentSession(
   };
 }
 
-type SystemAgentRunEmbeddedAgent = (
-  params: Parameters<typeof import("../agents/embedded-agent.js").runEmbeddedAgent>[0] & {
-    systemAgentTool?: import("../agents/tools/system-agent-tool.js").SystemAgentToolOptions;
-  },
-) => ReturnType<typeof import("../agents/embedded-agent.js").runEmbeddedAgent>;
-
 type SystemAgentRunCliAgent = (
   params: Parameters<typeof import("../agents/cli-runner.js").runCliAgent>[0] & {
     systemAgentTool?: import("../agents/tools/system-agent-tool.js").SystemAgentToolOptions;
@@ -97,33 +94,10 @@ type SystemAgentRunCliAgent = (
 ) => ReturnType<typeof import("../agents/cli-runner.js").runCliAgent>;
 
 type SystemAgentTurnDeps = SystemAgentVerifiedInferenceDeps & {
-  runEmbeddedAgent?: SystemAgentRunEmbeddedAgent;
+  runEmbeddedAgent?: typeof import("../agents/embedded-agent.js").runEmbeddedAgent;
   runCliAgent?: SystemAgentRunCliAgent;
   readConfigFileSnapshot?: typeof import("../config/config.js").readConfigFileSnapshot;
 };
-
-type EmbeddedRunResult = {
-  payloads?: Array<{ text?: string }>;
-  meta?: {
-    finalAssistantVisibleText?: string;
-    finalAssistantRawText?: string;
-    agentMeta?: {
-      cliSessionBinding?: CliSessionBinding;
-      clearCliSessionBinding?: boolean;
-    };
-  };
-};
-
-function extractRunText(result: EmbeddedRunResult): string | undefined {
-  return (
-    result.meta?.finalAssistantVisibleText ??
-    result.meta?.finalAssistantRawText ??
-    result.payloads
-      ?.map((payload) => payload.text?.trim())
-      .filter(Boolean)
-      .join("\n")
-  );
-}
 
 async function ensureSystemAgentDirs(): Promise<{ workspaceDir: string }> {
   const base = path.join(resolveStateDir(), "openclaw");
@@ -139,14 +113,10 @@ export async function cleanupSystemAgentSession(session: SystemAgentSession): Pr
 
 type SystemAgentTurnParams = Parameters<SystemAgentTurnRunner>[0];
 
-function clearSystemAgentCliSession(session: SystemAgentSession): void {
-  delete session.cliSession;
-}
-
 function clearFailedSystemAgentSessionState(session: SystemAgentSession): void {
   session.proposalRef.current = undefined;
   session.proposalRef.operation = undefined;
-  clearSystemAgentCliSession(session);
+  delete session.cliSession;
 }
 
 function throwSystemAgentInferenceUnavailable(params: {
@@ -232,11 +202,11 @@ function resolveSystemAgentCliToolAvailability(
  */
 async function mirrorSystemAgentToolStateFromEvents(params: {
   runId: string;
-  proposalRef: { current?: string; operation?: SystemAgentOperation };
+  proposalRef: SystemAgentProposalRef;
   directiveRef: { current?: SystemAgentTurnDirective };
 }): Promise<() => void> {
   const [
-    { onAgentEvent },
+    { onAgentEventForRun },
     { extractToolResultText },
     { resolveSystemAgentProposalTransition, resolveSystemAgentDirectiveTransition },
   ] = await Promise.all([
@@ -244,7 +214,7 @@ async function mirrorSystemAgentToolStateFromEvents(params: {
     import("../agents/embedded-agent-tool-results.js"),
     import("../agents/tools/system-agent-tool.js"),
   ]);
-  return onAgentEvent((evt) => {
+  return onAgentEventForRun(params.runId, (evt) => {
     if (evt.runId !== params.runId || evt.stream !== "tool" || evt.data.phase !== "result") {
       return;
     }
@@ -323,9 +293,21 @@ async function runSystemAgentTurnWithDeps(
     SYSTEM_AGENT_ID,
     "system-agent.turn",
   );
+  // Conversation identity owns runner continuity; the main key remains policy-only.
+  // Sharing the runner key lets another conversation replace its generation.
+  const policySessionKey = buildAgentMainSessionKey({ agentId: SYSTEM_AGENT_ID });
+  const systemPrompt = buildSystemAgentSystemPrompt(
+    plan.modelTarget === "utility" &&
+      !resolveAgentEffectiveModelPrimary(plan.sourceConfig, plan.agentId)
+      ? plan.modelLabel
+      : undefined,
+  );
   const shared = {
     sessionId: params.session.sessionId,
-    sessionKey: buildAgentMainSessionKey({ agentId: SYSTEM_AGENT_ID }),
+    sessionKey: toAgentStoreSessionKey({
+      agentId: SYSTEM_AGENT_ID,
+      requestKey: params.session.sessionId,
+    }),
     agentId: SYSTEM_AGENT_ID,
     trigger: "manual" as const,
     sessionFile: `in-memory:${params.session.sessionId}`,
@@ -333,7 +315,7 @@ async function runSystemAgentTurnWithDeps(
     workspaceDir,
     config: plan.runConfig,
     prompt: params.input,
-    timeoutMs: AGENT_TURN_TIMEOUT_MS,
+    timeoutMs: resolveAgentTimeoutMs({ cfg: plan.runConfig }),
     thinkLevel: "off" as const,
     runId,
     messageChannel: "openclaw",
@@ -344,13 +326,15 @@ async function runSystemAgentTurnWithDeps(
   // and the engine executes it after the reply.
   const directiveRef: { current?: SystemAgentTurnDirective } = {};
   const systemAgentTool = {
+    agentId: plan.agentId,
     surface: params.surface,
     approvalArmed: params.approvalArmed,
+    ...(params.operatorApprovalOnly ? { operatorApprovalOnly: true } : {}),
     proposalRef: params.session.proposalRef,
     directiveRef,
   };
   try {
-    let result: EmbeddedRunResult;
+    let result: EmbeddedAgentRunResult;
     if (plan.runner === "cli") {
       const backend = resolveSystemAgentCliBackend(plan);
       const cliToolAvailability = resolveSystemAgentCliToolAvailability(backend);
@@ -360,7 +344,7 @@ async function runSystemAgentTurnWithDeps(
           ? params.session.cliSession.binding
           : undefined;
       if (!previousBinding) {
-        clearSystemAgentCliSession(params.session);
+        delete params.session.cliSession;
       }
       const runCli = deps.runCliAgent ?? (await import("../agents/cli-runner.js")).runCliAgent;
       const stopToolStateMirror = await mirrorSystemAgentToolStateFromEvents({
@@ -369,21 +353,22 @@ async function runSystemAgentTurnWithDeps(
         directiveRef,
       });
       try {
-        result = (await runCli({
+        result = await runCli({
           ...shared,
           preparedRunAdmission,
           provider: plan.provider,
           model: plan.model,
           agentDir: plan.agentDir,
           ...(plan.authProfileId ? { authProfileId: plan.authProfileId } : {}),
-          extraSystemPrompt: SYSTEM_AGENT_SYSTEM_PROMPT,
-          extraSystemPromptStatic: SYSTEM_AGENT_SYSTEM_PROMPT,
+          extraSystemPrompt: systemPrompt,
+          extraSystemPromptStatic: systemPrompt,
           systemAgentTool,
           ...(cliToolAvailability ? { cliToolAvailability } : {}),
           ...(previousBinding ? { cliSessionBinding: previousBinding } : {}),
+          runtimePolicySessionKey: policySessionKey,
           disableCliLiveSession: true,
           cleanupCliLiveSessionOnRunEnd: true,
-        })) as EmbeddedRunResult;
+        });
       } finally {
         stopToolStateMirror();
       }
@@ -391,8 +376,8 @@ async function runSystemAgentTurnWithDeps(
       // native CLI transcript instead of reseeding from scratch.
       const agentMeta = result.meta?.agentMeta;
       if (agentMeta?.clearCliSessionBinding || !agentMeta?.cliSessionBinding?.sessionId) {
-        clearSystemAgentCliSession(params.session);
-      } else if (agentMeta?.cliSessionBinding?.sessionId) {
+        delete params.session.cliSession;
+      } else {
         params.session.cliSession = {
           routeKey,
           binding: agentMeta.cliSessionBinding,
@@ -401,25 +386,34 @@ async function runSystemAgentTurnWithDeps(
     } else {
       // An intervening embedded turn cannot be represented in the CLI's native
       // transcript. A later CLI route must reseed instead of reviving stale context.
-      clearSystemAgentCliSession(params.session);
+      delete params.session.cliSession;
       const runEmbedded =
         deps.runEmbeddedAgent ?? (await import("../agents/embedded-agent.js")).runEmbeddedAgent;
-      result = (await runEmbedded({
+      result = await runEmbedded({
         ...shared,
+        lane: CommandLane.SystemAgentInference,
         preparedRunAdmission,
-        extraSystemPrompt: SYSTEM_AGENT_SYSTEM_PROMPT,
+        extraSystemPrompt: systemPrompt,
         toolsAllow: ["openclaw"],
+        // The helper cannot read workspace skills; skip their discovery and environment setup.
+        toolExecutionAllow: ["openclaw"],
         systemAgentTool,
         disableMessageTool: true,
         provider: plan.provider,
         model: plan.model,
         agentDir: plan.agentDir,
         agentHarnessRuntimeOverride: plan.agentHarnessRuntimeOverride,
+        sandboxSessionKey: policySessionKey,
         ...(expectedAgentHarnessRuntimeArtifact ? { expectedAgentHarnessRuntimeArtifact } : {}),
         ...(plan.authProfileId
           ? { authProfileId: plan.authProfileId, authProfileIdSource: "user" as const }
           : {}),
-      })) as EmbeddedRunResult;
+      });
+    }
+    // Failed runs can retain partial text; it must not publish a reply or a tool directive.
+    const terminalError = extractAgentRunTerminalError(result);
+    if (terminalError) {
+      throw new Error(terminalError);
     }
     if (params.session.verifiedInference !== binding) {
       throw new SystemAgentInferenceUnavailableError("agent-turn");
@@ -430,7 +424,7 @@ async function runSystemAgentTurnWithDeps(
     if (!currentRoute) {
       throw new SystemAgentInferenceUnavailableError("agent-turn");
     }
-    const text = extractRunText(result)?.trim();
+    const text = extractAgentRunText(result)?.trim();
     if (!text) {
       throw new SystemAgentInferenceUnavailableError("agent-turn");
     }

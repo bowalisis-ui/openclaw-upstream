@@ -83,6 +83,66 @@ describe("agents_list tool", () => {
     });
   });
 
+  it.each([
+    {
+      selection: "a plain alias",
+      primary: "fast",
+      alias: "fast",
+      model: "openai/gpt-5.6-sol",
+      agentRuntime: { id: "codex", source: "model" },
+    },
+    {
+      selection: "an explicit provider with a colliding alias",
+      primary: "clawrouter/openai/gpt-5.6",
+      alias: "clawrouter/openai/gpt-5.6",
+      model: "clawrouter/openai/gpt-5.6",
+      agentRuntime: { id: "auto", source: "implicit" },
+    },
+  ])(
+    "reports canonical model and runtime for $selection",
+    async ({ primary, alias, model, agentRuntime }) => {
+      // Alias expansion must not redirect an explicitly named registered provider.
+      loadConfigMock.mockReturnValue({
+        agents: {
+          defaults: {
+            model: {
+              primary,
+              fallbacks: ["openai/gpt-5.6-luna"],
+            },
+            models: {
+              "openai/gpt-5.6-sol": {
+                alias,
+                agentRuntime: { id: "codex" },
+              },
+            },
+            subagents: { allowAgents: ["main"] },
+          },
+          list: [{ id: "main", default: true }],
+        },
+      } as unknown as OpenClawConfig);
+
+      const result = await createAgentsListTool({ agentSessionKey: "agent:main:main" }).execute(
+        "call",
+        {},
+      );
+      const details = result.details as AgentListDetails;
+
+      expect(details).toStrictEqual({
+        requester: "main",
+        allowAny: false,
+        agents: [
+          {
+            id: "main",
+            name: undefined,
+            configured: true,
+            model,
+            agentRuntime,
+          },
+        ],
+      });
+    },
+  );
+
   it("does not advertise stale allowlist-only targets as spawnable agents", async () => {
     // Allowlist entries are permissions, not agent definitions; stale ids should
     // not be presented as runnable subagents.
@@ -132,7 +192,7 @@ describe("agents_list tool", () => {
           id: "main",
           name: undefined,
           configured: true,
-          model: undefined,
+          model: "openai/gpt-6-astra",
           agentRuntime: { id: "codex", source: "implicit" },
         },
       ],
@@ -201,10 +261,28 @@ describe("agents_list tool", () => {
           id: "strict",
           name: undefined,
           configured: true,
-          model: undefined,
+          model: "openai/gpt-6-astra",
           agentRuntime: { id: "codex", source: "implicit" },
         },
       ],
+    });
+  });
+
+  it("uses the persisted fixed-store owner for a bare requester key", async () => {
+    loadConfigMock.mockReturnValue({
+      session: { store: "/tmp/shared-sessions.sqlite", scope: "global" },
+      agents: {
+        ownership: "explicit",
+        defaults: { sessionStore: { agentId: "ops" } },
+        entries: { ops: {}, research: {} },
+      },
+    });
+
+    const result = await createAgentsListTool({ agentSessionKey: "global" }).execute("call", {});
+
+    expect(result.details).toMatchObject({
+      requester: "ops",
+      agents: [{ id: "ops", configured: true }],
     });
   });
 });

@@ -1,4 +1,8 @@
-import { markReplyPayloadAsTtsSupplement, type ReplyPayload } from "../auto-reply/reply-payload.js";
+import {
+  getReplyPayloadMetadata,
+  markReplyPayloadAsTtsSupplement,
+  type ReplyPayload,
+} from "../auto-reply/reply-payload.js";
 import { getChannelPlugin } from "../channels/plugins/registry.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { isVerbose, logVerbose } from "../globals.js";
@@ -6,7 +10,7 @@ import { resolveSendableOutboundReplyParts } from "../infra/outbound/reply-paylo
 import { hasReplyPayloadContent } from "../interactive/payload.js";
 import { truncateUtf16Safe } from "../utils.js";
 import { normalizeMessageChannel } from "../utils/message-channel-core.js";
-import { parseTtsDirectives } from "./directives.js";
+import { parseTtsDirectives, resolveTtsDirectiveFacts } from "./directives.js";
 import { canonicalizeSpeechProviderId, getSpeechProvider } from "./provider-registry.js";
 import type { SpeechVoiceOption } from "./provider-types.js";
 import { assertSpeechRuntimeAvailable, isSpeechRuntimeAvailable } from "./runtime-availability.js";
@@ -79,6 +83,22 @@ function hasLegacyFinalMediaDirective(text: string): boolean {
   return /(?:^|\n)\s*MEDIA\s*:/i.test(text);
 }
 
+// Channel-owned content checks distinguish visible blocks from transport-only metadata.
+function applyExplicitSpeechVisibleFallback(
+  payload: ReplyPayload,
+  channel?: string,
+  explicitText = getReplyPayloadMetadata(payload)?.tts?.text?.trim(),
+): ReplyPayload {
+  const channelId = explicitText && payload.channelData ? normalizeMessageChannel(channel) : null;
+  const hasChannelData = channelId
+    ? getChannelPlugin(channelId)?.messaging?.hasStructuredReplyPayload?.({ payload })
+    : undefined;
+  if (!explicitText || hasReplyPayloadContent(payload, { hasChannelData })) {
+    return payload;
+  }
+  return { ...payload, text: explicitText };
+}
+
 export async function maybeApplyTtsToPayloadCore(
   params: {
     payload: ReplyPayload;
@@ -93,7 +113,7 @@ export async function maybeApplyTtsToPayloadCore(
   persistTtsAudio: TtsAudioPersistence,
 ): Promise<ReplyPayload> {
   if (!isSpeechRuntimeAvailable()) {
-    return params.payload;
+    return applyExplicitSpeechVisibleFallback(params.payload, params.channel);
   }
   if (params.payload.isCompactionNotice) {
     return params.payload;
@@ -106,18 +126,26 @@ export async function maybeApplyTtsToPayloadCore(
     channelId: params.channel,
     accountId: params.accountId,
   });
-  if (autoMode === "off") {
+  const ttsMetadata = getReplyPayloadMetadata(params.payload);
+  const explicitTts = ttsMetadata?.ttsExplicit === true;
+  if (!explicitTts && (autoMode === "off" || ttsMetadata?.commandReply)) {
     return params.payload;
   }
   const activeProvider = resolveTtsProvider(config, prefsPath);
 
   const reply = resolveSendableOutboundReplyParts(params.payload);
   const text = reply.text;
-  const directives = parseTtsDirectives(text, config.modelOverrides, {
+  const directiveOptions = {
     cfg,
     providerConfigs: config.providerConfigs,
     preferredProviderId: activeProvider,
-  });
+  };
+  const directives = ttsMetadata?.tts
+    ? {
+        cleanedText: text,
+        ...resolveTtsDirectiveFacts(ttsMetadata.tts, config.modelOverrides, directiveOptions),
+      }
+    : parseTtsDirectives(text, config.modelOverrides, directiveOptions);
   if (directives.warnings.length > 0) {
     logVerbose(`TTS: ignored directive overrides (${directives.warnings.join("; ")})`);
   }
@@ -131,9 +159,7 @@ export async function maybeApplyTtsToPayloadCore(
     );
   }
 
-  const cleanedText = directives.cleanedText;
-  const trimmedCleaned = cleanedText.trim();
-  const visibleText = trimmedCleaned.length > 0 ? trimmedCleaned : "";
+  const visibleText = directives.cleanedText.trim();
   const explicitTtsText = directives.ttsText?.trim() || "";
   const ttsText = explicitTtsText || visibleText;
 
@@ -145,10 +171,10 @@ export async function maybeApplyTtsToPayloadCore(
           text: visibleText.length > 0 ? visibleText : undefined,
         };
 
-  if (autoMode === "tagged" && !directives.hasDirective) {
+  if (!explicitTts && autoMode === "tagged" && !directives.hasDirective) {
     return nextPayload;
   }
-  if (autoMode === "inbound" && params.inboundAudio !== true) {
+  if (!explicitTts && autoMode === "inbound" && params.inboundAudio !== true) {
     return nextPayload;
   }
 
@@ -157,18 +183,18 @@ export async function maybeApplyTtsToPayloadCore(
     return nextPayload;
   }
 
-  if (!ttsText.trim()) {
+  if (!ttsText) {
     return nextPayload;
   }
   if (reply.hasMedia || hasLegacyFinalMediaDirective(text)) {
     return nextPayload;
   }
-  if (!explicitTtsText && ttsText.trim().length < 10) {
+  if (!explicitTtsText && ttsText.length < 10) {
     return nextPayload;
   }
 
   const maxLength = getTtsMaxLength(prefsPath);
-  let textForAudio = ttsText.trim();
+  let textForAudio = ttsText;
   let wasSummarized = false;
 
   if (!explicitTtsText && isCodeHeavySpeechText(textForAudio)) {
@@ -191,6 +217,7 @@ export async function maybeApplyTtsToPayloadCore(
           cfg,
           config,
           timeoutMs: config.timeoutMs,
+          agentId: params.agentId,
         });
         textForAudio = summary.summary;
         wasSummarized = true;
@@ -244,13 +271,13 @@ export async function maybeApplyTtsToPayloadCore(
       latencyMs: result.latencyMs,
     };
 
-    const payloadWithAudio = {
+    const payloadWithAudio: ReplyPayload = {
       ...nextPayload,
       mediaUrl: result.audioPath,
       audioAsVoice: result.audioAsVoice || params.payload.audioAsVoice,
       spokenText: textForAudio,
       trustedLocalMedia: true,
-    } as ReplyPayload;
+    };
     return nextPayload.text?.trim()
       ? markReplyPayloadAsTtsSupplement(payloadWithAudio)
       : payloadWithAudio;
@@ -269,13 +296,5 @@ export async function maybeApplyTtsToPayloadCore(
 
   const latency = Date.now() - ttsStart;
   logVerbose(`TTS: conversion failed after ${latency}ms (${result.error ?? "unknown"}).`);
-  const channelId =
-    explicitTtsText && nextPayload.channelData ? normalizeMessageChannel(params.channel) : null;
-  const hasChannelData = channelId
-    ? getChannelPlugin(channelId)?.messaging?.hasStructuredReplyPayload?.({ payload: nextPayload })
-    : undefined;
-  // Channel-owned content checks keep transport-only metadata from silently dropping the answer.
-  return explicitTtsText && !hasReplyPayloadContent(nextPayload, { hasChannelData })
-    ? { ...nextPayload, text: explicitTtsText }
-    : nextPayload;
+  return applyExplicitSpeechVisibleFallback(nextPayload, params.channel, explicitTtsText);
 }

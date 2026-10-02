@@ -5,12 +5,7 @@ import {
   formatSlackTarget,
   slackTargetsMatch,
 } from "./target-parsing.js";
-import {
-  normalizeSlackMessagingTarget,
-  parseSlackTarget,
-  resolveSlackChannelId,
-  slackContextTargetsMatch,
-} from "./targets.js";
+import { parseSlackTarget, resolveSlackChannelId, slackContextTargetsMatch } from "./targets.js";
 
 describe("parseSlackTarget", () => {
   it("parses user mentions and prefixes", () => {
@@ -65,6 +60,13 @@ describe("parseSlackTarget", () => {
       raw: "team:T789:user:U012",
       normalized: "team:t789:user:u012",
     });
+    expect(parseSlackTarget("team:T789:user:B345")).toEqual({
+      kind: "user",
+      id: "B345",
+      teamId: "T789",
+      raw: "team:T789:user:B345",
+      normalized: "team:t789:user:b345",
+    });
   });
 
   it("formats bare and structurally valid workspace-qualified targets", () => {
@@ -72,6 +74,9 @@ describe("parseSlackTarget", () => {
       "team:T123:channel:C456",
     );
     expect(formatSlackTarget({ kind: "channel", id: "C456" })).toBe("C456");
+    expect(formatSlackTarget({ teamId: "T123", kind: "user", id: "B456" })).toBe(
+      "team:T123:user:B456",
+    );
     expect(() => formatSlackTarget({ teamId: "E123", kind: "channel", id: "C456" })).toThrow(
       "Invalid Slack workspace-qualified target",
     );
@@ -128,12 +133,6 @@ describe("Slack API target ids", () => {
     { id: "team:T123:channel:C08GQH53EJM", expected: "team:T123:channel:C08GQH53EJM" },
   ])("preserves an ambiguous channel target $id", ({ id, expected }) => {
     expect(canonicalizeSlackApiTargetId("channel", id)).toBe(expected);
-  });
-});
-
-describe("normalizeSlackMessagingTarget", () => {
-  it("defaults raw ids to channels", () => {
-    expect(normalizeSlackMessagingTarget("C123")).toBe("channel:c123");
   });
 });
 

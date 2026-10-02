@@ -3,18 +3,16 @@ import type {
   SessionCreatedVia,
 } from "../../config/sessions/session-entry-provenance.js";
 import type { AgentRuntimeIdentity } from "../agent-runtime-identity-token.js";
+import type { AgentRuntimeSessionSpawnContext } from "../agent-runtime-session-spawn-context.js";
 
-export type TrustedSessionCreation = {
+export type TrustedSessionCreation = Partial<AgentRuntimeSessionSpawnContext> & {
+  skillLibrarySelections?: import("../../../packages/gateway-protocol/src/schema/skill-library.js").SkillLibrarySelection[];
   via: SessionCreatedVia;
   actor?: SessionCreatedActor;
-  /** Immutable completion recipient for a spawn-owned visible session. */
-  completionOwnerSessionKey?: string;
-  /** Effective caller tool-policy snapshot for an in-process visible spawn. */
-  inheritedToolPolicy?: {
-    version: 1;
-    allow: string[];
-    deny: string[];
-  };
+  /** Creator-owned isolation requirement resolved only by the trusted Gateway boundary. */
+  sandbox?: "required";
+  /** Exact spawning session retained separately from the stable actor identity. */
+  requesterSessionKey?: string;
 };
 
 /**
@@ -39,25 +37,34 @@ export function resolveOperatorSessionCreation(
   }
   const agentRuntimeIdentity = client?.internal?.agentRuntimeIdentity;
   if (options.allowTrustedHint && agentRuntimeIdentity?.sessionSpawnContext) {
+    const {
+      requesterProfileId,
+      completionOwnerSessionKey,
+      inheritedToolPolicy,
+      inheritedPermissionMode,
+      resolvedModel,
+      spawnModelAutoSelection,
+    } = agentRuntimeIdentity.sessionSpawnContext;
     return {
       via: "spawn",
-      actor: { type: "agent", id: agentRuntimeIdentity.sessionKey },
-      ...(agentRuntimeIdentity.sessionSpawnContext.completionOwnerSessionKey
-        ? {
-            completionOwnerSessionKey:
-              agentRuntimeIdentity.sessionSpawnContext.completionOwnerSessionKey,
-          }
-        : {}),
-      inheritedToolPolicy: agentRuntimeIdentity.sessionSpawnContext.inheritedToolPolicy,
+      actor: { type: "agent", id: agentRuntimeIdentity.agentId },
+      requesterSessionKey: agentRuntimeIdentity.sessionKey,
+      ...(requesterProfileId ? { requesterProfileId } : {}),
+      ...(completionOwnerSessionKey ? { completionOwnerSessionKey } : {}),
+      inheritedToolPolicy,
+      ...(inheritedPermissionMode ? { inheritedPermissionMode } : {}),
+      ...(resolvedModel ? { resolvedModel } : {}),
+      ...(spawnModelAutoSelection ? { spawnModelAutoSelection } : {}),
     };
   }
   const profileId = client?.authenticatedUserProfile?.profileId;
-  // Actor only when proven: a profile-less wire connection may be an agent-tool
-  // client on a remote topology, so claiming a human actor would misattribute
-  // agent-caused creations. Absent actor means unknown, never inferred.
+  // Profile linking can canonicalize this id after connection attach, so session
+  // ownership follows the live trusted profile while audit keeps its frozen facts.
   return {
     via: "operator",
-    ...(profileId ? { actor: { type: "human" as const, id: profileId } } : {}),
+    ...(profileId
+      ? { actor: { type: "human" as const, source: "profile" as const, id: profileId } }
+      : {}),
   };
 }
 

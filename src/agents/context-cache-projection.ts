@@ -1,6 +1,6 @@
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { providerContextTokenCacheKey } from "./context-cache.js";
+import { type ContextWindowCacheState, providerContextTokenCacheKey } from "./context-cache.js";
 import { type ModelsConfig, resolveAnthropicFixedContextWindow } from "./context-resolution.js";
 import { normalizeProviderId } from "./model-selection.js";
 
@@ -16,12 +16,6 @@ type ContextWindowModelEntry = {
 export type ContextWindowCatalog = {
   entries: ContextWindowModelEntry[];
   staticEntries?: ContextWindowModelEntry[];
-};
-
-type PreparedContextWindowCaches = {
-  configuredTokenCache: Map<string, number>;
-  discoveredTokenCache: Map<string, number>;
-  contextWindowCache: Map<string, number>;
 };
 
 type ConfiguredProvider = NonNullable<ModelsConfig["providers"]>[string];
@@ -97,7 +91,6 @@ export function applyConfiguredContextWindows(params: {
         cache: params.cache,
         windowCache: params.windowCache,
         providerId,
-        provider,
         model,
       });
     }
@@ -108,22 +101,13 @@ function applyConfiguredContextWindow(params: {
   cache: Map<string, number>;
   windowCache: Map<string, number>;
   providerId: string;
-  provider: NonNullable<ConfiguredProvider>;
   model: ConfiguredModel;
 }): void {
   const modelId = typeof params.model?.id === "string" ? params.model.id : undefined;
   const contextTokens =
-    typeof params.model?.contextTokens === "number"
-      ? params.model.contextTokens
-      : typeof params.provider.contextTokens === "number"
-        ? params.provider.contextTokens
-        : undefined;
+    typeof params.model?.contextTokens === "number" ? params.model.contextTokens : undefined;
   const contextWindow =
-    typeof params.model?.contextWindow === "number"
-      ? params.model.contextWindow
-      : typeof params.provider.contextWindow === "number"
-        ? params.provider.contextWindow
-        : undefined;
+    typeof params.model?.contextWindow === "number" ? params.model.contextWindow : undefined;
   const configuredValue =
     contextTokens && contextTokens > 0
       ? { cache: params.cache, value: contextTokens }
@@ -193,14 +177,14 @@ export async function prepareContextWindowCaches(params: {
   config: OpenClawConfig;
   modelCatalog: ContextWindowCatalog;
   assertCurrent?: () => void;
-}): Promise<PreparedContextWindowCaches> {
-  const caches: PreparedContextWindowCaches = {
+}): Promise<ContextWindowCacheState> {
+  const caches: ContextWindowCacheState = {
     configuredTokenCache: new Map(),
     discoveredTokenCache: new Map(),
     contextWindowCache: new Map(),
   };
   const processed = { count: 0 };
-  const providers = (params.config.models as ModelsConfig | undefined)?.providers;
+  const providers = params.config.models?.providers;
   if (providers && typeof providers === "object") {
     for (const [providerId, provider] of Object.entries(providers)) {
       if (!Array.isArray(provider?.models)) {
@@ -211,7 +195,6 @@ export async function prepareContextWindowCaches(params: {
           cache: caches.configuredTokenCache,
           windowCache: caches.contextWindowCache,
           providerId,
-          provider,
           model,
         });
         processed.count += 1;

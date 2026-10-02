@@ -1,4 +1,4 @@
-import { resolveTimerTimeoutMs } from "../../shared/number-coercion.js";
+import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
 
 const REPLY_RUN_FINALIZATION_SETTLE_TIMEOUT_MS = 60_000;
 export type ReplyOperationStaleReason =
@@ -147,9 +147,7 @@ export function resetReplyRunSettleTimersForTesting(): void {
   for (const lease of activeLeases) {
     lease.clear();
   }
-  activeLeases.clear();
   for (const timer of activeSettleTimers) {
     timer.clear();
   }
-  activeSettleTimers.clear();
 }

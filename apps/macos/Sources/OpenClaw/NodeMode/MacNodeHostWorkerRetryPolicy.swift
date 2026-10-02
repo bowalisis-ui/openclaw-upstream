@@ -3,7 +3,6 @@ import Foundation
 struct MacNodeHostWorkerRetryPolicy: Sendable {
     struct Input: Equatable, Sendable {
         let launch: MacNodeHostWorkerLaunch
-        let configurationGeneration: UInt64
     }
 
     enum UnexpectedExitDisposition: Equatable, Sendable {
@@ -91,7 +90,7 @@ struct MacNodeHostWorkerRetryPolicy: Sendable {
             if delay >= self.maximumDelayNanoseconds / 2 {
                 return self.maximumDelayNanoseconds
             }
-            delay = min(delay * 2, self.maximumDelayNanoseconds)
+            delay *= 2
         }
         return delay
     }

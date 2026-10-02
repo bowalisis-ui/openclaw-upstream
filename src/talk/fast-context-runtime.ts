@@ -10,10 +10,6 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import type { MemorySearchResult } from "../memory-host-sdk/host/types.js";
-import {
-  authorizeActiveMemorySearchHits,
-  getActiveMemorySearchManagerCore,
-} from "../plugins/memory-runtime.js";
 import { withTimeout } from "../utils/with-timeout.js";
 import type { RealtimeVoiceAgentConsultResult } from "./agent-consult-runtime.js";
 import { parseRealtimeVoiceAgentConsultArgs } from "./agent-consult-tool.js";
@@ -109,6 +105,8 @@ async function lookupFastContext(params: {
   config: RealtimeVoiceFastContextConfig;
   query: string;
 }): Promise<FastContextLookupResult> {
+  const { authorizeActiveMemorySearchHits, getActiveMemorySearchManagerCore } =
+    await import("../plugins/memory-runtime.js");
   // The memory runtime owns whether memory/session search is active for this
   // agent. Talk only consumes the current manager when it is already available.
   const memory = await getActiveMemorySearchManagerCore({
@@ -169,31 +167,18 @@ export async function resolveRealtimeVoiceFastContextConsult(params: {
     );
     if (lookup.status === "unavailable") {
       params.logger.debug?.(`[talk] fast context unavailable: ${lookup.error}`);
-      // In fallback mode, let the normal agent consult decide. Otherwise produce
-      // a bounded "no context handy" result immediately for the voice call.
-      return params.config.fallbackToConsult
-        ? { handled: false }
-        : { handled: true, result: { text: buildMissText(query, labels) } };
+    } else if (lookup.hits.length > 0) {
+      return {
+        handled: true,
+        result: { text: buildContextText({ query, hits: lookup.hits, labels }) },
+      };
     }
-    const { hits } = lookup;
-    if (hits.length === 0) {
-      // Empty hits behave like unavailable context: either fall back to full
-      // agent work or answer quickly that nothing relevant was found.
-      return params.config.fallbackToConsult
-        ? { handled: false }
-        : { handled: true, result: { text: buildMissText(query, labels) } };
-    }
-    return {
-      handled: true,
-      result: { text: buildContextText({ query, hits, labels }) },
-    };
   } catch (error) {
     const message = formatErrorMessage(error);
     params.logger.debug?.(`[talk] fast context lookup failed: ${message}`);
-    // Timeouts and lookup failures are non-fatal because this is an optional
-    // acceleration path ahead of the normal consult runtime.
-    return params.config.fallbackToConsult
-      ? { handled: false }
-      : { handled: true, result: { text: buildMissText(query, labels) } };
   }
+  // Misses, unavailable context, and failures share the caller's fallback policy.
+  return params.config.fallbackToConsult
+    ? { handled: false }
+    : { handled: true, result: { text: buildMissText(query, labels) } };
 }

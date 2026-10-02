@@ -1,8 +1,7 @@
-// Tlon plugin module implements discovery behavior.
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { asNullableRecord as asRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { Foreigns } from "../urbit/foreigns.js";
-import { formatErrorMessage } from "./utils.js";
 
 interface InitData {
   channels: string[];
@@ -59,12 +58,4 @@ export async function fetchInitData(
     runtime.log?.(`[tlon] Init data fetch failed: ${formatErrorMessage(error)}`);
     return { channels: [], foreigns: null };
   }
-}
-
-export async function fetchAllChannels(
-  api: { scry: (path: string) => Promise<unknown> },
-  runtime: RuntimeEnv,
-): Promise<string[]> {
-  const { channels } = await fetchInitData(api, runtime);
-  return channels;
 }

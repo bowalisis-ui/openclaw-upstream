@@ -1,14 +1,12 @@
 // Setup completion helpers render completion instructions after onboarding.
-import { resolveCliName } from "../cli/cli-name.js";
+import { CLI_NAME } from "../cli/cli-name.js";
 import {
+  findCompletionProfileWriteError,
   formatCompletionReloadCommand,
   installCompletion,
   resolveCompletionProfileHint,
+  resolveCompletionProfilePath,
 } from "../cli/completion-runtime.js";
-import type {
-  CompletionCacheGenerationOptions,
-  ShellCompletionStatus,
-} from "../commands/doctor-completion.js";
 import {
   checkShellCompletionStatus,
   ensureCompletionCacheExists,
@@ -19,12 +17,9 @@ import type { WizardFlow } from "./setup.types.js";
 
 type CompletionDeps = {
   resolveCliName: () => string;
-  checkShellCompletionStatus: (binName: string) => Promise<ShellCompletionStatus>;
-  ensureCompletionCacheExists: (
-    binName: string,
-    options: CompletionCacheGenerationOptions,
-  ) => Promise<boolean>;
-  installCompletion: (shell: string, yes: boolean, binName?: string) => Promise<void>;
+  checkShellCompletionStatus: (binName: string) => ReturnType<typeof checkShellCompletionStatus>;
+  ensureCompletionCacheExists: typeof ensureCompletionCacheExists;
+  installCompletion: typeof installCompletion;
 };
 
 export async function setupWizardShellCompletion(params: {
@@ -33,7 +28,7 @@ export async function setupWizardShellCompletion(params: {
   deps?: Partial<CompletionDeps>;
 }): Promise<void> {
   const deps: CompletionDeps = {
-    resolveCliName,
+    resolveCliName: () => CLI_NAME,
     checkShellCompletionStatus,
     ensureCompletionCacheExists,
     installCompletion,
@@ -42,6 +37,29 @@ export async function setupWizardShellCompletion(params: {
 
   const cliName = deps.resolveCliName();
   const completionStatus = await deps.checkShellCompletionStatus(cliName);
+  const installCompletionForSetup = async (): Promise<boolean> => {
+    try {
+      await deps.installCompletion(completionStatus.shell, true, cliName);
+      return true;
+    } catch (error) {
+      const writeError = findCompletionProfileWriteError(error);
+      if (!writeError) {
+        throw error;
+      }
+      await params.prompter.note(
+        t("wizard.completion.profileNotWritable", {
+          profile: writeError.path ?? resolveCompletionProfilePath(completionStatus.shell),
+          shell: completionStatus.shell,
+          command: formatCompletionReloadCommand(
+            completionStatus.shell,
+            completionStatus.cachePath,
+          ),
+        }),
+        t("wizard.completion.title"),
+      );
+      return false;
+    }
+  };
   const generationOptions = { generationMode: "full" } as const;
   const ensureCompletionCache = async (): Promise<boolean> => {
     const cacheGenerated = await deps.ensureCompletionCacheExists(cliName, generationOptions);
@@ -57,22 +75,18 @@ export async function setupWizardShellCompletion(params: {
   };
 
   if (completionStatus.usesSlowPattern) {
-    // Case 1: Profile uses slow dynamic pattern - silently upgrade to cached version
-    const cacheGenerated = await ensureCompletionCache();
-    if (cacheGenerated) {
-      await deps.installCompletion(completionStatus.shell, true, cliName);
+    if (await ensureCompletionCache()) {
+      await installCompletionForSetup();
     }
     return;
   }
 
   if (completionStatus.profileInstalled && !completionStatus.cacheExists) {
-    // Case 2: Profile has completion but no cache - auto-fix silently
     await ensureCompletionCache();
     return;
   }
 
   if (!completionStatus.profileInstalled) {
-    // Case 3: No completion at all
     const shouldInstall =
       params.flow === "quickstart"
         ? true
@@ -88,14 +102,9 @@ export async function setupWizardShellCompletion(params: {
       return;
     }
 
-    // Generate cache first (required for fast shell startup)
-    const cacheGenerated = await ensureCompletionCache();
-    if (!cacheGenerated) {
+    if (!(await ensureCompletionCache()) || !(await installCompletionForSetup())) {
       return;
     }
-
-    // Install to shell profile
-    await deps.installCompletion(completionStatus.shell, true, cliName);
 
     const shell = completionStatus.shell;
     const command = formatCompletionReloadCommand(shell, resolveCompletionProfileHint(shell));
@@ -108,5 +117,4 @@ export async function setupWizardShellCompletion(params: {
       t("wizard.completion.title"),
     );
   }
-  // Case 4: Both profile and cache exist (using cached version) - all good, nothing to do
 }

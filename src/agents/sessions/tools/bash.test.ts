@@ -1,9 +1,20 @@
+import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 // Bash tool helper tests cover conversion from model-facing timeout seconds to
 // timer-safe millisecond values.
 import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { describe, expect, it, vi } from "vitest";
+import { awaitGateBeforeSettlement, withinTest } from "../../../../test/helpers/promise.js";
+import { runWithSpawnBroker } from "../../../process/spawn-broker/context.js";
+import { createSpawnBrokerHost } from "../../../process/spawn-broker/host.js";
+import { createDeferredCore } from "../../../shared/deferred.js";
+import { isPidDefinitelyDead } from "../../../shared/pid-alive.js";
 import { buildShellCommandInvocation } from "../../shell-utils.js";
+import {
+  expectNativeBashSpill,
+  nativeBashSpillScenarios,
+} from "../bash-output-spill.test-support.js";
 import type { BashOperations } from "./bash-operations.js";
 import { createBashTool, createLocalBashOperations } from "./bash.js";
 import { resolveBashTimeoutMs } from "./bash.test-support.js";
@@ -22,12 +33,6 @@ describe("bash tool timeout helpers", () => {
 
   it("allows an absent timeout", () => {
     expect(resolveBashTimeoutMs(undefined)).toBeUndefined();
-  });
-
-  it.each([Number.NaN, 0, -1])("rejects invalid timeout %s", (timeout) => {
-    expect(() => resolveBashTimeoutMs(timeout)).toThrow(
-      "Invalid timeout: must be a positive finite number of seconds",
-    );
   });
 
   it.each([Number.NaN, 0, -1])("rejects invalid timeout %s before execution", async (timeout) => {
@@ -55,7 +60,125 @@ describe("bash tool timeout helpers", () => {
   });
 });
 
+describe("bash tool startup cancellation", () => {
+  it.runIf(process.platform !== "win32").for(["abort", "timeout"] as const)(
+    "settles %s while broker readiness is stalled and cancels the late command",
+    async (reason, { signal }) => {
+      const host = createSpawnBrokerHost();
+      const controller = new AbortController();
+      const admitted = createDeferredCore<ReturnType<typeof host.spawnExeca>>();
+      const spawnExeca = host.spawnExeca.bind(host);
+      const observeSpawn = vi.spyOn(host, "spawnExeca").mockImplementation((...args) => {
+        const command = spawnExeca(...args);
+        admitted.resolve(command);
+        return command;
+      });
+      let paused = false;
+      let remote: ReturnType<typeof host.spawnExeca> | undefined;
+      try {
+        await host.ready();
+        process.kill(host.pid!, "SIGSTOP");
+        paused = true;
+        const tool = createBashTool(process.cwd(), { shellPath: "/bin/bash" });
+        const execution = runWithSpawnBroker(host, () =>
+          tool.execute(
+            `startup-${reason}`,
+            { command: "sleep 30", ...(reason === "timeout" ? { timeout: 0.05 } : {}) },
+            controller.signal,
+          ),
+        );
+        const settled = execution.then(
+          () => ({ status: "success" as const }),
+          (error: unknown) => ({ status: "error" as const, error }),
+        );
+        remote = await withinTest(
+          awaitGateBeforeSettlement(
+            admitted.promise,
+            execution,
+            "Bash settled before requesting a process",
+          ),
+          signal,
+        );
+        if (reason === "abort") {
+          controller.abort();
+        }
+        const outcome = await Promise.race([
+          settled,
+          delay(500).then(() => ({ status: "pending" as const })),
+        ]);
+        expect(outcome.status).toBe("error");
+        if (outcome.status !== "error") {
+          throw new Error("Bash startup did not settle");
+        }
+        expect(outcome.error).toBeInstanceOf(Error);
+        expect(String(outcome.error)).toContain(
+          reason === "abort" ? "Command aborted" : "Command timed out after 0.05 seconds",
+        );
+        process.kill(host.pid!, "SIGCONT");
+        paused = false;
+        await withinTest(remote.result, signal);
+        if (remote.child.pid) {
+          expect(isPidDefinitelyDead(remote.child.pid)).toBe(true);
+        }
+      } finally {
+        if (paused) {
+          process.kill(host.pid!, "SIGCONT");
+        }
+        try {
+          if (remote) {
+            await withinTest(remote.result, signal);
+          }
+        } finally {
+          await host.close();
+          observeSpawn.mockRestore();
+        }
+      }
+    },
+  );
+});
+
 describe("bash tool output lifecycle", () => {
+  it("reports a long final line's tail and size after its newline", async () => {
+    const text = `${"x".repeat(250_000)}END-MARKER\n`;
+    const operations: BashOperations = {
+      exec: async (_command, _cwd, { onData }) => {
+        onData(Buffer.from(text), "stdout");
+        return { exitCode: 0 };
+      },
+    };
+    const result = await createBashTool(process.cwd(), { operations }).execute("long-line", {
+      command: "ignored",
+    });
+    const details = result.details;
+    if (
+      !details ||
+      typeof details !== "object" ||
+      !("fullOutputPath" in details) ||
+      typeof details.fullOutputPath !== "string"
+    ) {
+      throw new Error("Expected a full output path for truncated Bash output");
+    }
+    const fullOutputPath = details.fullOutputPath;
+    try {
+      expect(result.content[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining(
+          "END-MARKER\n\n[Showing last 50.0KB of line 1 (line is 244.2KB).",
+        ),
+      });
+      expect(await readFile(fullOutputPath, "utf8")).toBe(text);
+    } finally {
+      await rm(fullOutputPath, { force: true });
+    }
+  });
+
+  it.runIf(process.platform !== "win32").for(nativeBashSpillScenarios)(
+    "settles real Bash output for %s",
+    async (scenario, { signal }) => {
+      await expectNativeBashSpill("tool", scenario, signal);
+    },
+  );
+
   it.runIf(process.platform !== "win32")("surfaces a configured shell launch error", async () => {
     const operations = createLocalBashOperations({
       shellPath: path.join(process.cwd(), "package.json"),

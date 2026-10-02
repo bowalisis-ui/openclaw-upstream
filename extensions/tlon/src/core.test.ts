@@ -8,36 +8,17 @@ import {
 import type { WizardPrompter } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../api.js";
+import { tlonPlugin } from "./channel.js";
 import { tlonChannelConfigSchema } from "./config-schema.js";
 import { tlonSetupWizard } from "./setup-surface.js";
-import { normalizeShip, resolveTlonOutboundTarget } from "./targets.js";
+import { resolveTlonOutboundTarget } from "./targets.js";
 import { listTlonAccountIds, resolveTlonAccount } from "./types.js";
 
 const tlonTestPlugin = {
   id: "tlon",
   meta: { label: "Tlon" },
   setupWizard: tlonSetupWizard,
-  config: {
-    listAccountIds: listTlonAccountIds,
-    defaultAccountId: () => "default",
-    resolveAllowFrom: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string | null }) =>
-      resolveTlonAccount(cfg, accountId).dmAllowlist,
-    formatAllowFrom: ({
-      allowFrom,
-    }: {
-      cfg: OpenClawConfig;
-      allowFrom: Array<string | number> | undefined | null;
-    }) => {
-      const entries: string[] = [];
-      for (const entry of allowFrom ?? []) {
-        const normalized = normalizeShip(String(entry));
-        if (normalized) {
-          entries.push(normalized);
-        }
-      }
-      return entries;
-    },
-  },
+  config: tlonPlugin.config,
   setup: {
     resolveAccountId: ({ accountId }: { cfg: OpenClawConfig; accountId?: string | null }) =>
       accountId ?? "default",
@@ -100,13 +81,18 @@ describe("tlon core", () => {
             "chat/~zod/test": {
               mode: "open",
               allowedShips: ["~zod"],
+              requireMentionInBotThreads: false,
             },
           },
         },
       }),
     ).toMatchObject({
       success: true,
-      data: { authorization: { channelRules: { "chat/~zod/test": { mode: "open" } } } },
+      data: {
+        authorization: {
+          channelRules: { "chat/~zod/test": { mode: "open", requireMentionInBotThreads: false } },
+        },
+      },
     });
   });
 
@@ -139,15 +125,25 @@ describe("tlon core", () => {
     });
   });
 
-  it("accepts implicit mention policy at root and account scope", () => {
+  it("preserves mention policy at root and account scope", () => {
     expect(
       parseTlonConfig({
         implicitMentions: { threadParticipation: false },
+        requireMentionInBotThreads: true,
         accounts: {
-          primary: { implicitMentions: { replyToBot: false } },
+          primary: {
+            implicitMentions: { replyToBot: false },
+            requireMentionInBotThreads: false,
+          },
         },
       }),
-    ).toMatchObject({ success: true });
+    ).toMatchObject({
+      success: true,
+      data: {
+        requireMentionInBotThreads: true,
+        accounts: { primary: { requireMentionInBotThreads: false } },
+      },
+    });
   });
 
   it("configures ship, auth, and discovery settings", async () => {

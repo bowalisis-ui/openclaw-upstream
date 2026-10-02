@@ -2,6 +2,7 @@ import type {
   ConversationListItem,
   ConversationListResult,
 } from "../../packages/gateway-protocol/src/schema/agent.js";
+import { resolveChannelAccount } from "../channels/account-resolution.js";
 import type { ChannelDirectoryEntry } from "../channels/plugins/types.core.js";
 import {
   buildConversationIdentity,
@@ -11,6 +12,7 @@ import {
   listConversations,
   registerConversationAddresses,
   resolveConversationRegistryScope,
+  runConversationDatabaseWrite,
   type ConversationRecord,
   type ConversationRegistryScope,
 } from "../config/sessions/conversation-registry.js";
@@ -20,6 +22,7 @@ import { resolveOutboundChannelPlugin } from "../infra/outbound/channel-resoluti
 import { resolveOutboundSessionRoute } from "../infra/outbound/outbound-session.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { defaultRuntime } from "../runtime.js";
+import { resolveConversationRouteEligibilityForAgent } from "./conversation-route-ownership.js";
 
 const log = createSubsystemLogger("gateway/conversations");
 
@@ -124,6 +127,7 @@ async function discoverChannelAddresses(params: {
   limit: number;
   scope: ConversationRegistryScope;
   deps: ConversationListDeps;
+  readCurrentConfig?: () => OpenClawConfig;
 }): Promise<{ channel: string; discoveredConversationRefs: ReadonlySet<string> }> {
   const plugin = params.deps.resolveOutboundChannelPlugin({
     channel: params.channel,
@@ -137,7 +141,7 @@ async function discoverChannelAddresses(params: {
   }
   const identities = new Map<string, ConversationIdentity>();
   for (const accountId of new Set(plugin.config.listAccountIds(params.config).filter(Boolean))) {
-    const account = plugin.config.resolveAccount(params.config, accountId);
+    const account = await resolveChannelAccount({ plugin, cfg: params.config, accountId });
     if (plugin.config.isEnabled?.(account, params.config) === false) {
       continue;
     }
@@ -193,26 +197,41 @@ async function discoverChannelAddresses(params: {
       }
     }
   }
-  params.deps.registerConversationAddresses(params.scope, [...identities.values()]);
-  return { channel: plugin.id, discoveredConversationRefs: new Set(identities.keys()) };
+  const eligibleIdentities = await runConversationDatabaseWrite(params.scope, (scope) => {
+    const currentConfig = params.readCurrentConfig?.() ?? params.config;
+    const eligible = [...identities.values()].filter((identity) => {
+      const eligibility = resolveConversationRouteEligibilityForAgent({
+        config: currentConfig,
+        agentId: params.agentId,
+        conversation: { ...identity, target: identity.deliveryTarget },
+      });
+      if (eligibility === "unavailable") {
+        throw new Error("Conversation route ownership is temporarily unavailable");
+      }
+      return eligibility === "eligible";
+    });
+    params.deps.registerConversationAddresses(scope, eligible);
+    return eligible;
+  });
+  return {
+    channel: plugin.id,
+    discoveredConversationRefs: new Set(
+      eligibleIdentities.map((identity) => identity.conversationRef),
+    ),
+  };
 }
 
-function matchesConversationQuery(conversation: ConversationRecord, rawQuery: string): boolean {
-  const query = rawQuery.trim().toLowerCase();
-  if (!query) {
-    return true;
-  }
-  const terms = query.startsWith("@") ? [query, query.slice(1)] : [query];
-  const values = [conversation.conversationRef, conversation.target, conversation.label]
-    .filter((value): value is string => Boolean(value))
-    .map((value) => value.toLowerCase());
-  return terms.some((term) => term && values.some((value) => value.includes(term)));
+function matchesConversationQuery(conversation: ConversationRecord, query: string): boolean {
+  return [conversation.conversationRef, conversation.target, conversation.label].some((value) =>
+    value?.toLowerCase().includes(query),
+  );
 }
 
 /** Lists persisted and channel-directory addresses from the Gateway's live plugin runtime. */
 export async function runGatewayConversationList(
   params: {
     config: OpenClawConfig;
+    readCurrentConfig?: () => OpenClawConfig;
     agentId: string;
     channel?: string;
     query?: string;
@@ -231,20 +250,38 @@ export async function runGatewayConversationList(
         limit: params.limit,
         scope,
         deps,
+        ...(params.readCurrentConfig ? { readCurrentConfig: params.readCurrentConfig } : {}),
       })
     : undefined;
-  const conversations = deps.listConversations(scope, {
-    ...(query ? {} : { limit: params.limit }),
-    ...(discovery ? { channel: discovery.channel } : {}),
-  });
-  const selected = query
-    ? conversations
-        .filter(
-          (entry) =>
-            discovery?.discoveredConversationRefs.has(entry.conversationRef) === true ||
-            matchesConversationQuery(entry, query),
-        )
-        .slice(0, params.limit)
-    : conversations;
+  const conversations = deps.listConversations(
+    scope,
+    discovery ? { channel: discovery.channel } : {},
+  );
+  const currentConfig = params.readCurrentConfig?.() ?? params.config;
+  const normalizedQuery = query?.toLowerCase() ?? "";
+  const searchQuery =
+    normalizedQuery.startsWith("@") && normalizedQuery.length > 1
+      ? normalizedQuery.slice(1)
+      : normalizedQuery;
+  const selected = conversations
+    .filter((entry) => {
+      if (
+        query &&
+        discovery?.discoveredConversationRefs.has(entry.conversationRef) !== true &&
+        !matchesConversationQuery(entry, searchQuery)
+      ) {
+        return false;
+      }
+      const eligibility = resolveConversationRouteEligibilityForAgent({
+        config: currentConfig,
+        agentId: params.agentId,
+        conversation: entry,
+      });
+      if (eligibility === "unavailable") {
+        throw new Error("Conversation route ownership is temporarily unavailable");
+      }
+      return eligibility === "eligible";
+    })
+    .slice(0, params.limit);
   return { conversations: selected.map(presentConversation) };
 }

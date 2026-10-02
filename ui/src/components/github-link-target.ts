@@ -1,32 +1,33 @@
-export type GitHubItemTarget = {
-  kind: "issue" | "pull";
-  number: number;
-  owner: string;
-  repo: string;
-};
+import {
+  matchGitHubItemPath,
+  matchGitHubItemUrl,
+  type GitHubItemMatch,
+} from "./github-link-eligibility.ts";
 
-function decodePathSegment(value: string): string | null {
+type GitHubItemTarget = { kind: "issue" | "pull"; owner: string; repo: string; number: number };
+export type GitHubLinkTarget = GitHubItemTarget & { href: string };
+
+export function decodeGitHubPathSegment(value: string): string | null {
   try {
-    const decoded = decodeURIComponent(value).trim();
+    const decoded = decodeURIComponent(value);
     return decoded && decoded !== "." && decoded !== ".." ? decoded : null;
   } catch {
     return null;
   }
 }
 
-export function parseGitHubItemPath(url: URL): GitHubItemTarget | null {
-  const segments = url.pathname.split("/").filter(Boolean);
-  const owner = decodePathSegment(segments[0] ?? "");
-  const repo = decodePathSegment(segments[1] ?? "");
-  const surface = segments[2];
-  const numberText = segments[3] ?? "";
-  if (!owner || !repo || !/^[1-9]\d{0,9}$/.test(numberText)) {
-    return null;
-  }
-  const kind = surface === "issues" ? "issue" : surface === "pull" ? "pull" : null;
-  return kind ? { kind, number: Number(numberText), owner, repo } : null;
+function itemTarget([owner, repo, issue, pull]: GitHubItemMatch): GitHubItemTarget {
+  return { kind: issue ? "issue" : "pull", number: Number(issue ?? pull), owner, repo };
 }
 
-export function formatGitHubItemReference(target: GitHubItemTarget): string {
-  return `${target.owner}/${target.repo}#${target.number}`;
+export function parseGitHubItemPath(url: URL): GitHubItemTarget | null {
+  const match = matchGitHubItemPath(url);
+  return match ? itemTarget(match) : null;
+}
+
+export function parseGitHubLinkTarget(href: string): GitHubLinkTarget | null {
+  // Anchors resolve relative links; the stream scanner supplies absolute URLs.
+  const url = URL.parse(href);
+  const match = url ? matchGitHubItemUrl(url) : null;
+  return match && url ? { ...itemTarget(match), href: url.href } : null;
 }

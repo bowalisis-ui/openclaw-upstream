@@ -15,22 +15,19 @@ import type {
   PreparedChannelNativeApprovalTarget,
 } from "./approval-native-runtime-types.js";
 import { classifyApprovalRequestChannelRoute } from "./approval-request-account-binding.js";
-import { resolveApprovalRequestKind, type ChannelApprovalKind } from "./approval-types.js";
+import type {
+  ApprovalRequestInput,
+  ApprovalResolved,
+  ChannelApprovalKind,
+  NormalizedApprovalRequest,
+} from "./approval-types.js";
 import {
   createExecApprovalChannelRuntime,
   type ExecApprovalChannelRuntime,
   type ExecApprovalChannelRuntimeAdapter,
 } from "./exec-approval-channel-runtime.js";
-import type { ExecApprovalChannelRuntimeEventKind } from "./exec-approval-channel-runtime.types.js";
-import type { ExecApprovalResolved } from "./exec-approvals.js";
-import type { ExecApprovalRequest } from "./exec-approvals.js";
-import type { PluginApprovalResolved } from "./plugin-approvals.js";
-import type { PluginApprovalRequest } from "./plugin-approvals.js";
 
-type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
-type ApprovalResolved = ExecApprovalResolved | PluginApprovalResolved;
-
-export type { PreparedChannelNativeApprovalTarget } from "./approval-native-runtime-types.js";
+type ApprovalRequest = ApprovalRequestInput;
 
 type ChannelNativeApprovalPlanDeliveryResult<TPendingEntry> = {
   entries: TPendingEntry[];
@@ -39,7 +36,7 @@ type ChannelNativeApprovalPlanDeliveryResult<TPendingEntry> = {
 };
 
 /** Delivers an approval request to the adapter-planned native targets and returns pending entries. */
-export async function deliverApprovalRequestViaChannelNativePlan<
+async function deliverApprovalRequestViaChannelNativePlan<
   TPreparedTarget,
   TPendingEntry,
   TRequest extends ApprovalRequest = ApprovalRequest,
@@ -190,12 +187,7 @@ export function createChannelNativeApprovalRuntime<
   >,
 ): ExecApprovalChannelRuntime<TRequest, TResolved> {
   const nowMs = adapter.nowMs ?? Date.now;
-  const resolveApprovalKind =
-    adapter.resolveApprovalKind ??
-    ((request: TRequest): ChannelApprovalKind => resolveApprovalRequestKind(request));
-  const handledEventKinds = new Set<ExecApprovalChannelRuntimeEventKind>(
-    adapter.eventKinds ?? ["exec"],
-  );
+  const handledEventKinds = new Set<ChannelApprovalKind>(adapter.eventKinds ?? ["exec"]);
   const gatewayRuntime = getGatewayNativeApprovalRuntime();
   const createRouteReporter =
     gatewayRuntime?.routeCoordinator.createReporter ?? createApprovalNativeRouteReporter;
@@ -204,7 +196,8 @@ export function createChannelNativeApprovalRuntime<
     channel: adapter.channel,
     channelLabel: adapter.channelLabel,
     accountId: adapter.accountId,
-    shouldHandle: (request) => adapter.shouldHandle(request as TRequest),
+    // SAFETY: the route coordinator receives only normalized requests from this runtime.
+    shouldHandle: (request) => adapter.shouldHandle(request as NormalizedApprovalRequest<TRequest>),
     classifyRoute: (request) =>
       classifyApprovalRequestChannelRoute({
         cfg: adapter.cfg,
@@ -238,7 +231,7 @@ export function createChannelNativeApprovalRuntime<
     eventKinds: adapter.eventKinds,
     isConfigured: adapter.isConfigured,
     shouldHandle: (request) => {
-      const approvalKind = resolveApprovalKind(request);
+      const approvalKind = adapter.resolveApprovalKind?.(request) ?? request.approvalKind;
       const selection = routeReporter.selectRequest({
         approvalKind,
         request,
@@ -283,7 +276,7 @@ export function createChannelNativeApprovalRuntime<
     },
     nowMs,
     deliverRequested: async (request) => {
-      const approvalKind = resolveApprovalKind(request);
+      const approvalKind = adapter.resolveApprovalKind?.(request) ?? request.approvalKind;
       let deliveryPlan: ChannelApprovalNativeDeliveryPlan = {
         targets: [],
         originTarget: null,
@@ -302,52 +295,42 @@ export function createChannelNativeApprovalRuntime<
           approvalKind,
           request,
           adapter: adapter.nativeAdapter,
-          prepareTarget: async ({ plannedTarget, request: requestCandidate }) =>
+          prepareTarget: async (target) =>
             await adapter.prepareTarget({
-              plannedTarget,
-              request: requestCandidate,
+              ...target,
               approvalKind,
               pendingContent,
             }),
-          deliverTarget: async ({ plannedTarget, preparedTarget, request: requestEntry }) =>
+          deliverTarget: async (target) =>
             await adapter.deliverTarget({
-              plannedTarget,
-              preparedTarget,
-              request: requestEntry,
+              ...target,
               approvalKind,
               pendingContent,
             }),
           onDeliveryError: adapter.onDeliveryError
-            ? ({ error, plannedTarget, request: requestResult }) => {
+            ? (result) => {
                 adapter.onDeliveryError?.({
-                  error,
-                  plannedTarget,
-                  request: requestResult,
+                  ...result,
                   approvalKind,
                   pendingContent,
                 });
               }
             : undefined,
           onDuplicateSkipped: adapter.onDuplicateSkipped
-            ? ({ plannedTarget, preparedTarget, request: requestValue }) => {
+            ? (result) => {
                 adapter.onDuplicateSkipped?.({
-                  plannedTarget,
-                  preparedTarget,
-                  request: requestValue,
+                  ...result,
                   approvalKind,
                   pendingContent,
                 });
               }
             : undefined,
           onDelivered: adapter.onDelivered
-            ? ({ plannedTarget, preparedTarget, request: requestLocal, entry }) => {
+            ? (result) => {
                 adapter.onDelivered?.({
-                  plannedTarget,
-                  preparedTarget,
-                  request: requestLocal,
+                  ...result,
                   approvalKind,
                   pendingContent,
-                  entry,
                 });
               }
             : undefined,

@@ -1,4 +1,3 @@
-// Network Policy module implements ip behavior.
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -109,13 +108,9 @@ export function isIpv6Address(address: ParsedIpAddress): address is ipaddr.IPv6 
 }
 
 function normalizeIpv4MappedAddress(address: ParsedIpAddress): ParsedIpAddress {
-  if (!isIpv6Address(address)) {
-    return address;
-  }
-  if (!address.isIPv4MappedAddress()) {
-    return address;
-  }
-  return address.toIPv4Address();
+  return isIpv6Address(address) && address.isIPv4MappedAddress()
+    ? address.toIPv4Address()
+    : address;
 }
 
 function normalizeIpParseInput(raw: string | undefined): string | undefined {
@@ -164,11 +159,7 @@ export function isCanonicalDottedDecimalIPv4(raw: string | undefined): boolean {
 
 /** Detects legacy numeric IPv4 forms that canonical parsing deliberately rejects. */
 export function isLegacyIpv4Literal(raw: string | undefined): boolean {
-  const trimmed = normalizeOptionalString(raw);
-  if (!trimmed) {
-    return false;
-  }
-  const normalized = stripIpv6Brackets(trimmed);
+  const normalized = normalizeIpParseInput(raw);
   if (!normalized || normalized.includes(":")) {
     return false;
   }
@@ -176,16 +167,7 @@ export function isLegacyIpv4Literal(raw: string | undefined): boolean {
     return false;
   }
   const parts = normalized.split(".");
-  if (parts.length === 0 || parts.length > 4) {
-    return false;
-  }
-  if (parts.some((part) => part.length === 0)) {
-    return false;
-  }
-  if (!parts.every((part) => isNumericIpv4LiteralPart(part))) {
-    return false;
-  }
-  return true;
+  return parts.length <= 4 && parts.every(isNumericIpv4LiteralPart);
 }
 
 /** True when a canonical IP literal is loopback, including IPv4-mapped IPv6. */
@@ -215,6 +197,18 @@ export function isLinkLocalIpAddress(raw: string | undefined): boolean {
   return normalized.range() === "linkLocal";
 }
 
+/** True for unspecified IPs, including IPv4 embedded in IPv6 transition forms. */
+export function isUnspecifiedIpAddress(raw: string | undefined): boolean {
+  const parsed = parseCanonicalIpAddress(raw);
+  if (!parsed || parsed.range() === "loopback") {
+    return false;
+  }
+  const normalized = isIpv6Address(parsed)
+    ? (extractEmbeddedIpv4FromIpv6(parsed) ?? parsed)
+    : parsed;
+  return normalized.range() === "unspecified";
+}
+
 /** True for cloud metadata IP literals, including mapped and embedded forms. */
 export function isCloudMetadataIpAddress(raw: string | undefined): boolean {
   const parsed = parseLooseIpAddress(raw);
@@ -241,7 +235,17 @@ export function isPrivateOrLoopbackIpAddress(raw: string | undefined): boolean {
   if (isIpv4Address(normalized)) {
     return PRIVATE_OR_LOOPBACK_IPV4_RANGES.has(normalized.range());
   }
-  return isBlockedSpecialUseIpv6Address(normalized);
+  if (isBlockedSpecialUseIpv6Address(normalized)) {
+    return true;
+  }
+  const embeddedIpv4 = extractEmbeddedIpv4FromIpv6(normalized);
+  return embeddedIpv4 ? PRIVATE_OR_LOOPBACK_IPV4_RANGES.has(embeddedIpv4.range()) : false;
+}
+
+/** True for RFC 8215 local-use NAT64 IPv6 literals (`64:ff9b:1::/48`). */
+export function isRfc8215LocalUseNat64Ipv6Address(raw: string | undefined): boolean {
+  const parsed = parseCanonicalIpAddress(raw);
+  return Boolean(parsed && isIpv6Address(parsed) && isRfc8215Nat64LocalUseAddress(parsed));
 }
 
 /** Applies the SSRF block policy for parsed IPv6 special-use ranges. */
@@ -252,6 +256,17 @@ export function isBlockedSpecialUseIpv6Address(
   // ipaddr.js returns "discard" at runtime for 100::/64, but its published
   // TypeScript IPv6Range union omits that literal.
   const range = address.range() as BlockedIpv6Range;
+  if (isRfc8215Nat64LocalUseAddress(address)) {
+    // RFC8215 local-use NAT64 can carry deployment-specific more-specific
+    // prefixes, so the literal alone cannot prove which IPv4 bits a router
+    // will use. Block the allocation instead of guessing a public decoy.
+    return true;
+  }
+  if (isCloudMetadataIpAddress(address.toString())) {
+    // Metadata endpoints stay blocked even when operators opt into the wider
+    // ULA range for fake-ip proxy compatibility.
+    return true;
+  }
   if (range === "uniqueLocal" && options.allowUniqueLocalRange === true) {
     // Operators running fake-ip proxy stacks (sing-box, Clash, Surge) opt in
     // to fc00::/7 reaching the network — same intent as
@@ -298,14 +313,28 @@ function decodeIpv4FromHextets(high: number, low: number): ipaddr.IPv4 {
   return ipaddr.IPv4.parse(octets.join("."));
 }
 
-/** Extracts embedded IPv4 addresses from mapped and transition IPv6 prefixes. */
+function isRfc8215Nat64LocalUsePrefix(parts: Ipv6Hextets): boolean {
+  return parts[0] === 0x0064 && parts[1] === 0xff9b && parts[2] === 0x0001;
+}
+
+function isRfc8215Nat64LocalUseAddress(address: ipaddr.IPv6): boolean {
+  return isRfc8215Nat64LocalUsePrefix(expectIpv6Hextets(address.parts));
+}
+
+/** Extracts the embedded IPv4 address from mapped and transition IPv6 prefixes. */
 export function extractEmbeddedIpv4FromIpv6(address: ipaddr.IPv6): ipaddr.IPv4 | undefined {
   const parts = expectIpv6Hextets(address.parts);
   switch (address.range()) {
     case "ipv4Mapped":
       return address.toIPv4Address();
     case "rfc6145":
+      return decodeIpv4FromHextets(parts[6], parts[7]);
     case "rfc6052":
+      if (isRfc8215Nat64LocalUseAddress(address)) {
+        // No single embedded IPv4 exists without the deployment's active NAT64
+        // prefix length. Policy blocks this allocation in the IPv6 check above.
+        return undefined;
+      }
       return decodeIpv4FromHextets(parts[6], parts[7]);
     case "6to4":
       return decodeIpv4FromHextets(parts[1], parts[2]);
@@ -330,40 +359,51 @@ export function extractEmbeddedIpv4FromIpv6(address: ipaddr.IPv6): ipaddr.IPv4 |
   return undefined;
 }
 
+/** Parses the exact-IP and CIDR forms accepted by runtime address matching. */
+export function parseIpAddressOrCidr(
+  raw: string | undefined,
+): [ParsedIpAddress, number?] | undefined {
+  const candidate = normalizeOptionalString(raw);
+  if (!candidate) {
+    return undefined;
+  }
+  if (!candidate.includes("/")) {
+    const exact = parseCanonicalIpAddress(candidate);
+    return exact ? [exact] : undefined;
+  }
+  try {
+    return ipaddr.parseCIDR(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Checks an IP literal against an exact IP or CIDR range, normalizing mapped IPv4. */
 export function isIpInCidr(ip: string, cidr: string): boolean {
   const normalizedIp = parseCanonicalIpAddress(ip);
-  if (!normalizedIp) {
+  const range = parseIpAddressOrCidr(cidr);
+  if (!normalizedIp || !range) {
     return false;
   }
-  const candidate = cidr.trim();
-  if (!candidate) {
-    return false;
-  }
+  const [baseAddress, prefixLength] = range;
   const comparableIp = normalizeIpv4MappedAddress(normalizedIp);
-  if (!candidate.includes("/")) {
-    const exact = parseCanonicalIpAddress(candidate);
-    if (!exact) {
-      return false;
-    }
-    const comparableExact = normalizeIpv4MappedAddress(exact);
+  const comparableBase = normalizeIpv4MappedAddress(baseAddress);
+  if (prefixLength === undefined) {
     return (
-      comparableIp.kind() === comparableExact.kind() &&
-      comparableIp.toString() === comparableExact.toString()
+      comparableIp.kind() === comparableBase.kind() &&
+      comparableIp.toString() === comparableBase.toString()
     );
   }
-
-  try {
-    const [baseAddress, prefixLength] = ipaddr.parseCIDR(candidate);
-    const comparableBase = normalizeIpv4MappedAddress(baseAddress);
-    if (isIpv4Address(comparableIp) && isIpv4Address(comparableBase)) {
-      return comparableIp.match([comparableBase, prefixLength]);
-    }
-    if (isIpv6Address(comparableIp) && isIpv6Address(comparableBase)) {
-      return comparableIp.match([comparableBase, prefixLength]);
-    }
-    return false;
-  } catch {
-    return false;
+  if (isIpv4Address(comparableIp) && isIpv4Address(comparableBase)) {
+    // A base normalized from IPv6 is mapped: its prefix includes 96 mapped bits.
+    // Shorter prefixes contain the whole mapped block, equivalent to IPv4 /0.
+    const ipv4PrefixLength = isIpv6Address(baseAddress)
+      ? Math.max(0, prefixLength - 96)
+      : prefixLength;
+    return comparableIp.match([comparableBase, ipv4PrefixLength]);
   }
+  if (isIpv6Address(comparableIp) && isIpv6Address(comparableBase)) {
+    return comparableIp.match([comparableBase, prefixLength]);
+  }
+  return false;
 }

@@ -1,14 +1,6 @@
-export type SessionObserverEvent = {
-  runId: string;
-  seq: number;
-  stream: string;
-  ts: number;
-  data: Record<string, unknown>;
-  lifecycleGeneration?: string;
-  sessionKey?: string;
-  sessionId?: string;
-  agentId?: string;
-};
+import type { AgentEventPayload } from "../infra/agent-events.js";
+
+export type SessionObserverEvent = AgentEventPayload;
 
 export type SessionObserverCompanionSnapshot = {
   agentId: string;
@@ -21,6 +13,6 @@ export type SessionObserverService = {
   handleEvent: (event: SessionObserverEvent) => void;
   setConnectionVisibility: (connId: string, visible: boolean) => void;
   removeConnection: (connId: string) => void;
-  getCompanionSnapshot: (sessionKey: string) => SessionObserverCompanionSnapshot;
+  getCompanionSnapshot: (sessionKey: string, agentId?: string) => SessionObserverCompanionSnapshot;
   dispose: () => void;
 };

@@ -1,5 +1,7 @@
 import { finalizeEvent, type Event, type Relay } from "nostr-tools";
+import { isNewerBuzzRevision } from "../event-order.js";
 import {
+  BUZZ_NORMAL_MESSAGE_KIND,
   buildBuzzMessageTags,
   parseBuzzMessageEvent,
   type BuzzInboundMessage,
@@ -8,14 +10,12 @@ import { connectAuthenticatedBuzzRelaySession, parseBuzzAuthTag } from "../relay
 import { openBuzzRelaySubscription } from "../relay-subscription.js";
 import {
   BUZZ_ROOM_MEMBERSHIP_KIND,
-  isNewerBuzzRoomMembership,
   parseBuzzRoomMembershipEvent,
   type BuzzRoomMembership,
 } from "../room-membership.js";
 import { decodeBuzzPrivateKey } from "../types.js";
 import type { BuzzQaCredentials } from "./credentials.js";
 
-const BUZZ_MESSAGE_KIND = 9;
 const MEMBERSHIP_TIMEOUT_MS = 10_000;
 const OBSERVER_READY_TIMEOUT_MS = 10_000;
 
@@ -75,10 +75,7 @@ async function loadBuzzQaRoomMembership(params: {
         {
           onevent: (event) => {
             const membership = parseBuzzRoomMembershipEvent(event, params.relayPublicKey);
-            if (
-              membership?.roomId === params.roomId &&
-              isNewerBuzzRoomMembership(membership, latest)
-            ) {
+            if (membership?.roomId === params.roomId && isNewerBuzzRevision(membership, latest)) {
               latest = membership;
             }
           },
@@ -170,7 +167,7 @@ export async function createBuzzQaRelayDriver(params: {
       relay,
       [
         {
-          kinds: [BUZZ_MESSAGE_KIND],
+          kinds: [BUZZ_NORMAL_MESSAGE_KIND],
           authors: [credentials.sutPublicKey],
           "#h": [credentials.roomId],
           since: Math.floor(Date.now() / 1_000) - 5,
@@ -252,7 +249,7 @@ export async function createBuzzQaRelayDriver(params: {
       }
       const event = finalizeEvent(
         {
-          kind: BUZZ_MESSAGE_KIND,
+          kind: BUZZ_NORMAL_MESSAGE_KIND,
           content: input.text,
           created_at: Math.floor(Date.now() / 1_000),
           tags,

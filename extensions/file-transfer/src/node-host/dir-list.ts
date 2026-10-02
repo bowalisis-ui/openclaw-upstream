@@ -1,12 +1,15 @@
-// File Transfer plugin module implements dir list behavior.
 import path from "node:path";
-import { parseStrictNonNegativeInteger } from "openclaw/plugin-sdk/number-runtime";
-import { root } from "openclaw/plugin-sdk/security-runtime";
+import {
+  asPositiveFiniteNumber,
+  parseStrictNonNegativeInteger,
+} from "openclaw/plugin-sdk/number-runtime";
 import { mimeFromExtension } from "../shared/mime.js";
+import type { PathBinding } from "../shared/path-binding.js";
+import { listCanonicalDirectory } from "./dir-list-worker.js";
 import {
   classifyFsSafeReadError,
   readAbsolutePath,
-  resolveCanonicalReadPath,
+  resolveBoundReadDirectory,
   statRequiredDirectory,
 } from "./path-errors.js";
 
@@ -18,6 +21,9 @@ type DirListParams = {
   pageToken?: unknown;
   maxEntries?: unknown;
   followSymlinks?: unknown;
+  preflightOnly?: unknown;
+  expectedCanonicalPath?: unknown;
+  expectedBinding?: unknown;
 };
 
 type DirListEntry = {
@@ -26,6 +32,7 @@ type DirListEntry = {
   size: number;
   mimeType: string;
   isDir: boolean;
+  isFile: boolean;
   mtime: number;
 };
 
@@ -35,6 +42,8 @@ type DirListOk = {
   entries: DirListEntry[];
   nextPageToken?: string;
   truncated: boolean;
+  preflight?: true;
+  binding: PathBinding;
 };
 
 type DirListErrCode =
@@ -43,6 +52,7 @@ type DirListErrCode =
   | "PERMISSION_DENIED"
   | "IS_FILE"
   | "SYMLINK_REDIRECT"
+  | "CANONICAL_PATH_CHANGED"
   | "READ_ERROR";
 
 type DirListErr = {
@@ -53,13 +63,6 @@ type DirListErr = {
 };
 
 type DirListResult = DirListOk | DirListErr;
-
-function clampMaxEntries(input: unknown): number {
-  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) {
-    return DIR_LIST_DEFAULT_MAX_ENTRIES;
-  }
-  return Math.min(Math.floor(input), DIR_LIST_HARD_MAX_ENTRIES);
-}
 
 function parsePageOffset(input: unknown): number {
   if (typeof input !== "string") {
@@ -89,44 +92,67 @@ export async function handleDirList(params: DirListParams): Promise<DirListResul
     return requestedPath;
   }
 
-  const maxEntries = clampMaxEntries(params.maxEntries);
+  const maxEntries = Math.min(
+    Math.floor(asPositiveFiniteNumber(params.maxEntries) ?? DIR_LIST_DEFAULT_MAX_ENTRIES),
+    DIR_LIST_HARD_MAX_ENTRIES,
+  );
   const offset = parsePageOffset(params.pageToken);
 
   const followSymlinks = params.followSymlinks === true;
 
-  const canonical = await resolveCanonicalReadPath({
+  const directory = await resolveBoundReadDirectory({
     requestedPath,
     followSymlinks,
     classifyError: classifyFsError,
     notFoundMessage: "path not found",
+    expectedCanonicalPath: params.expectedCanonicalPath,
+    expectedBinding: params.expectedBinding,
   });
-  if (typeof canonical !== "string") {
-    return canonical;
-  }
-
-  const directory = await statRequiredDirectory(canonical, classifyFsError);
   if (!directory.ok) {
     return directory;
   }
-
-  let listedEntries: { name: string; isDirectory: boolean; size: number; mtimeMs: number }[];
-  try {
-    const dirRoot = await root(canonical);
-    listedEntries = await dirRoot.list(".", { withFileTypes: true });
-  } catch (err) {
-    const code = classifyFsError(err);
+  const { canonicalPath: canonical, identity } = directory;
+  if (params.preflightOnly === true) {
     return {
-      ok: false,
-      code,
-      message: `list failed: ${String(err)}`,
-      canonicalPath: canonical,
+      ok: true,
+      path: canonical,
+      entries: [],
+      truncated: false,
+      preflight: true,
+      binding: { kind: "existing", ...identity },
     };
   }
 
-  listedEntries.sort((a, b) => a.name.localeCompare(b.name));
-
-  const total = listedEntries.length;
-  const page = listedEntries.slice(offset, offset + maxEntries);
+  const listing = await listCanonicalDirectory({
+    directoryPath: canonical,
+    expectedCanonicalPath: canonical,
+    expectedDevice: identity.device,
+    expectedInode: identity.inode,
+    maxEntries,
+    offset,
+  });
+  if (!listing.ok) {
+    if (listing.code === "CANONICAL_PATH_CHANGED") {
+      return {
+        ok: false,
+        code: "CANONICAL_PATH_CHANGED",
+        message: "canonical path differs from the authorized target",
+        canonicalPath: canonical,
+      };
+    }
+    const currentDirectory = await statRequiredDirectory(canonical, classifyFsError);
+    if (!currentDirectory.ok) {
+      return currentDirectory;
+    }
+    return {
+      ok: false,
+      code: "READ_ERROR",
+      message: "list failed",
+      canonicalPath: canonical,
+    };
+  }
+  const total = listing.total;
+  const page = listing.entries;
   const truncated = offset + maxEntries < total;
   const nextPageToken = truncated ? String(offset + maxEntries) : undefined;
 
@@ -141,6 +167,7 @@ export async function handleDirList(params: DirListParams): Promise<DirListResul
       size: isDir ? 0 : entry.size,
       mimeType: isDir ? "inode/directory" : mimeFromExtension(entry.name),
       isDir,
+      isFile: entry.isFile,
       mtime: entry.mtimeMs,
     });
   }
@@ -151,5 +178,6 @@ export async function handleDirList(params: DirListParams): Promise<DirListResul
     entries,
     nextPageToken,
     truncated,
+    binding: { kind: "existing", ...identity },
   };
 }

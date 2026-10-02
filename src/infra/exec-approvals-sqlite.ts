@@ -1,14 +1,18 @@
 // Canonical SQLite row helpers for exec approval policy state.
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import { sha256Hex } from "./crypto-digest.js";
+import { formatErrorMessage } from "./errors.js";
 import {
   normalizeExecApprovalsInternal,
+  resolveExecApprovalsDisplayPath,
   tryParsePersistedExecApprovals,
 } from "./exec-approvals-config.js";
 import type { ExecApprovalsFile, ExecApprovalsSnapshot } from "./exec-approvals-core.js";
+import { resetExecApprovalsMigrationGateForTest } from "./exec-approvals-migration-gate.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -219,4 +223,81 @@ export function deleteExecApprovalsConfigRow(db: DatabaseSync): void {
       .deleteFrom("exec_approvals_config")
       .where("config_key", "=", EXEC_APPROVALS_CONFIG_KEY),
   );
+}
+
+/** Called only inside the approval owner's winning resolution transaction. */
+export function mintMcpToolGrantLocked(
+  db: DatabaseSync,
+  grant: { agentId: string; server: string; tool: string },
+  nowMs: number,
+): void {
+  const row = readExecApprovalsConfigRow(db);
+  const current: ExecApprovalsFile | null = row
+    ? tryParsePersistedExecApprovals(row.raw_json)
+    : { version: 1 };
+  if (!current) {
+    throw new Error("Cannot save MCP tool grant: invalid exec approvals document");
+  }
+  const agent = current.agents?.[grant.agentId];
+  if (
+    agent?.mcpTools?.some((entry) => entry.server === grant.server && entry.tool === grant.tool)
+  ) {
+    return;
+  }
+  const next = {
+    ...current,
+    agents: {
+      ...current.agents,
+      [grant.agentId]: {
+        ...agent,
+        mcpTools: [
+          ...(agent?.mcpTools ?? []),
+          {
+            server: grant.server,
+            tool: grant.tool,
+            source: "allow-always" as const,
+            addedAt: nowMs,
+          },
+        ],
+      },
+    },
+  };
+  assertExecApprovalsMutationAllowed({ db, current, next });
+  writeExecApprovalsConfigRow({ db, file: next, now: nowMs });
+}
+
+const log = createSubsystemLogger("infra/exec-approvals");
+const WARN_INTERVAL_MS = 60_000;
+let lastWarnAt: number | undefined;
+
+export function warnFailClosed(message: string, error?: unknown): void {
+  const now = Date.now();
+  if (lastWarnAt !== undefined && now - lastWarnAt < WARN_INTERVAL_MS) {
+    return;
+  }
+  lastWarnAt = now;
+  log.warn(message, error === undefined ? undefined : { error: formatErrorMessage(error) });
+}
+
+export function snapshotFromExecApprovalsDatabase(
+  db: DatabaseSync,
+  displayPath = resolveExecApprovalsDisplayPath(),
+): ExecApprovalsSnapshot {
+  return snapshotFromExecApprovalsRow({
+    path: displayPath,
+    row: readExecApprovalsConfigRow(db),
+    onMalformed: () =>
+      warnFailClosed("exec approvals SQLite row is malformed; denying host execution"),
+  });
+}
+
+if (process.env.VITEST || process.env.NODE_ENV === "test") {
+  Object.assign(globalThis, {
+    [Symbol.for("openclaw.execApprovalsStoreTestApi")]: {
+      reset(): void {
+        resetExecApprovalsMigrationGateForTest();
+        lastWarnAt = undefined;
+      },
+    },
+  });
 }

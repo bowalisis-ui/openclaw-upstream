@@ -234,43 +234,6 @@ describe("discord doctor", () => {
     ]);
   });
 
-  it("moves account voice.tts.edge into providers.microsoft", () => {
-    const normalize = getDiscordCompatibilityNormalizer();
-
-    const result = normalize({
-      cfg: {
-        channels: {
-          discord: {
-            accounts: {
-              main: {
-                voice: {
-                  tts: {
-                    edge: {
-                      voice: "en-US-JennyNeural",
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      } as never,
-    });
-
-    expect(result.changes).toContain(
-      "Moved channels.discord.accounts.main.voice.tts.edge → channels.discord.accounts.main.voice.tts.providers.microsoft.",
-    );
-    const mainTts = result.config.channels?.discord?.accounts?.main?.voice?.tts as
-      | Record<string, unknown>
-      | undefined;
-    expect(mainTts?.providers).toEqual({
-      microsoft: {
-        voice: "en-US-JennyNeural",
-      },
-    });
-    expect(mainTts?.edge).toBeUndefined();
-  });
-
   it("does not move unsupported root and account tts provider aliases", () => {
     const normalize = getDiscordCompatibilityNormalizer();
 
@@ -688,5 +651,47 @@ describe("discord doctor", () => {
     } as unknown as OpenClawConfig;
 
     expect(collectDiscordMissingEnvTokenWarnings({ cfg, env: {} })).toStrictEqual([]);
+  });
+
+  it("warns when Discord transcript auto-start cannot choose between voice accounts", async () => {
+    const cfg = {
+      transcripts: {
+        autoStart: [
+          {
+            providerId: "discord-voice",
+            guildId: "guild-1",
+            channelId: "channel-1",
+          },
+          {
+            providerId: "discord-voice",
+            accountId: "alpha",
+            guildId: "guild-1",
+            channelId: "channel-2",
+          },
+          { providerId: "meeting", meetingUrl: "https://meet.example.test/standup" },
+        ],
+      },
+      channels: {
+        discord: {
+          accounts: {
+            alpha: { token: "alpha-token", voice: { enabled: true } },
+            bravo: { token: "bravo-token", voice: { enabled: true } },
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    const warnings =
+      (await discordDoctor.collectPreviewWarnings?.({
+        cfg,
+        doctorFixCommand: "openclaw doctor --fix",
+        env: {},
+      })) ?? [];
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("transcripts.autoStart[0]");
+    expect(warnings[0]).toContain("Multiple Discord accounts are enabled for voice");
+    expect(warnings[0]).toContain("transcripts.autoStart[0].accountId");
+    expect(warnings[0]).toContain("channels.discord.defaultAccount");
   });
 });

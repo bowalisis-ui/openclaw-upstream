@@ -17,6 +17,9 @@ public struct ToolDisplaySummary: Sendable, Equatable {
 }
 
 public enum ToolDisplayRegistry {
+    private static let resourceBundleName = "OpenClawKit_OpenClawKit"
+    private static let resourceBundle = locateResourceBundle()
+
     private struct ToolDisplayActionSpec: Decodable {
         let label: String?
         let detailKeys: [String]?
@@ -57,21 +60,11 @@ public enum ToolDisplayRegistry {
         if key == "read" {
             detail = self.readDetail(args)
         } else if key == "write" || key == "edit" || key == "attach" {
-            detail = self.pathDetail(args)
+            detail = self.valueForKeyPath(args, path: "path") as? String
         }
 
         let detailKeys = actionSpec?.detailKeys ?? spec?.detailKeys ?? fallback?.detailKeys ?? []
-        if detail == nil {
-            detail = self.firstValue(args, keys: detailKeys)
-        }
-
-        if detail == nil {
-            detail = meta
-        }
-
-        if let detailValue = detail {
-            detail = self.shortenHomeInString(detailValue)
-        }
+        detail = (detail ?? self.firstValue(args, keys: detailKeys) ?? meta).map(self.shortenHomeInString)
 
         return ToolDisplaySummary(
             name: trimmedName,
@@ -83,7 +76,7 @@ public enum ToolDisplayRegistry {
     }
 
     private static func loadConfig() -> ToolDisplayConfig {
-        guard let url = OpenClawKitResources.bundle.url(forResource: "tool-display", withExtension: "json") else {
+        guard let url = self.resourceBundle.url(forResource: "tool-display", withExtension: "json") else {
             return self.defaultConfig()
         }
         do {
@@ -92,6 +85,46 @@ public enum ToolDisplayRegistry {
         } catch {
             return self.defaultConfig()
         }
+    }
+
+    private static func locateResourceBundle() -> Bundle {
+        if let mainResourceURL = Bundle.main.resourceURL,
+           let bundle = Bundle(
+               url: mainResourceURL.appendingPathComponent("\(self.resourceBundleName).bundle"))
+        {
+            return bundle
+        }
+
+        if Bundle.main.url(forResource: "tool-display", withExtension: "json") != nil {
+            return Bundle.main
+        }
+
+        let candidates: [URL?] = [
+            Bundle.main.resourceURL,
+            Bundle.main.bundleURL,
+            Bundle(for: ToolDisplayBundleLocator.self).resourceURL,
+            Bundle(for: ToolDisplayBundleLocator.self).bundleURL,
+        ]
+
+        for baseURL in candidates.compactMap(\.self) {
+            var current = baseURL
+            for _ in 0...5 {
+                for root in [
+                    current,
+                    current.appendingPathComponent("Resources"),
+                    current.appendingPathComponent("Contents/Resources"),
+                ] {
+                    if let bundle = Bundle(
+                        url: root.appendingPathComponent("\(self.resourceBundleName).bundle"))
+                    {
+                        return bundle
+                    }
+                }
+                current = current.deletingLastPathComponent()
+            }
+        }
+
+        return Bundle.main
     }
 
     private static func defaultConfig() -> ToolDisplayConfig {
@@ -140,9 +173,7 @@ public enum ToolDisplayRegistry {
     }
 
     private static func normalizeVerb(_ value: String?) -> String? {
-        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !trimmed.isEmpty else { return nil }
-        return trimmed.replacingOccurrences(of: "_", with: " ")
+        value?.trimmedNonEmpty?.replacingOccurrences(of: "_", with: " ")
     }
 
     private static func readDetail(_ args: AnyCodable?) -> String? {
@@ -151,15 +182,13 @@ public enum ToolDisplayRegistry {
         let limitAny = self.valueForKeyPath(args, path: "limit")
         let offset = (offsetAny as? Double) ?? (offsetAny as? Int).map(Double.init)
         let limit = (limitAny as? Double) ?? (limitAny as? Int).map(Double.init)
-        if let offset, let limit {
-            let end = offset + limit
-            return "\(path):\(Int(offset))-\(Int(end))"
+        if let offset, let limit,
+           let start = Int(exactly: offset.rounded(.towardZero)),
+           let end = Int(exactly: (offset + limit).rounded(.towardZero))
+        {
+            return "\(path):\(start)-\(end)"
         }
         return path
-    }
-
-    private static func pathDetail(_ args: AnyCodable?) -> String? {
-        self.valueForKeyPath(args, path: "path") as? String
     }
 
     private static func firstValue(_ args: AnyCodable?, keys: [String]) -> String? {
@@ -219,3 +248,5 @@ public enum ToolDisplayRegistry {
         return value.replacingOccurrences(of: home, with: "~")
     }
 }
+
+private final class ToolDisplayBundleLocator {}

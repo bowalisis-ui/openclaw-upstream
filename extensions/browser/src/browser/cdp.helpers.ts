@@ -1,41 +1,40 @@
 /**
  * Chrome DevTools Protocol URL, fetch, and socket helpers.
+ *
  * Handles CDP URL normalization, SSRF-guarded HTTP discovery, credential
  * redaction/headers, and request/response correlation over WebSocket.
  */
 import { createHash } from "node:crypto";
-import { parseBrowserHttpUrl, redactCdpUrl } from "openclaw/plugin-sdk/browser-config";
-import { toStringifiedError } from "openclaw/plugin-sdk/error-runtime";
+import { redactCdpUrl } from "openclaw/plugin-sdk/browser-cdp";
+import { redactToolPayloadText } from "openclaw/plugin-sdk/logging-core";
 import { readProviderJsonResponse } from "openclaw/plugin-sdk/provider-http";
-import { sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
-import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
-import { rawDataToString } from "openclaw/plugin-sdk/webhook-ingress";
-import WebSocket from "ws";
-import { isLoopbackHost } from "../gateway/net.js";
 import {
   SsrFBlockedError,
   type SsrFPolicy,
   resolvePinnedHostnameWithPolicy,
-} from "../infra/net/ssrf.js";
-import { redactToolPayloadText } from "../logging/redact.js";
-import {
-  getDirectAgentForCdp,
-  withManagedProxyForCdpUrl,
-  withNoProxyForCdpUrl,
-} from "./cdp-proxy-bypass.js";
-import { CDP_HTTP_REQUEST_TIMEOUT_MS, CDP_WS_HANDSHAKE_TIMEOUT_MS } from "./cdp-timeouts.js";
+} from "openclaw/plugin-sdk/security-runtime";
+import { fetchWithSsrFGuard, isLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
+import { getHeadersWithAuth, stripCdpUrlCredentials } from "./cdp-auth.js";
+import { withManagedProxyForCdpUrl, withNoProxyForCdpUrl } from "./cdp-proxy-bypass.js";
+import { CDP_HTTP_REQUEST_TIMEOUT_MS } from "./cdp-timeouts.js";
+import { withCdpSocket } from "./cdp-websocket.js";
 import type { BrowserTabOwnership } from "./client.types.js";
 import { BrowserCdpEndpointBlockedError } from "./errors.js";
 import { resolveBrowserRateLimitMessage } from "./rate-limit-message.js";
 import {
   allowsDiscoveredCdpAuthorityChange,
+  isCdpHostnameTrustedByPolicy,
   withExactHostnamePolicy,
 } from "./ssrf-policy-helpers.js";
 import { normalizeBrowserTimerDelayMs } from "./timer-delay.js";
 
 const CDP_URL_IN_TEXT_RE = /\b(?:https?|wss?):\/\/[^\s"'<>`]+/gi;
 
-export { isLoopbackHost, parseBrowserHttpUrl, redactCdpUrl };
+export { isLoopbackHost };
+export { getHeadersWithAuth, stripCdpUrlCredentials } from "./cdp-auth.js";
+export { openCdpWebSocket, withCdpSocket } from "./cdp-websocket.js";
+export type { CdpSendFn } from "./cdp-websocket.js";
+export { redactCdpUrl };
 
 /**
  * Returns true when the URL uses a WebSocket protocol (ws: or wss:).
@@ -43,12 +42,8 @@ export { isLoopbackHost, parseBrowserHttpUrl, redactCdpUrl };
  * from HTTP(S) endpoints that require /json/version discovery.
  */
 export function isWebSocketUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "ws:" || parsed.protocol === "wss:";
-  } catch {
-    return false;
-  }
+  const parsed = URL.parse(url);
+  return parsed?.protocol === "ws:" || parsed?.protocol === "wss:";
 }
 
 /**
@@ -64,25 +59,14 @@ export function isWebSocketUrl(url: string): boolean {
  * Chrome will reject with HTTP 400.
  */
 export function isDirectCdpWebSocketEndpoint(url: string): boolean {
-  if (!isWebSocketUrl(url)) {
-    return false;
-  }
-  try {
-    const parsed = new URL(url);
-    return /\/devtools\/(?:browser|page|worker|shared_worker|service_worker)\/[^/]/i.test(
-      parsed.pathname,
-    );
-    // isWebSocketUrl above already parsed the same URL successfully, so
-    // new URL(url) cannot throw here. Kept for structural symmetry with
-    // the other try/catch URL helpers.
-    /* c8 ignore start */
-  } catch {
-    return false;
-  }
-  /* c8 ignore stop */
+  const parsed = URL.parse(url);
+  return (
+    (parsed?.protocol === "ws:" || parsed?.protocol === "wss:") &&
+    /\/devtools\/(?:browser|page|worker|shared_worker|service_worker)\/[^/]/i.test(parsed.pathname)
+  );
 }
 
-/** Restricts discovered CDP endpoints to the configured control-plane host. */
+/** Restrict a trusted CDP endpoint to its configured control-plane host. */
 export function scopeCdpPolicyToConfiguredEndpoint(
   cdpUrl: string,
   ssrfPolicy?: SsrFPolicy,
@@ -90,12 +74,18 @@ export function scopeCdpPolicyToConfiguredEndpoint(
   if (!ssrfPolicy) {
     return undefined;
   }
-  return withExactHostnamePolicy(ssrfPolicy, new URL(cdpUrl).hostname);
+  const hostname = new URL(cdpUrl).hostname;
+  // Never turn an otherwise strict remote hostname into a private-network grant.
+  if (!isLoopbackHost(hostname) && !isCdpHostnameTrustedByPolicy(ssrfPolicy, hostname)) {
+    return ssrfPolicy;
+  }
+  return withExactHostnamePolicy(ssrfPolicy, hostname);
 }
 
 type CdpEndpointSource =
   | { source?: "configured" }
   | { source: "discovered"; configuredUrl: string };
+export type CdpEndpointPin = Awaited<ReturnType<typeof resolvePinnedHostnameWithPolicy>>;
 
 function cdpEndpointAuthority(url: string): string {
   const parsed = new URL(url);
@@ -124,12 +114,12 @@ export async function assertCdpEndpointAllowed(
   cdpUrl: string,
   ssrfPolicy?: SsrFPolicy,
   options?: CdpEndpointSource,
-): Promise<void> {
+): Promise<CdpEndpointPin | undefined> {
   if (options?.source === "discovered") {
     assertDiscoveredCdpEndpointMatchesConfigured(cdpUrl, options.configuredUrl, ssrfPolicy);
   }
   if (!ssrfPolicy) {
-    return;
+    return undefined;
   }
   const parsed = new URL(cdpUrl);
   if (!["http:", "https:", "ws:", "wss:"].includes(parsed.protocol)) {
@@ -143,75 +133,11 @@ export async function assertCdpEndpointAllowed(
       isLoopbackHost(parsed.hostname) && options?.source !== "discovered"
         ? withExactHostnamePolicy(ssrfPolicy, parsed.hostname)
         : ssrfPolicy;
-    await resolvePinnedHostnameWithPolicy(parsed.hostname, {
+    return await resolvePinnedHostnameWithPolicy(parsed.hostname, {
       policy,
     });
   } catch (error) {
     throw new BrowserCdpEndpointBlockedError({ cause: error });
-  }
-}
-
-type CdpResponse = {
-  id: number;
-  result?: unknown;
-  error?: { message?: string };
-};
-
-type Pending = {
-  resolve: (value: unknown) => void;
-  reject: (err: Error) => void;
-  timer?: ReturnType<typeof setTimeout>;
-};
-
-export type CdpSendFn = (
-  method: string,
-  params?: Record<string, unknown>,
-  sessionId?: string,
-) => Promise<unknown>;
-
-function decodeUrlUserInfo(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-/** Merge URL basic-auth credentials into headers without overriding explicit auth. */
-export function getHeadersWithAuth(url: string, headers: Record<string, string> = {}) {
-  const mergedHeaders = { ...headers };
-  try {
-    const parsed = new URL(url);
-    const hasAuthHeader = Object.keys(mergedHeaders).some(
-      (key) => key.trim().toLowerCase() === "authorization",
-    );
-    if (hasAuthHeader) {
-      return mergedHeaders;
-    }
-    if (parsed.username || parsed.password) {
-      const username = decodeUrlUserInfo(parsed.username);
-      const password = decodeUrlUserInfo(parsed.password);
-      const auth = Buffer.from(`${username}:${password}`).toString("base64");
-      return { ...mergedHeaders, Authorization: `Basic ${auth}` };
-    }
-  } catch {
-    // ignore
-  }
-  return mergedHeaders;
-}
-
-/** Remove URL userinfo after callers have converted it to an Authorization header. */
-export function stripCdpUrlCredentials(url: string): string {
-  try {
-    const parsed = new URL(url);
-    if (!parsed.username && !parsed.password) {
-      return url;
-    }
-    parsed.username = "";
-    parsed.password = "";
-    return parsed.toString();
-  } catch {
-    return url;
   }
 }
 
@@ -228,6 +154,40 @@ export function appendCdpPath(cdpUrl: string, path: string): string {
   const suffix = path.startsWith("/") ? path : `/${path}`;
   url.pathname = `${basePath}${suffix}`;
   return url.toString();
+}
+
+/** Normalize a reported CDP WebSocket URL against the configured CDP base URL. */
+export function normalizeCdpWsUrl(wsUrl: string, cdpUrl: string): string {
+  const ws = new URL(wsUrl);
+  const cdp = new URL(cdpUrl);
+  // Treat 0.0.0.0 and :: as wildcard bind addresses that need rewriting.
+  // Containerized browsers (e.g. browserless) report ws://0.0.0.0:<internal-port>
+  // in /json/version — these must be rewritten to the external cdpUrl host:port.
+  const isWildcardBind = ws.hostname === "0.0.0.0" || ws.hostname === "[::]";
+  if ((isLoopbackHost(ws.hostname) || isWildcardBind) && !isLoopbackHost(cdp.hostname)) {
+    ws.hostname = cdp.hostname;
+    const cdpPort = cdp.port || (cdp.protocol === "https:" ? "443" : "80");
+    ws.port = cdpPort;
+    ws.protocol = cdp.protocol === "https:" ? "wss:" : "ws:";
+  } else if (isLoopbackHost(ws.hostname) && isLoopbackHost(cdp.hostname)) {
+    ws.hostname = cdp.hostname;
+    if (!ws.port && cdp.port) {
+      ws.port = cdp.port;
+    }
+  }
+  if (cdp.protocol === "https:" && ws.protocol === "ws:") {
+    ws.protocol = "wss:";
+  }
+  if (!ws.username && !ws.password && (cdp.username || cdp.password)) {
+    ws.username = cdp.username;
+    ws.password = cdp.password;
+  }
+  for (const [key, value] of cdp.searchParams.entries()) {
+    if (!ws.searchParams.has(key)) {
+      ws.searchParams.append(key, value);
+    }
+  }
+  return ws.toString();
 }
 
 /** Normalize ws/wss and direct devtools URLs back to the HTTP JSON endpoint base. */
@@ -321,9 +281,11 @@ type CdpTabOwnershipParams = {
   ssrfPolicy?: SsrFPolicy;
 };
 
-async function resolveCdpTabOwnershipContext(
-  params: CdpTabOwnershipParams,
-): Promise<{ ownership: BrowserTabOwnership; browserWebSocketUrl?: string }> {
+async function resolveCdpTabOwnershipContext(params: CdpTabOwnershipParams): Promise<{
+  ownership: BrowserTabOwnership;
+  browserWebSocketUrl?: string;
+  browserWebSocketLookup?: CdpEndpointPin["lookup"];
+}> {
   params.signal?.throwIfAborted();
   const cdpHttpBase = normalizeCdpHttpBaseForJsonEndpoints(params.cdpUrl);
   let version: { webSocketDebuggerUrl?: unknown };
@@ -346,13 +308,14 @@ async function resolveCdpTabOwnershipContext(
     };
   }
   params.signal?.throwIfAborted();
-  const browserWebSocketUrl =
+  const advertisedWebSocketUrl =
     typeof version.webSocketDebuggerUrl === "string" ? version.webSocketDebuggerUrl.trim() : "";
-  if (!browserWebSocketUrl) {
+  if (!advertisedWebSocketUrl) {
     return { ownership: { status: "non-durable", reason: "browser-identity-unavailable" } };
   }
   try {
-    await assertCdpEndpointAllowed(browserWebSocketUrl, params.ssrfPolicy, {
+    const browserWebSocketUrl = normalizeCdpWsUrl(advertisedWebSocketUrl, cdpHttpBase);
+    const pinned = await assertCdpEndpointAllowed(browserWebSocketUrl, params.ssrfPolicy, {
       source: "discovered",
       configuredUrl: params.cdpUrl,
     });
@@ -363,10 +326,11 @@ async function resolveCdpTabOwnershipContext(
         ...createCdpOwnershipFingerprints({
           profileName: params.profileName,
           cdpUrl: params.cdpUrl,
-          browserWebSocketUrl,
+          browserWebSocketUrl: advertisedWebSocketUrl,
         }),
       },
       browserWebSocketUrl,
+      browserWebSocketLookup: pinned?.lookup,
     };
   } catch (error) {
     if (error instanceof BrowserCdpEndpointBlockedError) {
@@ -397,7 +361,9 @@ export async function closeTrackedCdpTarget(
   params: CdpTabOwnershipParams & {
     expectedProfileFingerprint: string;
     expectedBrowserInstanceFingerprint: string;
-    shouldClose?: () => boolean;
+    closeIfCurrent?: (
+      dispatch: () => Promise<CloseTrackedCdpTargetResult>,
+    ) => Promise<CloseTrackedCdpTargetResult>;
   },
 ): Promise<CloseTrackedCdpTargetResult> {
   const resolved = await resolveCdpTabOwnershipContext(params);
@@ -440,36 +406,35 @@ export async function closeTrackedCdpTarget(
         if (!exists) {
           return { status: "missing" } as const;
         }
-        // The SQLite cleanup generation can be revoked while browser identity
-        // is being resolved. Recheck on this same socket immediately before
-        // the irreversible close so fresh activity cancels an idle sweep.
-        if (params.shouldClose && !params.shouldClose()) {
-          return { status: "cancelled" } as const;
-        }
-        try {
-          params.signal?.throwIfAborted();
-          const closeResponse = await send("Target.closeTarget", {
-            targetId: params.nativeTargetId,
-          });
-          params.signal?.throwIfAborted();
-          return closeResponse &&
-            typeof closeResponse === "object" &&
-            (closeResponse as { success?: unknown }).success === true
-            ? ({ status: "closed" } as const)
-            : ({ status: "unavailable", reason: "target-close-failed" } as const);
-        } catch (error) {
-          // Chromium can destroy the page between getTargets and closeTarget.
-          // Its protocol implementation uses this exact InvalidParams message.
-          if (String(error).includes("No target with given id found")) {
-            return { status: "missing" } as const;
+        const dispatch = async (): Promise<CloseTrackedCdpTargetResult> => {
+          try {
+            params.signal?.throwIfAborted();
+            const closeResponse = await send("Target.closeTarget", {
+              targetId: params.nativeTargetId,
+            });
+            params.signal?.throwIfAborted();
+            return closeResponse &&
+              typeof closeResponse === "object" &&
+              (closeResponse as { success?: unknown }).success === true
+              ? ({ status: "closed" } as const)
+              : ({ status: "unavailable", reason: "target-close-failed" } as const);
+          } catch (error) {
+            // Chromium can destroy the page between getTargets and closeTarget.
+            // Its protocol implementation uses this exact InvalidParams message.
+            if (String(error).includes("No target with given id found")) {
+              return { status: "missing" } as const;
+            }
+            throw error;
           }
-          throw error;
-        }
+        };
+        // Fresh-row admission includes synchronous send, not the network response.
+        return params.closeIfCurrent ? await params.closeIfCurrent(dispatch) : await dispatch();
       },
       {
         commandTimeoutMs: params.timeoutMs,
         handshakeTimeoutMs: params.timeoutMs,
         handshakeRetries: 0,
+        lookup: resolved.browserWebSocketLookup,
       },
     );
   } catch (error) {
@@ -487,98 +452,6 @@ type CdpFetchResult = {
   response: Response;
   release: () => Promise<void>;
 };
-
-function createCdpSender(ws: WebSocket, opts?: { commandTimeoutMs?: number }) {
-  let nextId = 1;
-  const pending = new Map<number, Pending>();
-  const commandTimeoutMs =
-    typeof opts?.commandTimeoutMs === "number" && Number.isFinite(opts.commandTimeoutMs)
-      ? normalizeBrowserTimerDelayMs(opts.commandTimeoutMs)
-      : undefined;
-
-  const clearPendingTimer = (p: Pending) => {
-    if (p.timer !== undefined) {
-      clearTimeout(p.timer);
-    }
-  };
-
-  const send: CdpSendFn = (
-    method: string,
-    params?: Record<string, unknown>,
-    sessionId?: string,
-  ) => {
-    const id = nextId++;
-    const msg = { id, method, params, sessionId };
-    return new Promise<unknown>((resolve, reject) => {
-      if (ws.readyState !== WebSocket.OPEN) {
-        reject(new Error("CDP socket closed"));
-        return;
-      }
-      const entry: Pending = { resolve, reject };
-      if (commandTimeoutMs !== undefined) {
-        // A timed-out command closes the whole socket so pending calls do not
-        // hang on a connection whose CDP command stream is no longer reliable.
-        entry.timer = setTimeout(() => {
-          closeWithError(new Error(`CDP command ${method} timed out after ${commandTimeoutMs}ms`));
-        }, commandTimeoutMs);
-      }
-      pending.set(id, entry);
-      try {
-        ws.send(JSON.stringify(msg));
-      } catch (err) {
-        pending.delete(id);
-        clearPendingTimer(entry);
-        reject(toStringifiedError(err));
-      }
-    });
-  };
-
-  const closeWithError = (err: Error) => {
-    for (const [, p] of pending) {
-      clearPendingTimer(p);
-      p.reject(err);
-    }
-    pending.clear();
-    ws.close();
-  };
-
-  ws.on("error", (err) => {
-    // The `err instanceof Error` guard is defensive: Node's `ws` library
-    // always emits Error instances on the 'error' event. Triggering the
-    // non-Error branch would require synthetically emitting on the socket,
-    // which the library treats as an unhandled error and hangs the test.
-    /* c8 ignore next */
-    closeWithError(toStringifiedError(err));
-  });
-
-  ws.on("message", (data) => {
-    try {
-      const parsed = JSON.parse(rawDataToString(data)) as CdpResponse;
-      if (typeof parsed.id !== "number") {
-        return;
-      }
-      const p = pending.get(parsed.id);
-      if (!p) {
-        return;
-      }
-      pending.delete(parsed.id);
-      clearPendingTimer(p);
-      if (parsed.error?.message) {
-        p.reject(new Error(parsed.error.message));
-        return;
-      }
-      p.resolve(parsed.result);
-    } catch {
-      // ignore
-    }
-  });
-
-  ws.on("close", () => {
-    closeWithError(new Error("CDP socket closed"));
-  });
-
-  return { send, closeWithError };
-}
 
 /** Fetch and parse a CDP JSON endpoint through the configured SSRF guard. */
 export async function fetchJson<T>(
@@ -630,7 +503,13 @@ export async function fetchCdpChecked(
     }
   };
   try {
-    const headers = getHeadersWithAuth(url, (init?.headers as Record<string, string>) || {});
+    const requestHeaders = init?.headers;
+    const headers = getHeadersWithAuth(
+      url,
+      requestHeaders instanceof Headers || Array.isArray(requestHeaders)
+        ? Object.fromEntries(new Headers(requestHeaders))
+        : requestHeaders,
+    );
     const fetchUrl = stripCdpUrlCredentials(url);
     const res = await withManagedProxyForCdpUrl(fetchUrl, () =>
       withNoProxyForCdpUrl(fetchUrl, async () => {
@@ -678,152 +557,4 @@ export async function fetchOk(
 ): Promise<void> {
   const { release } = await fetchCdpChecked(url, timeoutMs, init, ssrfPolicy);
   await release();
-}
-
-/** Open a CDP WebSocket with URL basic-auth and proxy bypass handling. */
-export function openCdpWebSocket(
-  wsUrl: string,
-  opts?: { headers?: Record<string, string>; handshakeTimeoutMs?: number },
-): WebSocket {
-  const headers = getHeadersWithAuth(wsUrl, opts?.headers ?? {});
-  const handshakeTimeoutMs =
-    typeof opts?.handshakeTimeoutMs === "number" && Number.isFinite(opts.handshakeTimeoutMs)
-      ? Math.max(1, Math.floor(opts.handshakeTimeoutMs))
-      : CDP_WS_HANDSHAKE_TIMEOUT_MS;
-  const connectionUrl = stripCdpUrlCredentials(wsUrl);
-  const agent = getDirectAgentForCdp(connectionUrl);
-  return withManagedProxyForCdpUrl(
-    connectionUrl,
-    () =>
-      new WebSocket(connectionUrl, {
-        handshakeTimeout: handshakeTimeoutMs,
-        ...(Object.keys(headers).length ? { headers } : {}),
-        ...(agent ? { agent } : {}),
-      }),
-  );
-}
-
-type CdpSocketOptions = {
-  headers?: Record<string, string>;
-  handshakeTimeoutMs?: number;
-  commandTimeoutMs?: number;
-  handshakeRetries?: number;
-  handshakeRetryDelayMs?: number;
-  handshakeMaxRetryDelayMs?: number;
-  signal?: AbortSignal;
-};
-
-function normalizeRetryCount(value: number | undefined, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return fallback;
-  }
-  return Math.max(0, Math.floor(value));
-}
-
-function computeHandshakeRetryDelayMs(attempt: number, opts?: CdpSocketOptions): number {
-  const baseDelayMs =
-    typeof opts?.handshakeRetryDelayMs === "number" && Number.isFinite(opts.handshakeRetryDelayMs)
-      ? Math.max(1, Math.floor(opts.handshakeRetryDelayMs))
-      : 200;
-  const maxDelayMs =
-    typeof opts?.handshakeMaxRetryDelayMs === "number" &&
-    Number.isFinite(opts.handshakeMaxRetryDelayMs)
-      ? Math.max(baseDelayMs, Math.floor(opts.handshakeMaxRetryDelayMs))
-      : 3000;
-  const raw = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.max(0, attempt - 1));
-  // Jitter keeps several browser sessions from retrying handshakes in lockstep
-  // after a shared Chrome or network hiccup.
-  const jitterScale = 0.8 + Math.random() * 0.4;
-  return Math.max(1, Math.floor(raw * jitterScale));
-}
-
-function shouldRetryCdpHandshakeError(err: unknown): boolean {
-  if (!(err instanceof Error)) {
-    return false;
-  }
-  const msg = err.message.toLowerCase();
-  if (!msg) {
-    return false;
-  }
-  if (msg.includes("rate limit")) {
-    return false;
-  }
-  const statusMatch = msg.match(/(?:unexpected server response|response):\s*(\d{3})/);
-  if (statusMatch?.[1]) {
-    return Number(statusMatch[1]) >= 500;
-  }
-  return (
-    msg.includes("cdp socket closed") ||
-    msg.includes("econnreset") ||
-    msg.includes("econnrefused") ||
-    msg.includes("econnaborted") ||
-    msg.includes("ehostunreach") ||
-    msg.includes("enetunreach") ||
-    msg.includes("etimedout") ||
-    msg.includes("socket hang up") ||
-    msg.includes("websocket error") ||
-    msg.includes("closed before")
-  );
-}
-
-export async function withCdpSocket<T>(
-  wsUrl: string,
-  fn: (send: CdpSendFn) => Promise<T>,
-  opts?: CdpSocketOptions,
-): Promise<T> {
-  const maxHandshakeRetries = normalizeRetryCount(opts?.handshakeRetries, 2);
-  for (let attempt = 0; ; attempt += 1) {
-    opts?.signal?.throwIfAborted();
-    const ws = openCdpWebSocket(wsUrl, opts);
-    const { send, closeWithError } = createCdpSender(ws, opts);
-
-    const openPromise = new Promise<void>((resolve, reject) => {
-      ws.once("open", () => resolve());
-      ws.once("error", (err) => reject(err));
-      ws.once("close", () => reject(new Error("CDP socket closed")));
-    });
-    // A stalled HTTP upgrade must release its TCP socket on cancellation.
-    const abortHandshake = () => ws.terminate();
-    opts?.signal?.addEventListener("abort", abortHandshake, { once: true });
-    if (opts?.signal?.aborted) {
-      abortHandshake();
-    }
-
-    try {
-      await openPromise;
-    } catch (err) {
-      // openPromise is only rejected via `ws.once('error', err => reject(err))`
-      // or the close event's `new Error(...)`; the former always carries an
-      // Error from Node's `ws` library, the latter is already an Error. The
-      // non-Error wrap is defensive and structurally unreachable.
-      /* c8 ignore next */
-      closeWithError(toStringifiedError(err));
-      // Cancellation on the final attempt must not become a handshake error.
-      opts?.signal?.throwIfAborted();
-      if (attempt >= maxHandshakeRetries || !shouldRetryCdpHandshakeError(err)) {
-        throw err;
-      }
-      // Retry only handshake failures. Once CDP commands are flowing, callers
-      // own retry semantics because commands may already have side effects.
-      // Cancelled route requests must not keep retrying Chrome handshakes.
-      await sleepWithAbort(computeHandshakeRetryDelayMs(attempt + 1, opts), opts?.signal).catch(
-        (error: unknown) => {
-          opts?.signal?.throwIfAborted();
-          throw error;
-        },
-      );
-      continue;
-    } finally {
-      opts?.signal?.removeEventListener("abort", abortHandshake);
-    }
-
-    try {
-      return await fn(send);
-    } catch (err) {
-      closeWithError(toStringifiedError(err));
-      throw err;
-    } finally {
-      ws.close();
-    }
-  }
 }

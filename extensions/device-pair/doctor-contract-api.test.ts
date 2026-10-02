@@ -1,4 +1,3 @@
-// Device Pair tests cover doctor migration of legacy notify state.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +10,7 @@ import type {
   OpenKeyedStoreOptions,
   PluginDoctorStateMigrationContext,
 } from "openclaw/plugin-sdk/runtime-doctor-migrations";
+import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { stateMigrations } from "./doctor-contract-api.js";
 import {
@@ -43,6 +43,8 @@ describe("device-pair doctor notify migration", () => {
   });
 
   afterEach(async () => {
+    await closeOpenClawStateDatabaseAsync();
+    resetPluginStateStoreForTests();
     await fs.rm(stateDir, { recursive: true, force: true });
   });
 
@@ -56,12 +58,89 @@ describe("device-pair doctor notify migration", () => {
     };
   }
 
-  it("imports legacy notify subscribers into plugin state", async () => {
+  function openSubscribers() {
+    return createDoctorContext(env).openPluginStateKeyedStore<NotifySubscription>({
+      namespace: DEVICE_PAIR_NOTIFY_SUBSCRIBER_NAMESPACE,
+      maxEntries: DEVICE_PAIR_NOTIFY_SUBSCRIBER_MAX_ENTRIES,
+    });
+  }
+
+  function legacySubscribers(count: number): NotifySubscription[] {
+    return Array.from({ length: count }, (_, index) => ({
+      to: `chat-${index}`,
+      accountId: "telegram-default",
+      messageThreadId: 271,
+      mode: "persistent",
+      addedAtMs: index + 1,
+    }));
+  }
+
+  it("refuses overflow without data loss and migrates once capacity is available", async () => {
+    const sourcePath = path.join(stateDir, DEVICE_PAIR_NOTIFY_LEGACY_STATE_FILE);
+    const subscribers = legacySubscribers(1024);
+    const source = JSON.stringify({ subscribers });
+    await fs.writeFile(sourcePath, source);
+    const store = openSubscribers();
+    await store.register("existing", { to: "existing", mode: "once", addedAtMs: 0 });
+    const before = await store.entries();
+    const migration = expectDefined(stateMigrations[0], "device-pair state migration");
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await migration.migrateLegacyState(migrationParams());
+      expect(result).toEqual({
+        changes: [],
+        warnings: [expect.stringContaining("left legacy source in place")],
+      });
+      expect(await store.entries()).toEqual(before);
+      await expect(fs.readFile(sourcePath, "utf8")).resolves.toBe(source);
+      await expect(fs.access(`${sourcePath}.migrated`)).rejects.toThrow();
+      await expect(migration.detectLegacyState(migrationParams())).resolves.not.toBeNull();
+    }
+    await store.delete("existing");
+    const result = await migration.migrateLegacyState(migrationParams());
+    expect(result.warnings).toEqual([]);
+    expect(result.changes).toEqual([
+      "Migrated Device Pair notify subscribers -> plugin state (1024 imported, 0 already present)",
+      expect.stringContaining("Archived Device Pair notify-state legacy source"),
+    ]);
+    expect((await store.entries()).map(({ key }) => key).toSorted()).toEqual(
+      subscribers.map(notifySubscriberStoreKey).toSorted(),
+    );
+    await expect(fs.access(sourcePath)).rejects.toThrow();
+    await expect(fs.readFile(`${sourcePath}.migrated`, "utf8")).resolves.toBe(source);
+    await expect(migration.detectLegacyState(migrationParams())).resolves.toBeNull();
+  });
+
+  it("counts distinct missing keys and preserves existing subscriber values", async () => {
+    const sourcePath = path.join(stateDir, DEVICE_PAIR_NOTIFY_LEGACY_STATE_FILE);
+    const subscribers = legacySubscribers(1024);
+    const first = expectDefined(subscribers[0], "first subscriber");
+    const canonical = { ...first, mode: "once" as const };
+    const store = openSubscribers();
+    await store.register(notifySubscriberStoreKey(first), canonical);
+    await fs.writeFile(sourcePath, JSON.stringify({ subscribers: [...subscribers, first] }));
+    const migration = expectDefined(stateMigrations[0], "device-pair state migration");
+
+    const result = await migration.migrateLegacyState(migrationParams());
+
+    expect(result.warnings).toEqual([]);
+    expect(result.changes).toEqual([
+      "Migrated Device Pair notify subscribers -> plugin state (1023 imported, 2 already present)",
+      expect.stringContaining("Archived Device Pair notify-state legacy source"),
+    ]);
+    expect(await store.entries()).toHaveLength(1024);
+    await expect(store.lookup(notifySubscriberStoreKey(first))).resolves.toEqual(canonical);
+  });
+
+  it.each([
+    {},
+    { accountId: "telegram-default", messageThreadId: 0 },
+    { accountId: "telegram-default", messageThreadId: "271" },
+  ])("imports legacy notify subscribers into plugin state (%j)", async (target) => {
     const sourcePath = path.join(stateDir, DEVICE_PAIR_NOTIFY_LEGACY_STATE_FILE);
     const subscriber: NotifySubscription = {
       to: "chat-123",
-      accountId: "telegram-default",
-      messageThreadId: 271,
+      ...target,
       mode: "persistent",
       addedAtMs: 1,
     };
@@ -87,15 +166,10 @@ describe("device-pair doctor notify migration", () => {
       expect.stringContaining("Archived Device Pair notify-state legacy source"),
     ]);
     await expect(fs.access(sourcePath)).rejects.toThrow();
-    await expect(fs.access(`${sourcePath}.migrated`)).resolves.toBeUndefined();
-    await expect(
-      createDoctorContext(env)
-        .openPluginStateKeyedStore<NotifySubscription>({
-          namespace: DEVICE_PAIR_NOTIFY_SUBSCRIBER_NAMESPACE,
-          maxEntries: DEVICE_PAIR_NOTIFY_SUBSCRIBER_MAX_ENTRIES,
-        })
-        .lookup(notifySubscriberStoreKey(subscriber)),
-    ).resolves.toEqual(subscriber);
+    await fs.access(`${sourcePath}.migrated`);
+    await expect(openSubscribers().lookup(notifySubscriberStoreKey(subscriber))).resolves.toEqual(
+      subscriber,
+    );
   });
 
   it("ignores legacy notify files that only contain cache state", async () => {
@@ -116,6 +190,6 @@ describe("device-pair doctor notify migration", () => {
       changes: [],
       warnings: [],
     });
-    await expect(fs.access(sourcePath)).resolves.toBeUndefined();
+    await fs.access(sourcePath);
   });
 });

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Normalizes package-acceptance inputs into the tarball shape consumed by Docker E2E.
 import { Buffer } from "node:buffer";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lookup as dnsLookupCb } from "node:dns";
@@ -17,13 +17,20 @@ import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
+import { resolveTimerTimeoutMs } from "../packages/normalization-core/src/number-coercion.ts";
 import { isRecord as isJsonRecord } from "../packages/normalization-core/src/record-coerce.ts";
 import { booleanFlag, parseFlagArgs, stringFlag } from "./lib/arg-utils.mts";
+import { appendBoundedTail, formatBoundedTail } from "./lib/bounded-output-tail.mjs";
 import { toErrorObject } from "./lib/error-format.mts";
+import { terminateManagedChild } from "./lib/managed-child-process.mts";
 import { resolveNpmJsonEntries } from "./lib/npm-json-output.mts";
+import {
+  cleanPackedOpenClawTarballs,
+  validatePackedTarballOutputName,
+} from "./lib/packed-openclaw-tarballs.mts";
 import { resolveRepoRoot } from "./lib/repo-root.mjs";
-import { resolveWindowsTaskkillPath } from "./lib/windows-taskkill.mjs";
 import { resolveNpmRunner } from "./npm-runner.mts";
+import { validatePackageSourceDir } from "./package-source-preflight.mjs";
 import { createPrepublishPluginRegistryArtifact } from "./prepublish-plugin-registry-artifact.mjs";
 
 const ROOT_DIR = resolveRepoRoot(import.meta.url);
@@ -37,17 +44,10 @@ const COMMAND_STDERR_CAPTURE_MAX_CHARS = 128 * 1024;
 const COMMAND_TIMEOUT_KILL_AFTER_MS = 5_000;
 const FORWARDED_SIGNAL_KILL_AFTER_MS = 250;
 const COMMAND_PROCESS_TREE_EXIT_POLL_MS = 50;
-const MAX_TIMER_TIMEOUT_MS = 2_147_000_000;
 type ChildSignal = ChildProcess["signalCode"];
-type ProcessSignal = Parameters<ChildProcess["kill"]>[0];
 type TimerHandle = ReturnType<typeof setTimeout>;
-type ChildKiller = (signal: ProcessSignal) => void;
+type ChildKiller = (signal: NodeJS.Signals) => void;
 type ProcessTreeChild = Pick<ChildProcess, "exitCode" | "kill" | "pid" | "signalCode">;
-type ProcessTreeSignalTarget = Pick<ChildProcess, "kill" | "pid">;
-type CommandOutputBuffer = {
-  text: string;
-  truncatedChars: number;
-};
 
 type RunOptions = {
   capture?: boolean;
@@ -176,7 +176,7 @@ for (const signal of Object.keys(SIGNAL_EXIT_CODES) as ForwardedSignal[]) {
   });
 }
 export const OPENCLAW_PACKAGE_SPEC_RE =
-  /^openclaw@(alpha|beta|extended-stable|latest|[0-9]{4}\.[1-9][0-9]*\.[1-9][0-9]*(-[1-9][0-9]*|-(alpha|beta)\.[1-9][0-9]*)?)$/u;
+  /^openclaw@(beta|extended-stable|latest|[0-9]{4}\.[1-9][0-9]*\.[1-9][0-9]*(-[1-9][0-9]*|-(alpha|beta)\.[1-9][0-9]*)?)$/u;
 
 function usage() {
   return `Usage: node --import tsx scripts/resolve-openclaw-package-candidate.mts --source <ref|npm|url|trusted-url|artifact> --output-dir <dir> [options]
@@ -193,7 +193,7 @@ Options:
   --output-name <name>        Output tarball filename. Default: ${DEFAULT_OUTPUT_NAME}
   --metadata <file>           Write package metadata JSON.
   --plugin-registry-output-dir <dir>
-                              Build an immutable registry for source=ref before cleanup.
+                              Build an immutable registry for source=ref, npm, or artifact.
   --required-plugin-packages-json <json>
                               Scoped package names to include in that registry.
   --github-output <file>      Append tarball, sha256, package name/version outputs.`;
@@ -265,14 +265,8 @@ export function parseArgs(argv: readonly string[]) {
       },
     },
   );
-  validateOutputName(options.outputName);
+  validatePackedTarballOutputName(options.outputName);
   return options;
-}
-
-function validateOutputName(value: string) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.t(?:ar\.)?gz$/u.test(value)) {
-    throw new Error(`--output-name must be a tarball filename, not a path: ${value}`);
-  }
 }
 
 function resolvePackedOpenClawTarballFilename(value: unknown) {
@@ -291,9 +285,12 @@ function resolvePackedOpenClawTarballFilename(value: unknown) {
 }
 
 export function validateOpenClawPackageSpec(spec: string) {
+  if (spec === "openclaw@alpha") {
+    throw new Error("Alpha releases are retired; use a beta prerelease instead.");
+  }
   if (!OPENCLAW_PACKAGE_SPEC_RE.test(spec)) {
     throw new Error(
-      `package_spec must be openclaw@alpha, openclaw@beta, openclaw@extended-stable, openclaw@latest, or an exact OpenClaw release version; got: ${spec}`,
+      `package_spec must be openclaw@beta, openclaw@extended-stable, openclaw@latest, or an exact OpenClaw release version; got: ${spec}`,
     );
   }
 }
@@ -320,28 +317,15 @@ export function resolveNpmPackageCandidatePackRunner(
   });
 }
 
-function numericTimerValueMs(valueMs: unknown) {
-  const value = Number(valueMs);
-  return Number.isFinite(value) ? Math.floor(value) : undefined;
-}
-
-function resolveTimerTimeoutMs(valueMs: unknown, fallbackMs: unknown = MAX_TIMER_TIMEOUT_MS) {
-  const value = numericTimerValueMs(valueMs) ?? numericTimerValueMs(fallbackMs);
-  return Math.min(Math.max(value ?? MAX_TIMER_TIMEOUT_MS, 1), MAX_TIMER_TIMEOUT_MS);
-}
-
 function resolveOptionalTimerTimeoutMs(valueMs: unknown) {
-  if (valueMs === undefined) {
-    return undefined;
-  }
-  return resolveTimerTimeoutMs(valueMs, 1);
+  return valueMs === undefined ? undefined : resolveTimerTimeoutMs(Number(valueMs), 1);
 }
 
 function run(command: string, args: readonly string[], options: RunOptions = {}) {
   return new Promise<string>((resolve, reject) => {
     const resolvedTimeoutMs = resolveOptionalTimerTimeoutMs(options.timeoutMs);
     const resolvedKillAfterMs = resolveTimerTimeoutMs(
-      options.killAfterMs,
+      Number(options.killAfterMs),
       COMMAND_TIMEOUT_KILL_AFTER_MS,
     );
     const useProcessGroup = process.platform !== "win32";
@@ -360,7 +344,7 @@ function run(command: string, args: readonly string[], options: RunOptions = {})
     let killTimer: TimerHandle | undefined;
     let forceKillAt: number | undefined;
     const killChild: ChildKiller = (signal) =>
-      signalChildProcessTree(child, signal, { useProcessGroup });
+      terminateManagedChild(child, signal, { useProcessGroup });
     const terminateChild = () => {
       killChild("SIGTERM");
       forceKillAt = Date.now() + resolvedKillAfterMs;
@@ -382,11 +366,11 @@ function run(command: string, args: readonly string[], options: RunOptions = {})
     let stdout = { text: "", truncatedChars: 0 };
     let stderr = { text: "", truncatedChars: 0 };
     if (options.capture) {
-      child.stdout?.on("data", (chunk: Buffer) => {
-        stdout = appendBoundedCommandOutput(stdout, chunk, COMMAND_STDOUT_CAPTURE_MAX_CHARS);
+      child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
+        stdout = appendBoundedTail(stdout, chunk, COMMAND_STDOUT_CAPTURE_MAX_CHARS);
       });
-      child.stderr?.on("data", (chunk: Buffer) => {
-        stderr = appendBoundedCommandOutput(stderr, chunk, COMMAND_STDERR_CAPTURE_MAX_CHARS);
+      child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+        stderr = appendBoundedTail(stderr, chunk, COMMAND_STDERR_CAPTURE_MAX_CHARS);
       });
     }
     child.on("error", (error: Error) => {
@@ -441,7 +425,7 @@ function run(command: string, args: readonly string[], options: RunOptions = {})
         resolve(stdout.text);
         return;
       }
-      const stderrText = formatCapturedCommandOutput(stderr).trim();
+      const stderrText = formatBoundedTail(stderr).trim();
       const detail = stderrText ? `\n${stderrText}` : "";
       reject(new Error(`${command} ${args.join(" ")} failed with ${status ?? signal}${detail}`));
     });
@@ -474,53 +458,6 @@ async function finishTimedOutProcessTree(
     killChild("SIGKILL");
     await waitForProcessTreeExit(child, killAfterMs, useProcessGroup);
   }
-}
-
-export function signalChildProcessTree(
-  processChild: ProcessTreeSignalTarget,
-  processSignal: ProcessSignal,
-  {
-    platform = process.platform,
-    runTaskkill = (command, args, options) => spawnSync(command, args, options),
-    useProcessGroup = platform !== "win32",
-  }: {
-    platform?: typeof process.platform;
-    runTaskkill?:
-      | ((
-          command: string,
-          args: readonly string[],
-          options: { stdio: "ignore" },
-        ) => { error?: Error; status: number | null })
-      | undefined;
-    useProcessGroup?: boolean | undefined;
-  } = {},
-) {
-  if (useProcessGroup && processChild.pid) {
-    try {
-      process.kill(-processChild.pid, processSignal);
-      return;
-    } catch {
-      // The process group can disappear between timeout and cleanup.
-    }
-  }
-  if (platform === "win32" && typeof processChild.pid === "number") {
-    const taskkillPath = resolveWindowsTaskkillPath();
-    const args = ["/PID", String(processChild.pid), "/T"];
-    if (processSignal === "SIGKILL") {
-      args.push("/F");
-    }
-    const result = runTaskkill(taskkillPath, args, { stdio: "ignore" });
-    if (!result?.error && result?.status === 0) {
-      return;
-    }
-    if (processSignal !== "SIGKILL") {
-      const forceResult = runTaskkill(taskkillPath, [...args, "/F"], { stdio: "ignore" });
-      if (!forceResult?.error && forceResult?.status === 0) {
-        return;
-      }
-    }
-  }
-  processChild.kill(processSignal);
 }
 
 function childHasExited(child: ProcessTreeChild) {
@@ -557,26 +494,6 @@ async function waitForProcessTreeExit(
     });
   }
   return !processTreeIsAlive(child, useProcessGroup);
-}
-
-function appendBoundedCommandOutput(
-  buffer: CommandOutputBuffer,
-  chunk: string | Uint8Array,
-  maxChars: number,
-) {
-  const nextText = buffer.text + String(chunk);
-  if (nextText.length <= maxChars) {
-    return { text: nextText, truncatedChars: buffer.truncatedChars };
-  }
-  const truncatedChars = buffer.truncatedChars + nextText.length - maxChars;
-  return { text: nextText.slice(-maxChars), truncatedChars };
-}
-
-function formatCapturedCommandOutput(buffer: CommandOutputBuffer) {
-  if (buffer.truncatedChars === 0) {
-    return buffer.text;
-  }
-  return `[output truncated ${buffer.truncatedChars} chars; showing tail]\n${buffer.text}`;
 }
 
 export const runCommandForTest = run;
@@ -810,7 +727,7 @@ async function installPackageSourceDeps(sourceDir: string) {
     [
       "install",
       "--frozen-lockfile",
-      "--ignore-scripts=false",
+      "--config.ignore-scripts=false",
       "--config.engine-strict=false",
       "--config.enable-pre-post-scripts=true",
     ],
@@ -876,32 +793,6 @@ async function moveNewestPackedTarball(outputDir: string, packOutput: string, ou
 }
 
 export const moveNewestPackedTarballForTest = moveNewestPackedTarball;
-
-async function cleanPackedOpenClawTarballs(outputDir: string) {
-  let entries: string[];
-  try {
-    entries = await fs.readdir(outputDir);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") {
-      entries = [];
-    } else {
-      throw error;
-    }
-  }
-  await Promise.all(
-    entries
-      .filter((entry) => {
-        try {
-          return resolvePackedOpenClawTarballFilename(entry) === entry;
-        } catch {
-          return false;
-        }
-      })
-      .map((entry) => fs.rm(path.join(outputDir, entry), { force: true })),
-  );
-}
-
-export const cleanPackedOpenClawTarballsForTest = cleanPackedOpenClawTarballs;
 
 function normalizeUrlHostname(hostname: string): string {
   return hostname.replace(/^\[/u, "").replace(/\]$/u, "").replace(/\.+$/u, "").toLowerCase();
@@ -1505,7 +1396,10 @@ async function openHttpsPackageDownloadResponse(
 
 async function openPackageDownloadResponse(url: string, options: PackageDownloadOptions) {
   const lookupHost = options.lookupHost ?? defaultLookupHost;
-  const timeoutMs = resolveTimerTimeoutMs(options.timeoutMs, PACKAGE_URL_DOWNLOAD_TIMEOUT_MS);
+  const timeoutMs = resolveTimerTimeoutMs(
+    Number(options.timeoutMs),
+    PACKAGE_URL_DOWNLOAD_TIMEOUT_MS,
+  );
   const maxRedirects = options.maxRedirects ?? PACKAGE_URL_MAX_REDIRECTS;
   const trustedSource = options.trustedSource;
   let parsed = new URL(url);
@@ -1666,7 +1560,7 @@ async function readPackageJson(tarball: string) {
   };
 }
 
-export async function readPackageBuildSourceSha(tarball: string) {
+async function readPackageBuildSourceSha(tarball: string) {
   const raw = await run("tar", ["-xOf", tarball, "package/dist/build-info.json"], {
     capture: true,
   }).then(
@@ -1702,6 +1596,7 @@ async function resolveCandidate(options: PackageCandidateOptions) {
   let packageTrustedReason = "";
   let packageTrustedSourceId = "";
   let packageWorktreeDir = "";
+  let packageBuildSourceSha: string | undefined;
   let pluginRegistrySource: Awaited<ReturnType<typeof preparePackageSourceWorktree>> | undefined;
   let artifactMetadata: ArtifactMetadata = {};
   let pluginRegistryIdentity:
@@ -1719,6 +1614,7 @@ async function resolveCandidate(options: PackageCandidateOptions) {
       }
       packageSourceSha = packageSource.selectedSha;
       packageTrustedReason = packageSource.trustedReason;
+      validatePackageSourceDir(packageSource.sourceDir, { allowUnreleasedChangelog: true });
       await installPackageSourceDeps(packageSource.sourceDir);
       await run("node", [
         "scripts/package-openclaw-for-docker.mjs",
@@ -1746,12 +1642,6 @@ async function resolveCandidate(options: PackageCandidateOptions) {
         packOutput,
         options.outputName || DEFAULT_OUTPUT_NAME,
       );
-      if (options.pluginRegistryOutputDir) {
-        pluginRegistrySource = await preparePackageSourceWorktree(options.packageRef);
-        packageWorktreeDir = pluginRegistrySource.sourceDir;
-        packageRef = options.packageRef;
-        await installPackageSourceDeps(pluginRegistrySource.sourceDir);
-      }
     } else if (options.source === "url" || options.source === "trusted-url") {
       if (!options.packageUrl) {
         throw new Error(`${options.source} requires --package-url`);
@@ -1790,15 +1680,43 @@ async function resolveCandidate(options: PackageCandidateOptions) {
           : "";
       const input = await findSingleTarball(options.artifactDir);
       await fs.copyFile(input, target);
+      packageBuildSourceSha = await readPackageBuildSourceSha(target);
+      if (packageSourceSha && packageBuildSourceSha && packageSourceSha !== packageBuildSourceSha) {
+        throw new Error(
+          `artifact packageSourceSha ${packageSourceSha} does not match package build-info commit ${packageBuildSourceSha}`,
+        );
+      }
+      if (!packageSourceSha && packageBuildSourceSha) {
+        packageSourceSha = packageBuildSourceSha;
+        packageTrustedReason = "package-build-info";
+      }
+      if (options.pluginRegistryOutputDir) {
+        if (!packageBuildSourceSha) {
+          throw new Error(
+            "source=artifact requires a valid package build-info commit for prerelease plugin registry creation",
+          );
+        }
+        packageTrustedReason ||= "package-build-info";
+      }
     } else {
       throw new Error(
         `source must be one of: ref, npm, url, trusted-url, artifact. Got: ${options.source}`,
       );
     }
     if (options.pluginRegistryOutputDir && !pluginRegistrySource) {
-      throw new Error(
-        "--plugin-registry-output-dir is only supported with source=ref or source=npm",
+      if (options.source !== "npm" && options.source !== "artifact") {
+        throw new Error(
+          "--plugin-registry-output-dir is only supported with source=ref, source=npm, or source=artifact",
+        );
+      }
+      if (options.source === "npm") {
+        packageRef = options.packageRef;
+      }
+      pluginRegistrySource = await preparePackageSourceWorktree(
+        options.source === "npm" ? packageRef : packageSourceSha,
       );
+      packageWorktreeDir = pluginRegistrySource.sourceDir;
+      await installPackageSourceDeps(pluginRegistrySource.sourceDir);
     }
     if (options.pluginRegistryOutputDir && pluginRegistrySource) {
       const requiredPackages = JSON.parse(options.requiredPluginPackagesJson) as string[];
@@ -1839,7 +1757,7 @@ async function resolveCandidate(options: PackageCandidateOptions) {
   );
   const pkg = await readPackageJson(target);
   if (!packageSourceSha) {
-    packageSourceSha = await readPackageBuildSourceSha(target);
+    packageSourceSha = packageBuildSourceSha ?? (await readPackageBuildSourceSha(target));
     if (packageSourceSha && !packageTrustedReason) {
       packageTrustedReason = "package-build-info";
     }

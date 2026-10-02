@@ -1,32 +1,11 @@
-import {
-  discoverOpenClawPlugins,
-  type PluginCandidate,
-  type PluginDiscoveryResult,
-} from "./discovery.js";
-import { pluginLoaderCacheState } from "./loader-cache.js";
+import { discoverOpenClawPlugins } from "./discovery.js";
 import type { PluginLoadCacheContext } from "./loader-load-context.js";
-import {
-  buildProvenanceIndex,
-  compareDuplicateCandidateOrder,
-  warnWhenAllowlistIsOpen,
-} from "./loader-provenance.js";
-import { createPluginCandidatesFromManifestRegistry, pushDiagnostics } from "./loader-shared.js";
+import { buildProvenanceIndex, warnWhenAllowlistIsOpen } from "./loader-provenance.js";
+import { createPluginCandidatesFromManifestRegistry } from "./loader-shared.js";
 import type { PluginLoadOptions } from "./loader-types.js";
-import {
-  loadPluginManifestRegistryCore,
-  type PluginManifestRecord,
-  type PluginManifestRegistry,
-} from "./manifest-registry.js";
+import { loadPluginManifestRegistryCore } from "./manifest-registry.js";
 import type { PluginDiagnostic } from "./manifest-types.js";
 import type { PluginLogger } from "./types.js";
-
-type ResolvedPluginLoadDiscovery = {
-  discovery: PluginDiscoveryResult;
-  manifestRegistry: PluginManifestRegistry;
-  orderedCandidates: PluginCandidate[];
-  manifestBySource: Map<string, PluginManifestRecord>;
-  provenance: ReturnType<typeof buildProvenanceIndex>;
-};
 
 export function resolvePluginLoadDiscovery(params: {
   options: PluginLoadOptions;
@@ -36,13 +15,12 @@ export function resolvePluginLoadDiscovery(params: {
   onlyPluginIdSet: ReadonlySet<string> | null;
   emitWarning: boolean;
   warningCacheKey: string;
-  suppliedManifestRegistry?: PluginManifestRegistry;
-}): ResolvedPluginLoadDiscovery {
+}) {
   const { options, context } = params;
   // The load context has already verified workspace, environment, config, and
   // plugin scope against the current lifecycle-owned metadata generation.
   const suppliedManifestRegistry =
-    params.suppliedManifestRegistry ??
+    options.manifestRegistry ??
     (options.discovery === undefined ? context.metadataSnapshot?.manifestRegistry : undefined);
   const discovery = suppliedManifestRegistry
     ? {
@@ -67,27 +45,23 @@ export function resolvePluginLoadDiscovery(params: {
       installRecords:
         Object.keys(context.installRecords).length > 0 ? context.installRecords : undefined,
     });
-  pushDiagnostics(params.diagnostics, manifestRegistry.diagnostics);
+  params.diagnostics.push(...manifestRegistry.diagnostics);
   warnWhenAllowlistIsOpen({
     emitWarning: params.emitWarning,
     logger: params.logger,
     pluginsEnabled: context.normalized.enabled,
     allow: context.normalized.allow,
     warningCacheKey: params.warningCacheKey,
-    warningCache: pluginLoaderCacheState,
+    warningCache: context.cacheState,
     explicitlyEnabledPluginIds: new Set(
       Object.entries(context.normalized.entries)
         .filter(([, entry]) => entry.enabled === true)
         .map(([pluginId]) => pluginId),
     ),
     // Partial snapshots should only warn about plugins intentionally in scope.
-    discoverablePlugins: manifestRegistry.plugins
-      .filter((plugin) => !params.onlyPluginIdSet || params.onlyPluginIdSet.has(plugin.id))
-      .map((plugin) => ({
-        id: plugin.id,
-        source: plugin.source,
-        origin: plugin.origin,
-      })),
+    discoverablePlugins: manifestRegistry.plugins.filter(
+      (plugin) => !params.onlyPluginIdSet || params.onlyPluginIdSet.has(plugin.id),
+    ),
   });
   const provenance = buildProvenanceIndex({
     normalizedLoadPaths: context.normalized.loadPaths,
@@ -97,14 +71,9 @@ export function resolvePluginLoadDiscovery(params: {
   const manifestBySource = new Map(
     manifestRegistry.plugins.map((record) => [record.source, record]),
   );
-  const orderedCandidates = [...discovery.candidates].toSorted((left, right) =>
-    compareDuplicateCandidateOrder({
-      left,
-      right,
-      manifestBySource,
-      provenance,
-      env: context.env,
-    }),
+  // Manifest selection owns duplicate precedence; runtime consumes only its winners.
+  const orderedCandidates = discovery.candidates.filter((candidate) =>
+    manifestBySource.has(candidate.source),
   );
-  return { discovery, manifestRegistry, orderedCandidates, manifestBySource, provenance };
+  return { manifestRegistry, orderedCandidates, manifestBySource, provenance };
 }

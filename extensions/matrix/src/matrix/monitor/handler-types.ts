@@ -1,5 +1,7 @@
 import type { resolveHumanDelayConfig } from "openclaw/plugin-sdk/agent-runtime";
 import type { createChannelInboundEnvelopeBuilder } from "openclaw/plugin-sdk/channel-inbound";
+import type { PluginRuntime, RuntimeLogger } from "openclaw/plugin-sdk/plugin-runtime";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import type { resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import type {
   CoreConfig,
@@ -14,7 +16,6 @@ import type {
   MatrixResolvedAllowlistEntry,
 } from "./config.js";
 import type { MatrixInboundEventDeduper } from "./inbound-dedupe.js";
-import type { PluginRuntime, RuntimeEnv, RuntimeLogger } from "./runtime-api.js";
 
 export type MatrixMonitorHandlerParams = {
   client: MatrixClient;
@@ -44,7 +45,6 @@ export type MatrixMonitorHandlerParams = {
   blockStreamingEnabled: boolean;
   dmEnabled: boolean;
   dmPolicy: "open" | "pairing" | "allowlist" | "disabled";
-  textLimit: number;
   mediaMaxBytes: number;
   historyLimit: number;
   startupMs: number;

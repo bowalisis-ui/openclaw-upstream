@@ -1,9 +1,10 @@
-// Annotation model for the browser panel: freehand strokes drawn over a page
-// screenshot, plus the prepackaged prompt handed to the chat composer so the
-// agent knows what was marked up.
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { t } from "../../i18n/index.ts";
+import { registerBrowserEnglish } from "../../i18n/locales/en-browser.ts";
 import type { BrowserInspectedNode } from "./browser-client.ts";
+import type { BrowserTabTarget } from "./browser-target.ts";
+
+registerBrowserEnglish();
 
 /** Point in normalized [0..1] coordinates of the captured screenshot. */
 type AnnotationPoint = { x: number; y: number };
@@ -152,6 +153,7 @@ export function buildBrowserAnnotationContent(params: {
   title: string;
   strokes: AnnotationStroke[];
   element?: BrowserInspectedNode | null;
+  browserTab?: BrowserTabTarget;
 }): Pick<BrowserAnnotationDraft, "modelContext" | "card"> {
   const url = sanitizePageUrl(params.url);
   const title = sanitizePageText(params.title, ANNOTATION_TITLE_MAX_LENGTH);
@@ -171,6 +173,11 @@ export function buildBrowserAnnotationContent(params: {
       ? t("browser.annotatePrompt.introTitled", { url, title })
       : t("browser.annotatePrompt.introUntitled", { url }),
   ];
+  if (params.browserTab) {
+    lines.push(
+      t("browser.annotatePrompt.browserTarget", { target: JSON.stringify(params.browserTab) }),
+    );
+  }
   regions.slice(0, MAX_PROMPT_REGIONS).forEach((region, index) => {
     lines.push(
       t("browser.annotatePrompt.region", {
@@ -190,15 +197,7 @@ export function buildBrowserAnnotationContent(params: {
     );
   }
   if (element) {
-    lines.push(
-      t("browser.annotatePrompt.elementDetail", {
-        descriptor: element.descriptor,
-        width: element.width,
-        height: element.height,
-        x: element.x,
-        y: element.y,
-      }),
-    );
+    lines.push(t("browser.annotatePrompt.elementDetail", element));
   }
   lines.push(t("browser.annotatePrompt.outro"));
   return {
@@ -272,13 +271,9 @@ export function paintAnnotations(
 }
 
 /** Composites the screenshot and markup into a PNG data URL for the chat attachment. */
-export function composeAnnotatedImage(params: {
-  image: CanvasImageSource;
-  width: number;
-  height: number;
-  strokes: AnnotationStroke[];
-  highlight?: AnnotationRegion | null;
-}): string {
+export function composeAnnotatedImage(
+  params: Parameters<typeof paintAnnotations>[1] & { image: CanvasImageSource },
+): string {
   const canvas = document.createElement("canvas");
   canvas.width = params.width;
   canvas.height = params.height;

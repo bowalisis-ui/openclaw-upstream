@@ -1,9 +1,4 @@
-// Provider model helpers normalize model catalog entries shared by provider plugins.
-import { normalizeProviderId as normalizeProviderIdCore } from "@openclaw/model-catalog-core/provider-id";
-import {
-  normalizeAntigravityPreviewModelId as normalizeAntigravityPreviewModelIdCore,
-  normalizeGooglePreviewModelId as normalizeGooglePreviewModelIdCore,
-} from "@openclaw/model-catalog-core/provider-model-id-normalize";
+import { normalizeOptionalLowercaseString } from "../../packages/normalization-core/src/string-coerce.js";
 import {
   buildAnthropicReplayPolicyForModel,
   buildGoogleGeminiReplayPolicy,
@@ -23,6 +18,12 @@ import type {
   ProviderRuntimeModel,
   ProviderSanitizeReplayHistoryContext,
 } from "./plugin-entry.js";
+
+export { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
+export {
+  normalizeAntigravityPreviewModelId,
+  normalizeGooglePreviewModelId,
+} from "@openclaw/model-catalog-core/provider-model-id-normalize";
 
 type SelfHostedOpenAICompatibleProviderOverrides = Partial<
   Omit<ProviderPlugin, "id" | "label" | "docsPath" | "envVars" | "auth" | "catalog" | "wizard">
@@ -136,12 +137,14 @@ export type {
   ModelProviderDeclarationConfig as ModelProviderConfig,
 } from "../config/types.models.js";
 export {
+  bindsClaudeThinkingPrefix,
   resolveClaudeFable5ModelIdentity,
   resolveClaudeModelIdentity,
   resolveClaudeMythos5ModelIdentity,
   resolveClaudeNativeThinkingLevelMap,
   resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
+  resolveClaudeSonnet55ModelIdentity,
   requiresClaudeDefaultSampling,
   requiresClaudeMandatoryAdaptiveThinking,
   supportsClaude1MContext,
@@ -203,16 +206,6 @@ export {
   sanitizeGoogleGeminiReplayHistory,
   buildStrictAnthropicReplayPolicy,
 };
-
-/**
- * Normalizes provider ids for config, catalog, and plugin-registry matching.
- */
-export function normalizeProviderId(
-  /** Provider id from config, catalog, or plugin metadata. */
-  provider: string,
-): string {
-  return normalizeProviderIdCore(provider);
-}
 
 /** Compare canonical flat rates without assuming display-only models include cost metadata. */
 export function modelCostsEqual(
@@ -287,51 +280,18 @@ export {
   matchesExactOrPrefix,
   resolveFamilyForwardCompatModel,
 } from "../plugins/provider-model-helpers.js";
-import { normalizeOptionalLowercaseString } from "../../packages/normalization-core/src/string-coerce.js";
 
 export {
   isClaudeAdaptiveThinkingDefaultModelId,
   resolveClaudeThinkingProfile,
 } from "../plugins/provider-claude-thinking.js";
 
-function getModelProviderHint(modelId: string): string | null {
-  const trimmed = normalizeOptionalLowercaseString(modelId);
-  if (!trimmed) {
-    return null;
-  }
-  const slashIndex = trimmed.indexOf("/");
-  if (slashIndex <= 0) {
-    return null;
-  }
-  return trimmed.slice(0, slashIndex) || null;
-}
-
 /** @deprecated Proxy provider-owned model helper; do not use from third-party plugins. */
 export function isProxyReasoningUnsupportedModelHint(
   /** Model id that may include a provider prefix such as `x-ai/model`. */
   modelId: string,
 ): boolean {
-  return getModelProviderHint(modelId) === "x-ai";
-}
-
-/**
- * Normalizes Antigravity preview model ids to the canonical provider catalog form.
- */
-export function normalizeAntigravityPreviewModelId(
-  /** Antigravity preview model id from config or catalog data. */
-  id: string,
-): string {
-  return normalizeAntigravityPreviewModelIdCore(id);
-}
-
-/**
- * Normalizes Google preview model ids to the canonical provider catalog form.
- */
-export function normalizeGooglePreviewModelId(
-  /** Google preview model id from config or catalog data. */
-  id: string,
-): string {
-  return normalizeGooglePreviewModelIdCore(id);
+  return normalizeOptionalLowercaseString(modelId)?.startsWith("x-ai/") ?? false;
 }
 
 /**
@@ -407,13 +367,13 @@ export function buildProviderReplayFamilyHooks(
     }
     case "anthropic-by-model":
       return {
-        buildReplayPolicy: ({ modelId }: ProviderReplayPolicyContext) =>
-          buildAnthropicReplayPolicyForModel(modelId),
+        buildReplayPolicy: ({ modelId, model }: ProviderReplayPolicyContext) =>
+          buildAnthropicReplayPolicyForModel(modelId, model),
       };
     case "native-anthropic-by-model":
       return {
-        buildReplayPolicy: ({ modelId }: ProviderReplayPolicyContext) =>
-          buildNativeAnthropicReplayPolicyForModel(modelId),
+        buildReplayPolicy: ({ modelId, model }: ProviderReplayPolicyContext) =>
+          buildNativeAnthropicReplayPolicyForModel(modelId, model),
       };
     case "google-gemini":
       return {

@@ -1,11 +1,16 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { buildHostnameAllowlistPolicyFromSuffixAllowlist } from "openclaw/plugin-sdk/ssrf-policy";
+import {
+  normalizeOptionalString,
+  normalizeUniqueTrimmedStringList,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { JsonObject } from "./protocol.js";
 
 export type CodexWebSearchPlan = {
   kind: "native-hosted" | "managed" | "disabled";
   suppressManagedWebSearch: boolean;
   threadConfig: JsonObject;
+  webFetchHostnameAllowlist?: string[];
 };
 
 export type CodexNativeWebSearchSupport = "supported" | "unsupported" | "unknown";
@@ -15,25 +20,14 @@ const CODEX_NATIVE_WEB_SEARCH_DISABLED_CONFIG: JsonObject = {
   web_search: "disabled",
 };
 
-function normalizeUniqueStrings(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const normalized = [
-    ...new Set(
-      value.map(normalizeOptionalString).filter((entry): entry is string => Boolean(entry)),
-    ),
-  ];
-  return normalized.length > 0 ? normalized : undefined;
-}
-
 function hasManagedSearchProvider(config: OpenClawConfig | undefined): boolean {
   return normalizeOptionalString(config?.tools?.web?.search?.provider) !== undefined;
 }
 
 function hasNativeDomainRestrictions(config: OpenClawConfig | undefined): boolean {
   return (
-    normalizeUniqueStrings(config?.tools?.web?.search?.openaiCodex?.allowedDomains) !== undefined
+    normalizeUniqueTrimmedStringList(config?.tools?.web?.search?.openaiCodex?.allowedDomains)
+      .length > 0
   );
 }
 
@@ -49,29 +43,18 @@ export function buildCodexNativeWebSearchThreadConfig(
     // unrestricted permission profiles.
     web_search: nativeConfig?.mode === "live" ? "live" : "cached",
   };
-  const allowedDomains = normalizeUniqueStrings(nativeConfig?.allowedDomains);
-  if (allowedDomains) {
+  const allowedDomains = normalizeUniqueTrimmedStringList(nativeConfig?.allowedDomains);
+  if (allowedDomains.length > 0) {
     threadConfig["tools.web_search.allowed_domains"] = allowedDomains;
   }
   if (nativeConfig?.contextSize) {
     threadConfig["tools.web_search.context_size"] = nativeConfig.contextSize;
   }
-  const location = nativeConfig?.userLocation;
-  const country = normalizeOptionalString(location?.country);
-  const region = normalizeOptionalString(location?.region);
-  const city = normalizeOptionalString(location?.city);
-  const timezone = normalizeOptionalString(location?.timezone);
-  if (country) {
-    threadConfig["tools.web_search.location.country"] = country;
-  }
-  if (region) {
-    threadConfig["tools.web_search.location.region"] = region;
-  }
-  if (city) {
-    threadConfig["tools.web_search.location.city"] = city;
-  }
-  if (timezone) {
-    threadConfig["tools.web_search.location.timezone"] = timezone;
+  for (const key of ["country", "region", "city", "timezone"] as const) {
+    const value = normalizeOptionalString(nativeConfig?.userLocation?.[key]);
+    if (value) {
+      threadConfig[`tools.web_search.location.${key}`] = value;
+    }
   }
   return threadConfig;
 }
@@ -125,5 +108,8 @@ export function resolveCodexWebSearchPlan(params: {
     // exposing managed web_search here could bypass native allowed_domains.
     suppressManagedWebSearch: true,
     threadConfig: buildCodexNativeWebSearchThreadConfig(params.config),
+    webFetchHostnameAllowlist: buildHostnameAllowlistPolicyFromSuffixAllowlist(
+      nativeConfig?.allowedDomains,
+    )?.hostnameAllowlist,
   };
 }

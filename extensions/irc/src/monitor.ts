@@ -1,6 +1,6 @@
-// Irc plugin module implements monitor behavior.
 import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared";
 import { channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveIrcAccount } from "./accounts.js";
@@ -12,7 +12,6 @@ import {
   type IrcIngressLifecycle,
   type IrcIngressMonitor,
 } from "./irc-ingress.js";
-import type { RuntimeEnv } from "./runtime-api.js";
 import { getIrcRuntime } from "./runtime.js";
 import type { CoreConfig, IrcInboundMessage } from "./types.js";
 

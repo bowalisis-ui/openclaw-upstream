@@ -1,256 +1,232 @@
-import fs from "node:fs";
-import { listAgentIds } from "../agents/agent-scope.js";
+import { buildAgentRunTerminalOutcome } from "../agents/agent-run-terminal-outcome.js";
+import { hasSubagentSessionRecoveryOwner } from "../agents/subagents/registry/subagent-session-reconciliation.js";
+import { replaceSessionEntrySync } from "../config/sessions/session-accessor.js";
+import { readSessionEntryRow } from "../config/sessions/session-accessor.sqlite-entry-store.js";
 import {
-  isSessionSqliteMigrationWarning,
-  type DoctorSessionSqliteIssue,
-  type DoctorSessionSqliteReport,
-  type DoctorSessionSqliteRestoreReport,
-} from "../commands/doctor-session-sqlite-types.js";
+  hasSessionEntriesByStatus,
+  readSessionEntriesByStatus,
+} from "../config/sessions/session-accessor.sqlite-status.js";
 import {
   runSessionStartupMigration,
   type SessionStartupMigrationLogger,
 } from "../config/sessions/startup-migration.js";
+import type { InternalSessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
-
-type SessionSqliteStartupImportRunner = (params: {
-  allAgents: true;
-  cfg: OpenClawConfig;
-  env: NodeJS.ProcessEnv;
-  mode: "import";
-}) => Promise<DoctorSessionSqliteReport>;
-
-type SessionSqliteStartupRestoreRunner = (params: {
-  manifestPath: string;
-  trustedTargets: Array<{ agentId: string; sqlitePath: string; storePath: string }>;
-}) => DoctorSessionSqliteRestoreReport;
-
-type SessionSqliteStartupFailureReportWriter = (
-  manifestPath: string,
-  params: { reason: string },
-) => { jsonPath: string; markdownPath: string };
-
-type SessionSqliteDatabaseExists = (params: {
-  agentId: string;
-  env?: NodeJS.ProcessEnv;
-}) => boolean;
+import { readActiveGatewayLockIdentity } from "../infra/gateway-lock.js";
+import { readGatewayOwnerLease } from "../infra/gateway-owner-lease.js";
+import { hasActiveGatewayStateOwner } from "../infra/gateway-state-owner.js";
+import {
+  isSubagentSessionKey,
+  isIncognitoSessionKey,
+  resolveAgentIdFromSessionKey,
+} from "../routing/session-key.js";
+import { isSessionWorkAdmissionActive } from "../sessions/session-lifecycle-admission.js";
+import { recordGatewaySessionRunFailure } from "../sessions/session-run-error.js";
+import { withOpenClawAgentDatabaseReadOnly } from "../state/openclaw-agent-db-readonly.js";
+import {
+  withOpenClawAgentDatabaseAsync,
+  type OpenClawAgentDatabaseOptions,
+} from "../state/openclaw-agent-db.js";
+import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 
 type SessionMigrationDeps = Parameters<typeof runSessionStartupMigration>[0]["deps"] & {
   reconcileSessionTranscriptIndexes?: typeof import("../config/sessions/session-transcript-reconcile.js").reconcileSessionTranscriptIndexes;
-  restoreSessionSqliteMigrationRun?: SessionSqliteStartupRestoreRunner;
-  runDoctorSessionSqlite?: SessionSqliteStartupImportRunner;
-  sessionSqliteDatabaseExists?: SessionSqliteDatabaseExists;
-  writeSessionSqliteMigrationFailureReports?: SessionSqliteStartupFailureReportWriter;
 };
 
-/**
- * Run session migrations at gateway startup before runtime session access.
- *
- * Orphan-key cleanup remains best-effort. Full SQLite import is blocking
- * for hot legacy session issues because runtime no longer falls back to JSONL.
- */
+function isUnsettledPredecessor(entry: InternalSessionEntry): boolean {
+  // Age selects the predecessor boundary; it is never sufficient evidence of lost ownership.
+  return (
+    entry.status === "running" &&
+    !entry.incognito &&
+    !entry.abortedLastRun &&
+    typeof entry.startedAt === "number" &&
+    Number.isFinite(entry.startedAt) &&
+    entry.startedAt < performance.timeOrigin &&
+    Number.isFinite(entry.updatedAt) &&
+    entry.updatedAt < performance.timeOrigin &&
+    !entry.restartRecoveryRuns?.length &&
+    !entry.restartRecoveryForceSafeTools &&
+    !entry.subagentRecovery &&
+    !entry.mainRestartRecovery &&
+    !entry.pendingFinalDelivery &&
+    !entry.pendingDeliveryNotice &&
+    !entry.initializationPending &&
+    !entry.restartRecoveryBeforeAgentReplyState &&
+    !entry.restartRecoveryDeliveryReceiptState &&
+    !entry.restartRecoveryDeliveryRunId &&
+    !entry.restartRecoveryDeliverySourceRunId
+  );
+}
+
+async function reconcileStartupOrphans(
+  database: OpenClawAgentDatabaseOptions,
+  log: SessionStartupMigrationLogger,
+  assertCurrent?: () => void,
+) {
+  const env = database.env ?? process.env;
+  const statePath = resolveOpenClawStateSqlitePath(env);
+  if (!hasActiveGatewayStateOwner(statePath)) {
+    return undefined;
+  }
+  try {
+    const running = withOpenClawAgentDatabaseReadOnly(
+      (connection) => hasSessionEntriesByStatus(connection, ["running"]),
+      database,
+    );
+    if (running.found && !running.value) {
+      return undefined;
+    }
+  } catch {
+    // The writable owner retains schema repair and integrity diagnosis for uncertain reads.
+  }
+  const lock = await readActiveGatewayLockIdentity({ env, requireInspection: true });
+  if (lock?.pid !== process.pid || !lock.ownerId) {
+    return undefined;
+  }
+  const assertGatewayOwner = () => {
+    assertCurrent?.();
+    const lease = readGatewayOwnerLease({ env, current: true });
+    if (
+      !hasActiveGatewayStateOwner(statePath) ||
+      lease?.state !== "live" ||
+      lease.pid !== process.pid ||
+      lease.owner !== lock.ownerId
+    ) {
+      throw new Error("startup Gateway ownership changed or could not be verified");
+    }
+  };
+  // A foreign native lease can prevent readiness from lending its integrity proof.
+  // Admit asynchronously and retain this exact connection through receipt settlement.
+  return withOpenClawAgentDatabaseAsync(
+    database,
+    async (connection) => {
+      const selected = readSessionEntriesByStatus(connection, ["running"]);
+      let interrupted = 0;
+      let retained = 0;
+      for (const { entry, sessionKey } of selected) {
+        if (
+          !isSubagentSessionKey(sessionKey) ||
+          isIncognitoSessionKey(sessionKey) ||
+          !isUnsettledPredecessor(entry)
+        ) {
+          continue;
+        }
+        const identity = { sessionKey, sessionId: entry.sessionId, env };
+        const target = {
+          agentId: resolveAgentIdFromSessionKey(sessionKey),
+          env,
+          sessionKey,
+          storePath: connection.path,
+        };
+        const matchesPredecessor = (current: InternalSessionEntry | undefined) =>
+          current !== undefined &&
+          current.sessionId === entry.sessionId &&
+          current.lifecycleRevision === entry.lifecycleRevision &&
+          current.lifecycleRunId === entry.lifecycleRunId &&
+          current.updatedAt === entry.updatedAt &&
+          current.startedAt === entry.startedAt &&
+          isUnsettledPredecessor(current);
+        const hasOwner = () =>
+          hasSubagentSessionRecoveryOwner(identity) ||
+          isSessionWorkAdmissionActive(connection.path, [sessionKey, entry.sessionId]);
+        const assertOwnerless = () => {
+          assertGatewayOwner();
+          if (hasOwner()) {
+            throw new Error("a current or retained run/task owns this session");
+          }
+        };
+        try {
+          assertGatewayOwner();
+          // Retained runs belong to registry recovery; only session-only orphans settle here.
+          if (hasOwner()) {
+            retained++;
+            continue;
+          }
+          const outcome = buildAgentRunTerminalOutcome({
+            status: "error",
+            error: "subagent run was interrupted before a terminal lifecycle event was persisted",
+            startedAt: entry.startedAt,
+            // This is the repair observation, not a reconstructed execution finish time.
+            endedAt: Date.now(),
+          });
+          await recordGatewaySessionRunFailure({
+            target: {
+              ...target,
+              sessionId: entry.sessionId,
+              expectedLifecycleRevision: entry.lifecycleRevision,
+            },
+            // A recovery-only receipt identity must not suppress the notice after partial output.
+            runId: `startup-orphan:${entry.sessionId}:${entry.lifecycleRunId ?? entry.startedAt}`,
+            error: outcome.error,
+            assertCommitAllowed: assertOwnerless,
+            settleStartupSession: () => {
+              const current = readSessionEntryRow(connection, sessionKey)?.entry;
+              if (!current || !matchesPredecessor(current)) {
+                throw new Error("startup subagent session changed before interruption receipt");
+              }
+              // The receipt owner holds the outer transaction; either both writes commit or neither does.
+              replaceSessionEntrySync(target, {
+                ...current,
+                status: "interrupted",
+                abortedLastRun: true,
+                endedAt: outcome.endedAt,
+                lastRunError: outcome.error,
+              });
+            },
+          });
+          interrupted++;
+        } catch (error) {
+          log.warn(`session: retained startup subagent ${sessionKey}: ${String(error)}`);
+        }
+      }
+      return { interrupted, retained };
+    },
+    assertGatewayOwner,
+  );
+}
+
+/** Await SQLite maintenance and projection repair before serving session history. */
 export async function runStartupSessionMigration(params: {
   cfg: OpenClawConfig;
   env?: NodeJS.ProcessEnv;
+  agentIds?: ReadonlySet<string>;
+  assertCurrent?: () => void;
   log: SessionStartupMigrationLogger;
   deps?: SessionMigrationDeps;
 }): Promise<void> {
-  if (await runSessionStartupMigration(params)) {
-    await runStartupSessionSqliteImport(params);
-  }
-  await reconcileStartupSessionTranscriptIndexes(params);
-}
-
-async function reconcileStartupSessionTranscriptIndexes(params: {
-  cfg: OpenClawConfig;
-  env?: NodeJS.ProcessEnv;
-  log: SessionStartupMigrationLogger;
-  deps?: SessionMigrationDeps;
-}): Promise<void> {
-  const databaseExists =
-    params.deps?.sessionSqliteDatabaseExists ??
-    ((input: Parameters<SessionSqliteDatabaseExists>[0]) =>
-      fs.existsSync(resolveOpenClawAgentSqlitePath(input)));
-  const agentIds = listAgentIds(params.cfg).filter((agentId) =>
-    databaseExists({
-      agentId,
-      ...(params.env ? { env: params.env } : {}),
-    }),
-  );
-  if (agentIds.length === 0) {
-    // No durable session rows can need projection repair when the agent DB is absent.
-    // Avoid creating and schema-registering one empty DB per configured agent at startup.
-    return;
-  }
-  const reconcile =
-    params.deps?.reconcileSessionTranscriptIndexes ??
-    (await import("../config/sessions/session-transcript-reconcile.js"))
-      .reconcileSessionTranscriptIndexes;
+  let reconcile = params.deps?.reconcileSessionTranscriptIndexes;
   let reconciledSessions = 0;
-  for (const agentId of agentIds) {
-    const result = await reconcile({
-      agentId,
-      ...(params.env ? { env: params.env } : {}),
-    });
-    reconciledSessions += result.reconciledSessions;
+  let interruptedSubagents = 0;
+  let retainedSubagents = 0;
+  await runSessionStartupMigration({
+    ...params,
+    handoffDatabase: async (database) => {
+      try {
+        const result = await reconcileStartupOrphans(database, params.log, params.assertCurrent);
+        interruptedSubagents += result?.interrupted ?? 0;
+        retainedSubagents += result?.retained ?? 0;
+      } catch (error) {
+        params.assertCurrent?.();
+        params.log.warn(
+          `session: retained startup orphans because ownership could not be verified: ${String(error)}`,
+        );
+      }
+      reconcile ??= (await import("../config/sessions/session-transcript-reconcile.js"))
+        .reconcileSessionTranscriptIndexes;
+      params.assertCurrent?.();
+      const result = await reconcile(database);
+      params.assertCurrent?.();
+      reconciledSessions += result.reconciledSessions;
+    },
+  });
+  if (interruptedSubagents > 0 || retainedSubagents > 0) {
+    params.log.info(
+      `session: startup subagents: ${interruptedSubagents} interrupted, ${retainedSubagents} retained by run/task owners`,
+    );
   }
   if (reconciledSessions > 0) {
     params.log.info(
       `session: rebuilt ${reconciledSessions} transcript projection(s) before serving history`,
     );
   }
-}
-
-async function runStartupSessionSqliteImport(params: {
-  cfg: OpenClawConfig;
-  env?: NodeJS.ProcessEnv;
-  log: SessionStartupMigrationLogger;
-  deps?: SessionMigrationDeps;
-}): Promise<void> {
-  const env = params.env ?? process.env;
-  const runDoctorSessionSqlite =
-    params.deps?.runDoctorSessionSqlite ??
-    (await import("../commands/doctor-session-sqlite.js")).runDoctorSessionSqlite;
-  let report: DoctorSessionSqliteReport;
-  try {
-    report = await runDoctorSessionSqlite({
-      allAgents: true,
-      cfg: params.cfg,
-      env,
-      mode: "import",
-    });
-  } catch (error) {
-    if (isSqliteCorruptionError(error)) {
-      throw new Error(
-        [
-          `session SQLite migration failed during startup because an agent SQLite database could not be opened: ${String(error)}`,
-          'Run "openclaw doctor --session-sqlite recover --session-sqlite-all-agents" to move the corrupt database aside and preserve it for support.',
-        ].join("\n"),
-        { cause: error },
-      );
-    }
-    throw error;
-  }
-  const warningIssues = collectStartupWarningIssues(report);
-  const blockingIssues = collectStartupBlockingIssues(report);
-  if (blockingIssues.length > 0) {
-    const recovery = await restoreFailedStartupSessionSqliteRun(params, report, blockingIssues);
-    throw new Error(
-      [
-        `session SQLite migration failed during startup with ${blockingIssues.length} blocking issue(s).`,
-        ...formatStartupIssueLines(blockingIssues).map((line) => `- ${line}`),
-        'Run "openclaw doctor --session-sqlite inspect --session-sqlite-all-agents" for details.',
-        ...(recovery.length > 0 ? recovery : []),
-      ].join("\n"),
-    );
-  }
-  if (sessionSqliteReportHasChanges(report)) {
-    params.log.info(formatSessionSqliteStartupImportSummary(report));
-  }
-  if (warningIssues.length > 0) {
-    params.log.warn(
-      [
-        `session: session SQLite migration warnings:\n${formatStartupIssueLines(warningIssues)
-          .map((line) => `- ${line}`)
-          .join("\n")}`,
-      ].join("\n"),
-    );
-  }
-}
-
-async function restoreFailedStartupSessionSqliteRun(
-  params: {
-    cfg: OpenClawConfig;
-    env?: NodeJS.ProcessEnv;
-    log: SessionStartupMigrationLogger;
-    deps?: SessionMigrationDeps;
-  },
-  report: DoctorSessionSqliteReport,
-  blockingIssues: readonly DoctorSessionSqliteIssue[],
-): Promise<string[]> {
-  const manifestPath = report.migrationRun?.manifestPath;
-  if (!manifestPath) {
-    return report.migrationRun?.failureReportMarkdownPath
-      ? [`Failure report: ${report.migrationRun.failureReportMarkdownPath}`]
-      : [];
-  }
-  let restoreSessionSqliteMigrationRun = params.deps?.restoreSessionSqliteMigrationRun;
-  let writeSessionSqliteMigrationFailureReports =
-    params.deps?.writeSessionSqliteMigrationFailureReports;
-  if (!restoreSessionSqliteMigrationRun || !writeSessionSqliteMigrationFailureReports) {
-    const doctorModule = await import("../commands/doctor-session-sqlite.js");
-    restoreSessionSqliteMigrationRun ??= doctorModule.restoreSessionSqliteMigrationRun;
-    writeSessionSqliteMigrationFailureReports ??=
-      doctorModule.writeSessionSqliteMigrationFailureReports;
-  }
-  const restore = restoreSessionSqliteMigrationRun({
-    manifestPath,
-    trustedTargets: report.targets.map(({ agentId, sqlitePath, storePath }) => ({
-      agentId,
-      sqlitePath,
-      storePath,
-    })),
-  });
-  const failureReports = writeSessionSqliteMigrationFailureReports(manifestPath, {
-    reason: `startup blocked on ${blockingIssues.length} session SQLite issue(s)`,
-  });
-  params.log.warn(
-    [
-      "session: restored archived legacy transcript artifacts after startup SQLite migration failure:",
-      `- restored=${restore.restoredFiles.length} skipped=${restore.skippedFiles.length} conflicts=${restore.conflicts.length}`,
-      `- failureReport=${failureReports.markdownPath}`,
-    ].join("\n"),
-  );
-  return [
-    `Restore attempted for current migration run: restored=${restore.restoredFiles.length}, skipped=${restore.skippedFiles.length}, conflicts=${restore.conflicts.length}.`,
-    `Failure report: ${failureReports.markdownPath}`,
-  ];
-}
-
-function collectStartupBlockingIssues(
-  report: DoctorSessionSqliteReport,
-): DoctorSessionSqliteIssue[] {
-  return report.targets.flatMap((target) =>
-    target.issues.filter((issue) => !isSessionSqliteMigrationWarning(issue)),
-  );
-}
-
-function collectStartupWarningIssues(
-  report: DoctorSessionSqliteReport,
-): DoctorSessionSqliteIssue[] {
-  return report.targets.flatMap((target) => target.issues.filter(isSessionSqliteMigrationWarning));
-}
-
-function formatStartupIssueLines(issues: readonly DoctorSessionSqliteIssue[]): readonly string[] {
-  return issues.slice(0, 10).map((issue) => {
-    const key = issue.sessionKey ? `${issue.sessionKey}: ` : "";
-    return `[${issue.code}] ${key}${issue.message}`;
-  });
-}
-
-function sessionSqliteReportHasChanges(report: DoctorSessionSqliteReport): boolean {
-  return (
-    report.totals.importedEntries > 0 ||
-    report.totals.importedTranscriptEvents > 0 ||
-    report.totals.archivedTranscriptFiles > 0 ||
-    report.totals.archivedUnreferencedJsonlFiles > 0
-  );
-}
-
-function formatSessionSqliteStartupImportSummary(report: DoctorSessionSqliteReport): string {
-  return [
-    "session: imported legacy session metadata/transcripts into SQLite:",
-    `- targets=${report.totals.targets} legacyEntries=${report.totals.legacyEntries} sqliteEntries=${report.totals.sqliteEntries}`,
-    `- importedEntries=${report.totals.importedEntries} importedTranscriptEvents=${report.totals.importedTranscriptEvents}`,
-    `- archivedTranscriptArtifacts=${report.totals.archivedTranscriptFiles} archivedUnreferencedJsonl=${report.totals.archivedUnreferencedJsonlFiles}`,
-  ].join("\n");
-}
-
-function isSqliteCorruptionError(error: unknown): boolean {
-  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  if (code === "SQLITE_CORRUPT" || code === "SQLITE_NOTADB") {
-    return true;
-  }
-  const message = String(error).toLowerCase();
-  return message.includes("database disk image is malformed") || message.includes("not a database");
 }

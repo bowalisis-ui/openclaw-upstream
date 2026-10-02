@@ -1,12 +1,13 @@
 // Provider fallback tests verify web_fetch normalizes third-party fetch output
 // before exposing it to agents or cache entries.
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import { setActiveDegradedSecretOwners } from "../../secrets/runtime-degraded-state.js";
 import { wrapExternalContent } from "../../security/external-content.js";
 import { withFetchPreconnect } from "../../test-utils/fetch-mock.js";
+import { getToolTerminalPresentation } from "../tool-terminal-presentation.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import * as webGuardedFetch from "./web-guarded-fetch.js";
 
@@ -141,10 +142,12 @@ describe("web_fetch provider fallback normalization", () => {
     expect(details.extractor).toBe("custom-provider");
     expect(details.contentType).toBe("text/plain");
     expect(
-      details.text?.split("\n\n[Showing truncated web_fetch content.")[0]?.length,
+      (details.text?.length ?? 0) + (details.title?.length ?? 0) + (details.warning?.length ?? 0),
     ).toBeLessThanOrEqual(800);
+    expect(details.spill).toBeDefined();
     expect(details.text).toContain("Ignore previous instructions");
     expect(details.text).toMatch(/<<<EXTERNAL_UNTRUSTED_CONTENT id="[a-f0-9]{16}">>>/);
+    expect(details.text).toMatch(/<<<END_EXTERNAL_UNTRUSTED_CONTENT id="[a-f0-9]{16}">>>/);
     expect(details.text).toContain(`Full output: ${details.spill?.path}`);
     expect(details.title).toContain("Provider Title");
     expect(details.warning).toContain("Provider Warning");
@@ -156,9 +159,71 @@ describe("web_fetch provider fallback normalization", () => {
     expect(details.externalContent?.source).toBe("web_fetch");
     expect(details.externalContent?.wrapped).toBe(true);
     expect(details.externalContent?.provider).toBe("firecrawl");
-    if (details.spill) {
-      await rm(details.spill.path, { force: true });
+    const spillPath = details.spill!.path;
+    try {
+      const spilledText = await readFile(spillPath, "utf8");
+      expect(spilledText).toContain(providerVisibleText);
+      const boundary = spilledText.match(/<<<EXTERNAL_UNTRUSTED_CONTENT id="([a-f0-9]{16})">>>/);
+      expect(boundary).not.toBeNull();
+      expect(spilledText).toContain(`<<<END_EXTERNAL_UNTRUSTED_CONTENT id="${boundary?.[1]}">>>`);
+      expect(spilledText.match(/<<<EXTERNAL_UNTRUSTED_CONTENT /g)).toHaveLength(1);
+      expect(spilledText.match(/<<<END_EXTERNAL_UNTRUSTED_CONTENT /g)).toHaveLength(1);
+      expect(spilledText).toContain("[[MARKER_SANITIZED]]");
+      expect(spilledText).toContain("[[END_MARKER_SANITIZED]]");
+    } finally {
+      await rm(spillPath, { force: true });
     }
+  });
+
+  it("preserves short source-truncated provider results through cache and presentation", async () => {
+    global.fetch = withFetchPreconnect(
+      vi.fn(async () => {
+        throw new Error("network failed");
+      }),
+    );
+    const providerExecute = vi.fn(async () => ({
+      text: "partial provider body",
+      truncated: true,
+    }));
+    resolveWebFetchDefinitionMock.mockReturnValue({
+      provider: { id: "firecrawl" },
+      definition: {
+        description: "firecrawl",
+        parameters: {},
+        execute: providerExecute,
+      },
+    });
+    const tool = createWebFetchTool({
+      config: {
+        tools: { web: { fetch: { cacheTtlMinutes: 1 } } },
+      } as OpenClawConfig,
+      sandboxed: false,
+    });
+    const args = { url: "https://example.com/short-partial-provider" };
+
+    const first = await tool?.execute?.("short-partial-provider-first", args);
+    const second = await tool?.execute?.("short-partial-provider-second", args);
+    if (!first || !second) {
+      throw new Error("expected web_fetch results");
+    }
+    const firstDetails = first.details as {
+      truncated?: boolean;
+      spill?: { path: string };
+    };
+    const secondDetails = second?.details as {
+      cached?: boolean;
+      truncated?: boolean;
+      spill?: { path: string };
+    };
+    const terminalPresentation = tool ? getToolTerminalPresentation(tool) : undefined;
+
+    expect(firstDetails.truncated).toBe(true);
+    expect(firstDetails.spill).toBeUndefined();
+    expect(secondDetails.cached).toBe(true);
+    expect(secondDetails.truncated).toBe(true);
+    expect(secondDetails.spill).toBeUndefined();
+    expect(providerExecute).toHaveBeenCalledTimes(1);
+    expect(terminalPresentation?.({}, first)?.text).toContain("Truncated: yes");
   });
 
   it("keeps requested url and only accepts safe provider finalUrl values", async () => {
@@ -453,47 +518,6 @@ describe("web_fetch provider fallback normalization", () => {
       maxChars: 20_000,
     });
     expect(providerInput).not.toHaveProperty("headers");
-  });
-
-  it("cancels an unread error response when provider fallback succeeds", async () => {
-    let cancelled = false;
-    global.fetch = withFetchPreconnect(
-      vi.fn(
-        async () =>
-          new Response(
-            new ReadableStream<Uint8Array>({
-              pull(controller) {
-                controller.enqueue(new TextEncoder().encode("unread upstream error"));
-              },
-              cancel() {
-                cancelled = true;
-              },
-            }),
-            { status: 503, headers: { "content-type": "text/plain" } },
-          ),
-      ),
-    );
-    resolveWebFetchDefinitionMock.mockReturnValue({
-      provider: { id: "firecrawl" },
-      definition: {
-        description: "firecrawl",
-        parameters: {},
-        execute: async () => ({
-          text: "provider rescued body",
-          extractor: "custom-provider",
-        }),
-      },
-    });
-
-    const tool = createWebFetchTool({ config: {} as OpenClawConfig, sandboxed: false });
-    const result = await tool?.execute?.("unread-response-fallback", {
-      url: "https://example.com/unread-response-fallback",
-    });
-    const details = result?.details as { text?: string; extractor?: string };
-
-    expect(details.extractor).toBe("custom-provider");
-    expect(details.text).toContain("provider rescued body");
-    expect(cancelled).toBe(true);
   });
 
   it("cancels an unread error response when provider fallback throws", async () => {

@@ -1,4 +1,3 @@
-// Openshell helper module supports config behavior.
 import path from "node:path";
 import { buildPluginConfigSchema, type OpenClawPluginConfigSchema } from "openclaw/plugin-sdk/core";
 import {
@@ -7,22 +6,6 @@ import {
 } from "openclaw/plugin-sdk/extension-shared";
 import { MAX_TIMER_TIMEOUT_SECONDS } from "openclaw/plugin-sdk/number-runtime";
 import { z } from "zod";
-
-type OpenShellPluginConfig = {
-  mode?: "mirror" | "remote";
-  command?: string;
-  gateway?: string;
-  gatewayEndpoint?: string;
-  workspace?: string;
-  from?: string;
-  policy?: string;
-  providers?: string[];
-  gpu?: boolean;
-  autoProviders?: boolean;
-  remoteWorkspaceDir?: string;
-  remoteAgentWorkspaceDir?: string;
-  timeoutSeconds?: number;
-};
 
 export type ResolvedOpenShellPluginConfig = {
   mode: "mirror" | "remote";
@@ -51,22 +34,20 @@ const OPEN_SHELL_MANAGED_REMOTE_ROOTS = [
   DEFAULT_REMOTE_AGENT_WORKSPACE_DIR,
 ] as const;
 
-function normalizeProviders(value: string[] | undefined): string[] {
-  const seen = new Set<string>();
-  const providers: string[] = [];
-  for (const entry of value ?? []) {
-    const normalized = entry.trim();
-    if (seen.has(normalized)) {
-      continue;
-    }
-    seen.add(normalized);
-    providers.push(normalized);
-  }
-  return providers;
-}
-
 const nonEmptyTrimmedString = (message: string) =>
   z.string({ error: message }).trim().min(1, { error: message });
+
+const openShellManagedRemotePath = (fieldName: string) =>
+  nonEmptyTrimmedString(`${fieldName} must be a non-empty string`)
+    .regex(/^\/(?:sandbox|agent)(?:\/|$)/, {
+      error: (issue) =>
+        String(issue.input).startsWith("/")
+          ? `OpenShell ${fieldName} must stay under /sandbox or /agent`
+          : `OpenShell ${fieldName} must be absolute`,
+    })
+    .refine((value) => isManagedOpenShellRemotePath(path.posix.normalize(value)), {
+      error: `OpenShell ${fieldName} must stay under /sandbox or /agent`,
+    });
 
 const openShellWorkspaceName = z
   .string({ error: "workspace must be a valid OpenShell workspace name" })
@@ -98,12 +79,8 @@ const OpenShellPluginConfigSchema = z.strictObject({
     .optional(),
   gpu: z.boolean({ error: "gpu must be a boolean" }).optional(),
   autoProviders: z.boolean({ error: "autoProviders must be a boolean" }).optional(),
-  remoteWorkspaceDir: nonEmptyTrimmedString(
-    "remoteWorkspaceDir must be a non-empty string",
-  ).optional(),
-  remoteAgentWorkspaceDir: nonEmptyTrimmedString(
-    "remoteAgentWorkspaceDir must be a non-empty string",
-  ).optional(),
+  remoteWorkspaceDir: openShellManagedRemotePath("remoteWorkspaceDir").optional(),
+  remoteAgentWorkspaceDir: openShellManagedRemotePath("remoteAgentWorkspaceDir").optional(),
   timeoutSeconds: z
     .number({
       error: `timeoutSeconds must be a number between 1 and ${MAX_TIMER_TIMEOUT_SECONDS}`,
@@ -160,42 +137,21 @@ export function createOpenShellPluginConfigSchema(): OpenClawPluginConfigSchema 
 }
 
 export function resolveOpenShellPluginConfig(value: unknown): ResolvedOpenShellPluginConfig {
-  if (value === undefined) {
-    // The built-in defaults are managed OpenShell roots, so they do not need to
-    // flow back through normalizeOpenShellRemotePath.
-    return {
-      mode: DEFAULT_MODE,
-      command: DEFAULT_COMMAND,
-      gateway: undefined,
-      gatewayEndpoint: undefined,
-      workspace: undefined,
-      from: DEFAULT_SOURCE,
-      policy: undefined,
-      providers: [],
-      gpu: false,
-      autoProviders: true,
-      remoteWorkspaceDir: DEFAULT_REMOTE_WORKSPACE_DIR,
-      remoteAgentWorkspaceDir: DEFAULT_REMOTE_AGENT_WORKSPACE_DIR,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-    };
-  }
-
-  const parsed = OpenShellPluginConfigSchema.safeParse(value);
+  const parsed = OpenShellPluginConfigSchema.safeParse(value === undefined ? {} : value);
   if (!parsed.success) {
     const message = formatPluginConfigIssue(parsed.error.issues[0]);
     throw new Error(`Invalid openshell plugin config: ${message}`);
   }
-  const cfg = parsed.data as OpenShellPluginConfig;
-  const mode = cfg.mode ?? DEFAULT_MODE;
+  const cfg = parsed.data;
   return {
-    mode,
+    mode: cfg.mode ?? DEFAULT_MODE,
     command: cfg.command ?? DEFAULT_COMMAND,
     gateway: cfg.gateway,
     gatewayEndpoint: cfg.gatewayEndpoint,
     workspace: cfg.workspace,
     from: cfg.from ?? DEFAULT_SOURCE,
     policy: cfg.policy,
-    providers: normalizeProviders(cfg.providers),
+    providers: [...new Set(cfg.providers ?? [])],
     gpu: cfg.gpu ?? false,
     autoProviders: cfg.autoProviders ?? true,
     remoteWorkspaceDir: normalizeOpenShellRemotePath(

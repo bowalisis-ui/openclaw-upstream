@@ -1,5 +1,9 @@
-// Qa Lab Matrix helper module supports config behavior.
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type {
+  DmPolicy,
+  GroupPolicy,
+  OpenClawConfig,
+  ReplyToMode,
+} from "openclaw/plugin-sdk/config-contracts";
 import {
   isRecord,
   normalizeStringEntries,
@@ -7,10 +11,7 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { MatrixQaProvisionedTopology } from "./topology.js";
 
-type MatrixQaReplyToMode = "off" | "first" | "all" | "batched";
 type MatrixQaThreadRepliesMode = "off" | "inbound" | "always";
-type MatrixQaDmPolicy = "allowlist" | "disabled" | "open" | "pairing";
-type MatrixQaGroupPolicy = "allowlist" | "disabled" | "open";
 type MatrixQaAutoJoinMode = "allowlist" | "always" | "off";
 type MatrixQaStreamingMode = "off" | "partial" | "quiet";
 type MatrixQaActorRole = "driver" | "observer" | "sut";
@@ -20,22 +21,17 @@ type MatrixQaExecApprovalsEnabled = boolean | "auto";
 type MatrixQaAllowBotsMode = boolean | "mentions";
 type MatrixQaStreamingConfig = {
   mode?: MatrixQaStreamingMode;
+  progress?: {
+    commandText?: "raw" | "status";
+  };
   preview?: {
     toolProgress?: boolean;
   };
 };
-type MatrixQaAgentDefaultsOverrides = {
-  blockStreamingChunk?: {
-    breakPreference?: "newline" | "paragraph" | "sentence";
-    maxChars?: number;
-    minChars?: number;
-  };
-  blockStreamingCoalesce?: {
-    idleMs?: number;
-    maxChars?: number;
-    minChars?: number;
-  };
-};
+type MatrixQaAgentDefaultsOverrides = Pick<
+  NonNullable<NonNullable<OpenClawConfig["agents"]>["defaults"]>,
+  "blockStreamingChunk" | "blockStreamingCoalesce"
+>;
 type MatrixQaToolConfigOverrides = {
   allow?: string[];
   deny?: string[];
@@ -55,16 +51,9 @@ type MatrixQaGroupConfigOverrides = {
 type MatrixQaDmConfigOverrides = {
   allowFrom?: string[];
   enabled?: boolean;
-  policy?: MatrixQaDmPolicy;
+  policy?: DmPolicy;
   sessionScope?: "per-room" | "per-user";
   threadReplies?: MatrixQaThreadRepliesMode;
-};
-type MatrixQaThreadBindingsConfigOverrides = {
-  enabled?: boolean;
-  idleHours?: number;
-  maxAgeHours?: number;
-  spawnSessions?: boolean;
-  defaultSpawnContext?: "isolated" | "fork";
 };
 type MatrixQaExecApprovalsConfigOverrides = {
   agentFilter?: string[];
@@ -90,52 +79,21 @@ export type MatrixQaConfigOverrides = {
   groupAllowFrom?: string[];
   groupAllowRoles?: MatrixQaActorRole[];
   groupMentionPatterns?: string[];
-  groupPolicy?: MatrixQaGroupPolicy;
+  groupPolicy?: GroupPolicy;
   configuredBotRoles?: MatrixQaActorRole[];
   groupsByKey?: Record<string, MatrixQaGroupConfigOverrides>;
-  replyToMode?: MatrixQaReplyToMode;
+  replyToMode?: ReplyToMode;
   startupVerification?: "if-unverified" | "off";
   streaming?: MatrixQaStreamingMode | MatrixQaStreamingConfig | boolean;
   textChunkLimit?: number;
-  threadBindings?: MatrixQaThreadBindingsConfigOverrides;
+  threadBindings?: NonNullable<OpenClawConfig["session"]>["threadBindings"];
   threadReplies?: MatrixQaThreadRepliesMode;
   audio?: MatrixQaAudioConfigOverrides;
   mediaModels?: MatrixQaMediaModelsOverrides;
   toolProfile?: "coding" | "messaging" | "minimal";
 };
 
-type MatrixQaConfigSnapshot = {
-  approvalForwarding: {
-    exec: boolean;
-    plugin: boolean;
-  };
-  autoJoin: MatrixQaAutoJoinMode;
-  autoJoinAllowlist: string[];
-  allowBots?: MatrixQaAllowBotsMode;
-  blockStreaming: boolean;
-  chunkMode?: MatrixQaChunkMode;
-  dm: {
-    allowFrom: string[];
-    enabled: boolean;
-    policy: MatrixQaDmPolicy;
-    sessionScope: "per-room" | "per-user";
-    threadReplies: MatrixQaThreadRepliesMode;
-  };
-  encryption: boolean;
-  execApprovals?: MatrixQaExecApprovalsConfigOverrides;
-  configuredBotRoles: MatrixQaActorRole[];
-  groupAllowFrom: string[];
-  groupMentionPatterns: string[];
-  groupPolicy: MatrixQaGroupPolicy;
-  groupsByKey: Record<string, MatrixQaGroupSnapshot>;
-  replyToMode: MatrixQaReplyToMode;
-  startupVerification?: "if-unverified" | "off";
-  streaming: MatrixQaStreamingMode;
-  streamingPreviewToolProgress: boolean;
-  textChunkLimit?: number;
-  threadBindings: MatrixQaThreadBindingsConfigOverrides;
-  threadReplies: MatrixQaThreadRepliesMode;
-};
+type MatrixQaConfigSnapshot = ReturnType<typeof buildMatrixQaConfigSnapshot>;
 
 type MatrixQaGroupSnapshot = {
   allowBots?: MatrixQaAllowBotsMode;
@@ -176,7 +134,7 @@ function normalizeMatrixQaAllowlist(entries?: string[]) {
 function resolveMatrixQaGroupSnapshots(params: {
   overrides?: MatrixQaConfigOverrides;
   topology: MatrixQaProvisionedTopology;
-}) {
+}): Record<string, MatrixQaGroupSnapshot> {
   const groupRooms = params.topology.rooms.filter((room) => room.kind === "group");
   const groupsByKey = params.overrides?.groupsByKey ?? {};
   const knownGroupKeys = new Set(groupRooms.map((room) => room.key));
@@ -287,16 +245,7 @@ function resolveMatrixQaStreamingMode(
 function isMatrixQaStreamingConfig(
   value: MatrixQaConfigOverrides["streaming"],
 ): value is MatrixQaStreamingConfig {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function resolveMatrixQaStreamingPreviewToolProgress(
-  value: MatrixQaConfigOverrides["streaming"],
-): boolean {
-  if (!isMatrixQaStreamingConfig(value)) {
-    return true;
-  }
-  return value.preview?.toolProgress ?? true;
+  return isRecord(value);
 }
 
 function resolveMatrixQaAutoJoinAllowlist(params: { overrides?: MatrixQaConfigOverrides }) {
@@ -447,9 +396,19 @@ function buildMatrixQaChannelAccountConfig(params: {
   const block = restoreOwnedFields(current?.streaming?.block, baseline?.streaming?.block, [
     "enabled",
   ]);
+  const progress = restoreOwnedFields(current?.streaming?.progress, baseline?.streaming?.progress, [
+    "commandText",
+  ]);
   const preview = restoreOwnedFields(current?.streaming?.preview, baseline?.streaming?.preview, [
     "toolProgress",
   ]);
+  if (params.snapshot.streamingProgressCommandText) {
+    progress.commandText = params.snapshot.streamingProgressCommandText;
+  }
+  Object.assign(streaming, { progress });
+  if (Object.keys(progress).length === 0) {
+    delete streaming.progress;
+  }
   Object.assign(streaming, {
     block: { ...block, enabled: params.snapshot.blockStreaming },
     chunkMode: params.snapshot.chunkMode ?? "length",
@@ -512,7 +471,10 @@ function buildMatrixQaConfigSnapshot(params: {
   overrides?: MatrixQaConfigOverrides;
   sutUserId: string;
   topology: MatrixQaProvisionedTopology;
-}): MatrixQaConfigSnapshot {
+}) {
+  const streaming = isMatrixQaStreamingConfig(params.overrides?.streaming)
+    ? params.overrides.streaming
+    : undefined;
   return {
     allowBots: params.overrides?.allowBots,
     autoJoin: params.overrides?.autoJoin ?? "off",
@@ -533,10 +495,8 @@ function buildMatrixQaConfigSnapshot(params: {
     replyToMode: params.overrides?.replyToMode ?? "off",
     startupVerification: params.overrides?.startupVerification,
     streaming: resolveMatrixQaStreamingMode(params.overrides?.streaming),
-    streamingPreviewToolProgress: resolveMatrixQaStreamingPreviewToolProgress(
-      params.overrides?.streaming,
-    ),
-    threadBindings: { ...params.overrides?.threadBindings },
+    streamingProgressCommandText: streaming?.progress?.commandText,
+    streamingPreviewToolProgress: streaming?.preview?.toolProgress ?? true,
     textChunkLimit: params.overrides?.textChunkLimit,
     threadReplies: params.overrides?.threadReplies ?? "inbound",
     approvalForwarding: {

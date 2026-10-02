@@ -5,6 +5,7 @@ import {
 } from "../../../packages/gateway-protocol/src/index.js";
 import { updateMcpAppModelContext } from "../../agents/mcp-app-model-context.js";
 import { buildMcpAppSandboxPath } from "../../agents/mcp-app-sandbox.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { logWarn } from "../../logger.js";
 import {
@@ -16,7 +17,9 @@ import {
   withMcpAppActiveView,
 } from "../mcp-app-operations.js";
 import { createMcpAppStandaloneTicket } from "../mcp-app-standalone.js";
-import type { GatewayRequestHandlers } from "./types.js";
+import { authorizeOperatorScopesForMethod } from "../method-scopes.js";
+import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
+import type { GatewayRequestHandler, GatewayRequestHandlers } from "./types.js";
 
 function requireString(params: Record<string, unknown>, key: string): string {
   const value = params[key];
@@ -31,15 +34,38 @@ function optionalCursor(params: Record<string, unknown>): { cursor?: string } | 
   return typeof cursor === "string" && cursor.trim() ? { cursor: cursor.trim() } : undefined;
 }
 
-async function runOperation(
-  params: Record<string, unknown>,
-  operation: McpAppOperation,
-): Promise<unknown> {
-  const active = await resolveMcpAppActiveView({
-    sessionKey: requireString(params, "sessionKey"),
-    viewId: requireString(params, "viewId"),
-  });
-  return await executeMcpAppOperation(active, operation);
+class McpAppRequestError extends Error {
+  constructor(readonly shape: ReturnType<typeof errorShape>) {
+    super(shape.message);
+  }
+}
+
+function resolveMcpAppSessionOwner(params: Record<string, unknown>, cfg: OpenClawConfig): string {
+  const sessionKey = requireString(params, "sessionKey");
+  const explicitAgentId =
+    typeof params.agentId === "string" && params.agentId.trim() ? params.agentId.trim() : undefined;
+  const owner = resolveRequestedSessionAgentId(cfg, sessionKey, explicitAgentId);
+  if (!owner.ok) {
+    throw new McpAppRequestError(owner.error);
+  }
+  return owner.agentId;
+}
+
+function operationHandler(
+  buildOperation: (params: Record<string, unknown>) => McpAppOperation,
+): GatewayRequestHandler {
+  return async ({ respond, params, context }) => {
+    await handle(respond, async () => {
+      const operation = buildOperation(params);
+      const cfg = context.getRuntimeConfig();
+      const active = await resolveMcpAppActiveView({
+        sessionKey: requireString(params, "sessionKey"),
+        agentId: resolveMcpAppSessionOwner(params, cfg),
+        viewId: requireString(params, "viewId"),
+      });
+      return await executeMcpAppOperation(active, operation);
+    });
+  };
 }
 
 async function handle(
@@ -52,22 +78,25 @@ async function handle(
     respond(
       false,
       undefined,
-      errorShape(
-        ErrorCodes.UNAVAILABLE,
-        formatErrorMessage(error),
-        error instanceof McpAppViewExpiredError
-          ? { details: { code: GatewayErrorDetailCodes.MCP_APP_VIEW_EXPIRED } }
-          : undefined,
-      ),
+      error instanceof McpAppRequestError
+        ? error.shape
+        : errorShape(
+            ErrorCodes.UNAVAILABLE,
+            formatErrorMessage(error),
+            error instanceof McpAppViewExpiredError
+              ? { details: { code: GatewayErrorDetailCodes.MCP_APP_VIEW_EXPIRED } }
+              : undefined,
+          ),
     );
   }
 }
 
 export const mcpAppHandlers: GatewayRequestHandlers = {
-  "mcp.app.view": async ({ respond, params, context }) => {
+  "mcp.app.view": async ({ respond, params, context, client }) => {
     await handle(respond, async () => {
       const active = await resolveMcpAppActiveView({
         sessionKey: requireString(params, "sessionKey"),
+        agentId: resolveMcpAppSessionOwner(params, context.getRuntimeConfig()),
         viewId: requireString(params, "viewId"),
         cfg: context.getRuntimeConfig(),
       });
@@ -93,6 +122,10 @@ export const mcpAppHandlers: GatewayRequestHandlers = {
           standalone = createMcpAppStandaloneTicket({
             sessionKey: requireString(params, "sessionKey"),
             view,
+            toolOperationsAuthorized: authorizeOperatorScopesForMethod(
+              "mcp.app.callTool",
+              client?.connect?.scopes ?? [],
+            ).allowed,
           });
         } catch (error) {
           // Standalone links are additive; issuance must never break the
@@ -120,10 +153,11 @@ export const mcpAppHandlers: GatewayRequestHandlers = {
       });
     });
   },
-  "mcp.app.updateModelContext": async ({ respond, params }) => {
+  "mcp.app.updateModelContext": async ({ respond, params, context }) => {
     await handle(respond, async () => {
       const active = await resolveMcpAppActiveView({
         sessionKey: requireString(params, "sessionKey"),
+        agentId: resolveMcpAppSessionOwner(params, context.getRuntimeConfig()),
         viewId: requireString(params, "viewId"),
       });
       return await withMcpAppActiveView(active, "read", async () => {
@@ -133,54 +167,27 @@ export const mcpAppHandlers: GatewayRequestHandlers = {
       });
     });
   },
-  "mcp.app.callTool": async ({ respond, params }) => {
-    await handle(
-      respond,
-      async () =>
-        await runOperation(params, {
-          method: "tools/call",
-          params: {
-            name: requireString(params, "toolName"),
-            arguments: (params.arguments ?? {}) as Record<string, unknown>,
-          },
-        }),
-    );
-  },
-  "mcp.app.listTools": async ({ respond, params }) => {
-    await handle(
-      respond,
-      async () =>
-        await runOperation(params, { method: "tools/list", params: optionalCursor(params) ?? {} }),
-    );
-  },
-  "mcp.app.listResources": async ({ respond, params }) => {
-    await handle(
-      respond,
-      async () =>
-        await runOperation(params, {
-          method: "resources/list",
-          params: optionalCursor(params) ?? {},
-        }),
-    );
-  },
-  "mcp.app.listResourceTemplates": async ({ respond, params }) => {
-    await handle(
-      respond,
-      async () =>
-        await runOperation(params, {
-          method: "resources/templates/list",
-          params: optionalCursor(params) ?? {},
-        }),
-    );
-  },
-  "mcp.app.readResource": async ({ respond, params }) => {
-    await handle(
-      respond,
-      async () =>
-        await runOperation(params, {
-          method: "resources/read",
-          params: { uri: requireString(params, "uri") },
-        }),
-    );
-  },
+  "mcp.app.callTool": operationHandler((params) => ({
+    method: "tools/call",
+    params: {
+      name: requireString(params, "toolName"),
+      arguments: (params.arguments ?? {}) as Record<string, unknown>,
+    },
+  })),
+  "mcp.app.listTools": operationHandler((params) => ({
+    method: "tools/list",
+    params: optionalCursor(params) ?? {},
+  })),
+  "mcp.app.listResources": operationHandler((params) => ({
+    method: "resources/list",
+    params: optionalCursor(params) ?? {},
+  })),
+  "mcp.app.listResourceTemplates": operationHandler((params) => ({
+    method: "resources/templates/list",
+    params: optionalCursor(params) ?? {},
+  })),
+  "mcp.app.readResource": operationHandler((params) => ({
+    method: "resources/read",
+    params: { uri: requireString(params, "uri") },
+  })),
 };

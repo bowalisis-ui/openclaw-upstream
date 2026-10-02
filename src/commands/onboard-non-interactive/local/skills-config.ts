@@ -1,14 +1,7 @@
-/**
- * Skills install config mutation for local non-interactive onboarding.
- *
- * The only persisted setting here is the Node package manager used by skill
- * installs; validation stays close to the CLI option handling.
- */
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { RuntimeEnv } from "../../../runtime.js";
-import type { OnboardOptions } from "../../onboard-types.js";
+import { isNodeManagerChoice, type OnboardOptions } from "../../onboard-types.js";
 
-/** Applies the non-interactive skills install options to the pending config. */
 export function applyNonInteractiveSkillsConfig(params: {
   nextConfig: OpenClawConfig;
   opts: OnboardOptions;
@@ -21,8 +14,8 @@ export function applyNonInteractiveSkillsConfig(params: {
     return nextConfig;
   }
 
-  const nodeManager = opts.nodeManager ?? "npm";
-  if (!["npm", "pnpm", "bun"].includes(nodeManager)) {
+  const nodeManager = opts.nodeManager;
+  if (nodeManager !== undefined && !isNodeManagerChoice(nodeManager)) {
     runtime.error('Invalid --node-manager. Use "npm", "pnpm", or "bun".');
     runtime.exit(1);
     return nextConfig;
@@ -33,7 +26,7 @@ export function applyNonInteractiveSkillsConfig(params: {
       ...nextConfig.skills,
       install: {
         ...nextConfig.skills?.install,
-        nodeManager,
+        nodeManager: nodeManager ?? nextConfig.skills?.install?.nodeManager ?? "npm",
       },
     },
   };

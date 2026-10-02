@@ -2,7 +2,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-type MacOSDesktopCodexAppPathCandidate = {
+export type MacOSDesktopCodexAppPathCandidate = {
   appName: "ChatGPT.app" | "Codex.app";
   appBundlePath: string;
   appServerCommandPath: string;
@@ -10,35 +10,70 @@ type MacOSDesktopCodexAppPathCandidate = {
   computerUseServiceAppPaths: readonly string[];
 };
 
-const MACOS_DESKTOP_CODEX_APP_PATH_CANDIDATES: readonly MacOSDesktopCodexAppPathCandidate[] = [
+const MACOS_DESKTOP_CODEX_APP_PATH_CANDIDATES: readonly MacOSDesktopCodexAppPathCandidate[] = (
+  [
+    {
+      appName: "ChatGPT.app",
+      appBundlePath: "/Applications/ChatGPT.app",
+      appServerCommandPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
+      bundledMarketplacePath: "/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled",
+      computerUseServiceAppPaths: [
+        "/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app",
+        "/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app",
+      ],
+    },
+    {
+      appName: "Codex.app",
+      appBundlePath: "/Applications/Codex.app",
+      appServerCommandPath: "/Applications/Codex.app/Contents/Resources/codex",
+      bundledMarketplacePath: "/Applications/Codex.app/Contents/Resources/plugins/openai-bundled",
+      computerUseServiceAppPaths: [
+        "/Applications/Codex.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app",
+        "/Applications/Codex.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app",
+      ],
+    },
+  ] as const
+).flatMap((candidate) => [
   {
-    appName: "ChatGPT.app",
-    appBundlePath: "/Applications/ChatGPT.app",
-    appServerCommandPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
-    bundledMarketplacePath: "/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled",
-    computerUseServiceAppPaths: [
-      "/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app",
-      "/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app",
-    ],
+    ...candidate,
+    appServerCommandPath: path.join(
+      candidate.appBundlePath,
+      "Contents",
+      "Resources",
+      "codex-cli",
+      "CodexCLI.app",
+      "Contents",
+      "MacOS",
+      "codex",
+    ),
   },
-  {
-    appName: "Codex.app",
-    appBundlePath: "/Applications/Codex.app",
-    appServerCommandPath: "/Applications/Codex.app/Contents/Resources/codex",
-    bundledMarketplacePath: "/Applications/Codex.app/Contents/Resources/plugins/openai-bundled",
-    computerUseServiceAppPaths: [
-      "/Applications/Codex.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use/Codex Computer Use.app",
-      "/Applications/Codex.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app",
-    ],
-  },
-] as const;
+  candidate,
+]);
+
+export function resolveMacOSDesktopCodexAppPathCandidates(
+  platform: NodeJS.Platform = process.platform,
+): readonly MacOSDesktopCodexAppPathCandidate[] {
+  return platform === "darwin" ? MACOS_DESKTOP_CODEX_APP_PATH_CANDIDATES : [];
+}
+
+export function resolveMacOSDesktopCodexAppServerCommandCandidates(
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  return resolveMacOSDesktopCodexAppPathCandidates(platform).map(
+    (candidate) => candidate.appServerCommandPath,
+  );
+}
 
 export function resolveMacOSDesktopCodexBundledMarketplaceCandidates(
   platform: NodeJS.Platform = process.platform,
 ): string[] {
-  return platform === "darwin"
-    ? MACOS_DESKTOP_CODEX_APP_PATH_CANDIDATES.map((candidate) => candidate.bundledMarketplacePath)
-    : [];
+  return [
+    ...new Set(
+      resolveMacOSDesktopCodexAppPathCandidates(platform).map(
+        (candidate) => candidate.bundledMarketplacePath,
+      ),
+    ),
+  ];
 }
 
 export function resolveMacOSDesktopCodexComputerUseServiceAppCandidates(
@@ -48,20 +83,16 @@ export function resolveMacOSDesktopCodexComputerUseServiceAppCandidates(
   if (platform !== "darwin") {
     return [];
   }
+  const candidates = resolveMacOSDesktopCodexAppPathCandidates(platform);
   const matchingCandidate = appServerCommand
-    ? MACOS_DESKTOP_CODEX_APP_PATH_CANDIDATES.find(
+    ? candidates.find(
         (candidate) =>
           path.resolve(candidate.appServerCommandPath) === path.resolve(appServerCommand),
       )
     : undefined;
   const orderedCandidates = matchingCandidate
-    ? [
-        matchingCandidate,
-        ...MACOS_DESKTOP_CODEX_APP_PATH_CANDIDATES.filter(
-          (candidate) => candidate !== matchingCandidate,
-        ),
-      ]
-    : MACOS_DESKTOP_CODEX_APP_PATH_CANDIDATES;
+    ? [matchingCandidate, ...candidates.filter((candidate) => candidate !== matchingCandidate)]
+    : candidates;
   return [
     ...new Set(orderedCandidates.flatMap((candidate) => candidate.computerUseServiceAppPaths)),
   ];

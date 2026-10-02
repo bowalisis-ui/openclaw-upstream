@@ -14,6 +14,8 @@ import { formatHumanList } from "../shared/human-list.js";
 // Builds reply payloads for exec approval prompts and outcomes.
 import { formatFencedCodeBlock } from "../shared/markdown-code.js";
 import { formatApprovalDisplayPath } from "./approval-display-paths.js";
+import { summarizeApprovalScope, type ApprovalScope } from "./approval-scope.js";
+import type { ChannelApprovalKind } from "./approval-types.js";
 import {
   describeNativeExecApprovalClientSetup,
   listNativeExecApprovalClientLabels,
@@ -34,7 +36,7 @@ export type ExecApprovalUnavailableReason =
 export type ExecApprovalReplyMetadata = {
   approvalId: string;
   approvalSlug: string;
-  approvalKind: "exec" | "plugin";
+  approvalKind: ChannelApprovalKind;
   agentId?: string;
   allowedDecisions?: readonly ExecApprovalReplyDecision[];
   sessionKey?: string;
@@ -67,6 +69,7 @@ export type ExecApprovalPendingReplyParams = {
   cwd?: string;
   host: ExecHost;
   nodeId?: string;
+  scope?: ApprovalScope | null;
   sessionKey?: string | null;
   expiresAtMs?: number;
   nowMs?: number;
@@ -106,8 +109,8 @@ function buildGenericNativeExecApprovalFallbackText(params?: {
     manualRecovery += ` Inspect the node's effective exec policy with \`openclaw approvals get --node ${nodeId}\`.`;
   }
   return clients
-    ? `Approve it from the Web UI or terminal UI, or enable a native chat approval client such as ${clients}. ${manualRecovery} If those accounts already know your owner ID via allowFrom or owner config, OpenClaw can often infer approvers automatically.`
-    : `Approve it from the Web UI or terminal UI. ${manualRecovery}`;
+    ? `Approve it from the Web UI, or enable a native chat approval client such as ${clients}. ${manualRecovery} If those accounts already know your owner ID via allowFrom or owner config, OpenClaw can often infer approvers automatically.`
+    : `Approve it from the Web UI. ${manualRecovery}`;
 }
 
 function resolveAllowedDecisions(params: {
@@ -146,48 +149,22 @@ function buildApprovalActionDescriptors(
   approvalCommandId: string,
   allowedDecisions: readonly ExecApprovalReplyDecision[],
 ): ExecApprovalActionDescriptor[] {
-  const descriptors: ExecApprovalActionDescriptor[] = [];
-  const buildDescriptor = (descriptor: {
-    decision: ExecApprovalReplyDecision;
-    label: string;
-    style: ExecApprovalActionDescriptor["style"];
-  }): ExecApprovalActionDescriptor => {
-    return {
-      ...descriptor,
+  const decisions: Pick<ExecApprovalActionDescriptor, "decision" | "label" | "style">[] = [
+    { decision: "allow-once", label: "Allow Once", style: "success" },
+    { decision: "allow-always", label: "Allow Always", style: "primary" },
+    { decision: "deny", label: "Deny", style: "danger" },
+  ];
+  return decisions
+    .filter((descriptor) => allowedDecisions.includes(descriptor.decision))
+    .map((descriptor) => ({
+      decision: descriptor.decision,
+      label: descriptor.label,
+      style: descriptor.style,
       command: buildExecApprovalCommandText({
         approvalCommandId,
         decision: descriptor.decision,
       }),
-    };
-  };
-  if (allowedDecisions.includes("allow-once")) {
-    descriptors.push(
-      buildDescriptor({
-        decision: "allow-once",
-        label: "Allow Once",
-        style: "success",
-      }),
-    );
-  }
-  if (allowedDecisions.includes("allow-always")) {
-    descriptors.push(
-      buildDescriptor({
-        decision: "allow-always",
-        label: "Allow Always",
-        style: "primary",
-      }),
-    );
-  }
-  if (allowedDecisions.includes("deny")) {
-    descriptors.push(
-      buildDescriptor({
-        decision: "deny",
-        label: "Deny",
-        style: "danger",
-      }),
-    );
-  }
-  return descriptors;
+    }));
 }
 
 export function buildExecApprovalActionDescriptors(
@@ -202,7 +179,7 @@ export function buildExecApprovalActionDescriptors(
 /** Build approval descriptors with explicit owner-aware typed actions. */
 export function buildTypedApprovalActionDescriptors(
   params: BuildExecApprovalActionDescriptorsParams & {
-    approvalKind: "exec" | "plugin";
+    approvalKind: ChannelApprovalKind;
   },
 ): TypedApprovalActionDescriptor[] {
   const approvalId = params.approvalCommandId;
@@ -210,20 +187,18 @@ export function buildTypedApprovalActionDescriptors(
     return [];
   }
   return buildApprovalActionDescriptors(approvalId, resolveAllowedDecisions(params)).map(
-    (descriptor) => {
-      return {
+    (descriptor) => ({
+      decision: descriptor.decision,
+      label: descriptor.label,
+      style: descriptor.style,
+      command: descriptor.command,
+      action: {
+        type: "approval",
+        approvalId,
+        approvalKind: params.approvalKind,
         decision: descriptor.decision,
-        label: descriptor.label,
-        style: descriptor.style,
-        command: descriptor.command,
-        action: {
-          type: "approval",
-          approvalId,
-          approvalKind: params.approvalKind,
-          decision: descriptor.decision,
-        },
-      };
-    },
+      },
+    }),
   );
 }
 
@@ -272,7 +247,7 @@ export function buildApprovalButtonPresentation(
 
 /** Build portable approval controls with explicit owner-aware typed actions. */
 export function buildTypedApprovalPresentation(
-  params: BuildApprovalPresentationParams & { approvalKind: "exec" | "plugin" },
+  params: BuildApprovalPresentationParams & { approvalKind: ChannelApprovalKind },
 ): MessagePresentation | undefined {
   return buildApprovalPresentationFromActionDescriptors(
     buildTypedApprovalActionDescriptors({
@@ -372,7 +347,10 @@ export function getExecApprovalReplyMetadata(
   if (!approvalId || !approvalSlug) {
     return null;
   }
-  const approvalKind = record.approvalKind === "plugin" ? "plugin" : "exec";
+  const approvalKind =
+    record.approvalKind === "plugin" || record.approvalKind === "system-agent"
+      ? record.approvalKind
+      : "exec";
   const allowedDecisions = Array.isArray(record.allowedDecisions)
     ? record.allowedDecisions.filter(
         (value): value is ExecApprovalReplyDecision =>
@@ -430,6 +408,9 @@ export function buildExecApprovalPendingReplyPayload(
   if (params.cwd) {
     info.push(`CWD: ${formatApprovalDisplayPath(params.cwd)}`);
   }
+  if (params.scope) {
+    info.push(`Scope: ${summarizeApprovalScope(params.scope)}`);
+  }
   if (typeof params.expiresAtMs === "number" && Number.isFinite(params.expiresAtMs)) {
     info.push(
       `Expires in: ${formatExecApprovalExpiresIn(params.expiresAtMs, params.nowMs ?? Date.now())}`,
@@ -475,6 +456,11 @@ export function buildExecApprovalUnavailableReplyPayload(
   params: ExecApprovalUnavailableReplyParams,
 ): ReplyPayload {
   const lines: string[] = [];
+  const channelData = {
+    execApprovalUnavailable: {
+      reason: params.reason,
+    },
+  };
   const warningText = params.warningText?.trim();
   if (warningText) {
     lines.push(warningText);
@@ -484,6 +470,7 @@ export function buildExecApprovalUnavailableReplyPayload(
     lines.push(getExecApprovalApproverDmNoticeText());
     return {
       text: lines.join("\n\n"),
+      channelData,
     };
   }
 
@@ -535,5 +522,6 @@ export function buildExecApprovalUnavailableReplyPayload(
 
   return {
     text: lines.join("\n\n"),
+    channelData,
   };
 }

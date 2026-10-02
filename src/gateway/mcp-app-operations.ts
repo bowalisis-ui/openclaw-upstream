@@ -11,10 +11,10 @@ import {
   ReadResourceRequestSchema,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import {
-  completeDeferredSessionMcpRuntimeRetirement,
-  peekSessionMcpRuntime,
-} from "../agents/agent-bundle-mcp-runtime.js";
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { peekSessionMcpRuntime } from "../agents/agent-bundle-mcp-manager-api.js";
+import { completeDeferredSessionMcpRuntimeRetirement } from "../agents/agent-bundle-mcp-manager-cleanup.js";
+import { getSessionMcpRequestSignal } from "../agents/agent-bundle-mcp-request-context.js";
 import type { McpCatalogTool, SessionMcpRuntime } from "../agents/agent-bundle-mcp-types.js";
 import {
   acquireMcpAppViewRequest,
@@ -23,8 +23,10 @@ import {
   type McpAppViewLease,
 } from "../agents/mcp-ui-resource.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { logWarn } from "../logger.js";
+import { parseAgentSessionKey } from "../routing/session-key.js";
 import { restoreMcpAppView } from "./mcp-app-reconstruction.js";
 
 export type McpAppActiveView = {
@@ -46,26 +48,17 @@ export type McpAppOperation =
   | Pick<ListResourceTemplatesRequest, "method" | "params">
   | Pick<ReadResourceRequest, "method" | "params">;
 
-function isAppCallableTool(tool: McpCatalogTool): boolean {
-  return tool.uiVisibility === undefined || tool.uiVisibility.includes("app");
+function isAppCallableTool(view: McpAppViewLease, tool: McpCatalogTool): boolean {
+  return (
+    tool.serverName === view.serverName &&
+    (tool.uiVisibility === undefined || tool.uiVisibility.includes("app")) &&
+    (view.allowedAppToolNames === undefined || view.allowedAppToolNames.has(tool.toolName))
+  );
 }
 
 function isAppCallableListedTool(tool: Tool): boolean {
-  const { _meta: metadata } = tool;
-  const ui =
-    metadata?.ui && typeof metadata.ui === "object" && !Array.isArray(metadata.ui)
-      ? (metadata.ui as { visibility?: unknown })
-      : undefined;
-  const visibility = Array.isArray(ui?.visibility)
-    ? ui.visibility.filter(
-        (entry): entry is "app" | "model" => entry === "app" || entry === "model",
-      )
-    : undefined;
-  return visibility === undefined || visibility.includes("app");
-}
-
-function isAllowedByView(view: McpAppViewLease, toolName: string): boolean {
-  return view.allowedAppToolNames === undefined || view.allowedAppToolNames.has(toolName);
+  const visibility = asOptionalRecord(tool._meta?.ui)?.visibility;
+  return !Array.isArray(visibility) || visibility.includes("app");
 }
 
 export async function requireMcpAppInteraction(view: McpAppViewLease): Promise<void> {
@@ -83,15 +76,17 @@ export async function resolveMcpAppAllowedToolNames(active: McpAppActiveView): P
   }
   const catalog = await active.runtime.getCatalog();
   return catalog.tools
-    .filter(
-      (tool) =>
-        tool.serverName === active.view.serverName &&
-        isAppCallableTool(tool) &&
-        isAllowedByView(active.view, tool.toolName),
-    )
+    .filter((tool) => isAppCallableTool(active.view, tool))
     .map((tool) => tool.toolName)
     .filter((toolName, index, all) => all.indexOf(toolName) === index)
     .toSorted();
+}
+
+async function getRequestCatalog(runtime: SessionMcpRuntime) {
+  const signal = getSessionMcpRequestSignal();
+  signal?.throwIfAborted();
+  // A caller can leave the wait, but the session still owns its shared refresh.
+  return racePromiseWithAbortSignal(runtime.getCatalog(), signal);
 }
 
 async function requireCallableTool(
@@ -100,31 +95,39 @@ async function requireCallableTool(
   toolName: string,
 ): Promise<void> {
   await requireMcpAppInteraction(view);
-  const catalog = await runtime.getCatalog();
+  const catalog = await getRequestCatalog(runtime);
   const tool = catalog.tools.find(
     (entry) => entry.serverName === view.serverName && entry.toolName === toolName,
   );
-  if (!tool || !isAppCallableTool(tool) || !isAllowedByView(view, toolName)) {
+  if (!tool || !isAppCallableTool(view, tool)) {
     throw new Error(`MCP tool "${toolName}" is not app-callable`);
   }
 }
 
 export async function resolveMcpAppActiveView(params: {
   sessionKey: string;
+  agentId?: string;
   viewId: string;
   cfg?: OpenClawConfig;
 }): Promise<McpAppActiveView> {
   if (params.cfg && params.cfg.mcp?.apps?.enabled !== true) {
     throw new Error("MCP App runtime is unavailable");
   }
-  const liveView = getMcpAppViewLeaseForSession(params.viewId, params.sessionKey);
+  const liveView = params.agentId
+    ? getMcpAppViewLeaseForSession(params.viewId, params.sessionKey, params.agentId)
+    : undefined;
   if (liveView) {
     if (liveView.runtime.mcpAppsEnabled !== true) {
       throw new Error("MCP App runtime is unavailable");
     }
     return { runtime: liveView.runtime, view: liveView };
   }
-  const existingRuntime = peekSessionMcpRuntime({ sessionKey: params.sessionKey });
+  // An unscoped runtime key cannot prove its owning agent. Prefer transcript
+  // restoration with the prepared owner instead of adopting a sibling runtime.
+  const existingRuntime =
+    params.agentId && !parseAgentSessionKey(params.sessionKey)
+      ? undefined
+      : peekSessionMcpRuntime({ sessionKey: params.sessionKey });
   if (existingRuntime && existingRuntime.mcpAppsEnabled !== true) {
     throw new Error("MCP App runtime is unavailable");
   }
@@ -137,6 +140,7 @@ export async function resolveMcpAppActiveView(params: {
       : params.cfg
         ? await restoreMcpAppView({
             cfg: params.cfg,
+            agentId: params.agentId,
             sessionKey: params.sessionKey,
             viewId: params.viewId,
           })
@@ -168,24 +172,39 @@ export async function withMcpAppActiveView<T>(
   }
 }
 
+async function withMcpAppReadAuthority<T>(
+  active: McpAppActiveView,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return await withMcpAppActiveView(active, "read", async () => {
+    await requireMcpAppInteraction(active.view);
+    const result = await operation();
+    // Read results may contain protected data. Recheck after upstream work
+    // so a grant revoked in flight cannot disclose the completed response.
+    await requireMcpAppInteraction(active.view);
+    return result;
+  });
+}
+
 export async function executeMcpAppOperation(
   active: McpAppActiveView,
   operation: McpAppOperation,
 ): Promise<unknown> {
   const { runtime, view } = active;
-  switch (operation.method) {
-    case "tools/call":
-      return await withMcpAppActiveView(active, "tool", async () => {
-        await requireCallableTool(runtime, view, operation.params.name);
-        return await runtime.callTool(
-          view.serverName,
-          operation.params.name,
-          operation.params.arguments ?? {},
-        );
-      });
-    case "tools/list":
-      return await withMcpAppActiveView(active, "read", async () => {
-        await requireMcpAppInteraction(view);
+  if (operation.method === "tools/call") {
+    return await withMcpAppActiveView(active, "tool", async () => {
+      await requireCallableTool(runtime, view, operation.params.name);
+      await requireMcpAppInteraction(view);
+      return await runtime.callTool(
+        view.serverName,
+        operation.params.name,
+        operation.params.arguments ?? {},
+      );
+    });
+  }
+  return await withMcpAppReadAuthority(active, async () => {
+    switch (operation.method) {
+      case "tools/list": {
         if (!runtime.listTools) {
           throw new Error("MCP tools/list is unavailable");
         }
@@ -194,16 +213,11 @@ export async function executeMcpAppOperation(
             view.serverName,
             operation.params?.cursor ? { cursor: operation.params.cursor } : undefined,
           ),
-          runtime.getCatalog(),
+          getRequestCatalog(runtime),
         ]);
         const allowed = new Set(
           catalog.tools
-            .filter(
-              (tool) =>
-                tool.serverName === view.serverName &&
-                isAppCallableTool(tool) &&
-                isAllowedByView(view, tool.toolName),
-            )
+            .filter((tool) => isAppCallableTool(view, tool))
             .map((tool) => tool.toolName),
         );
         return {
@@ -212,9 +226,8 @@ export async function executeMcpAppOperation(
             (tool) => allowed.has(tool.name.trim()) && isAppCallableListedTool(tool),
           ),
         };
-      });
-    case "resources/list":
-      return await withMcpAppActiveView(active, "read", async () => {
+      }
+      case "resources/list": {
         if (!runtime.listResources) {
           throw new Error("MCP resources/list is unavailable");
         }
@@ -222,9 +235,8 @@ export async function executeMcpAppOperation(
         // callers receive the complete list and no nextCursor is exposed.
         const resources = await runtime.listResources(view.serverName);
         return Array.isArray(resources) ? { resources } : resources;
-      });
-    case "resources/templates/list":
-      return await withMcpAppActiveView(active, "read", async () => {
+      }
+      case "resources/templates/list":
         if (!runtime.listResourceTemplates) {
           throw new Error("MCP resources/templates/list is unavailable");
         }
@@ -232,26 +244,21 @@ export async function executeMcpAppOperation(
           view.serverName,
           operation.params?.cursor ? { cursor: operation.params.cursor } : undefined,
         );
-      });
-    case "resources/read":
-      return await withMcpAppActiveView(active, "read", async () => {
+      case "resources/read":
         if (!runtime.readResource) {
           throw new Error("MCP resources/read is unavailable");
         }
         return await runtime.readResource(view.serverName, operation.params.uri);
-      });
-    default: {
-      const unsupported: never = operation;
-      throw new Error(`Unsupported MCP App operation: ${String(unsupported)}`);
+      default: {
+        const unsupported: never = operation;
+        throw new Error(`Unsupported MCP App operation: ${String(unsupported)}`);
+      }
     }
-  }
+  });
 }
 
 export function parseMcpAppOperation(value: unknown): McpAppOperation | undefined {
-  const method =
-    value && typeof value === "object" && !Array.isArray(value)
-      ? (value as { method?: unknown }).method
-      : undefined;
+  const method = asOptionalRecord(value)?.method;
   const schema =
     method === "tools/call"
       ? CallToolRequestSchema

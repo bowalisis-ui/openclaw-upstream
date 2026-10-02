@@ -1,10 +1,12 @@
+import { listModelRefsFromConfigValue } from "@openclaw/model-catalog-core/configured-model-refs";
 // Doctor checks for context engine host requirements against configured agent runtimes.
 import { parseModelCatalogRef } from "@openclaw/model-catalog-core/model-catalog-refs";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { normalizeEmbeddedAgentRuntime } from "../../../agents/agent-runtime-id.js";
 import {
   listAgentEntriesWithSource,
-  resolveDefaultAgentDir,
+  resolveAgentDir,
+  resolveAmbientOwnerAgentId,
 } from "../../../agents/agent-scope-config.js";
 import { resolveCliBackendConfig } from "../../../agents/cli-backends.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../../../agents/defaults.js";
@@ -23,8 +25,8 @@ import {
   getContextEngineRegistration,
   resolveContextEngine,
 } from "../../../context-engine/registry.js";
-import type { ContextEngineInfo } from "../../../context-engine/types.js";
-import { loadPluginRegistryHandle } from "../../../plugins/loader.js";
+import type { ContextEngine, ContextEngineInfo } from "../../../context-engine/types.js";
+import { acquirePluginRegistryForInspection } from "../../../plugins/loader.js";
 import type { PluginRegistry } from "../../../plugins/registry-types.js";
 import { withPluginRuntimeRegistryScope } from "../../../plugins/runtime/gateway-request-scope.js";
 import { defaultSlotIdForKey } from "../../../plugins/slots.js";
@@ -59,27 +61,6 @@ function normalizeRuntimeId(value: unknown): string | undefined {
 
 function parseModelRef(value: unknown): { provider: string; modelId: string } | undefined {
   return typeof value === "string" ? (parseModelCatalogRef(value) ?? undefined) : undefined;
-}
-
-function listModelRefs(value: unknown): string[] {
-  if (typeof value === "string" && value.trim()) {
-    return [value.trim()];
-  }
-  if (!isRecord(value)) {
-    return [];
-  }
-  const refs: string[] = [];
-  if (typeof value.primary === "string" && value.primary.trim()) {
-    refs.push(value.primary.trim());
-  }
-  if (Array.isArray(value.fallbacks)) {
-    for (const fallback of value.fallbacks) {
-      if (typeof fallback === "string" && fallback.trim()) {
-        refs.push(fallback.trim());
-      }
-    }
-  }
-  return refs;
 }
 
 function collectExplicitRuntimeRefs(
@@ -123,8 +104,11 @@ function collectSelectedModelRefs(
 ): Array<{ modelRef: string; path: string; agentId?: string }> {
   const refs: Array<{ modelRef: string; path: string; agentId?: string }> = [];
   const pushModel = (value: unknown, path: string, agentId?: string) => {
-    for (const modelRef of listModelRefs(value)) {
-      refs.push({ modelRef, path, ...(agentId ? { agentId } : {}) });
+    for (const ref of listModelRefsFromConfigValue(value)) {
+      const modelRef = ref.trim();
+      if (modelRef) {
+        refs.push({ modelRef, path, ...(agentId ? { agentId } : {}) });
+      }
     }
   };
   const pushModelMap = (models: unknown, path: string, agentId?: string) => {
@@ -249,45 +233,90 @@ async function resolveSelectedContextEngineInfo(params: {
     return { info: { id: engineId, name: engineId }, warnings: [] };
   }
 
-  ensureContextEnginesInitialized();
+  const initializeDuringResolution =
+    getContextEngineRegistration(engineId)?.lifecycle === "runtime";
+  if (!initializeDuringResolution) {
+    await ensureContextEnginesInitialized();
+  }
   let pluginRegistry: PluginRegistry | undefined;
-  if (getContextEngineRegistration(engineId)?.lifecycle !== "runtime") {
-    try {
-      pluginRegistry = loadPluginRegistryHandle({
-        config: params.cfg,
-        env: params.env,
-        onlyPluginIds: [engineId],
-      });
-    } catch (error) {
-      if (pluginRegistry?.contextEngines.get(engineId)?.lifecycle !== "runtime") {
+  let inspection: Awaited<ReturnType<typeof acquirePluginRegistryForInspection>> | undefined;
+  let engine: ContextEngine | undefined;
+  let outcome: { ok: true; result: ContextEngineInfoResult } | { ok: false; error: unknown };
+  try {
+    let inspectionWarning: string | undefined;
+    if (getContextEngineRegistration(engineId)?.lifecycle !== "runtime") {
+      try {
+        inspection = await acquirePluginRegistryForInspection({
+          config: params.cfg,
+          env: params.env,
+          onlyPluginIds: [engineId],
+        });
+        pluginRegistry = inspection.registry;
+      } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return {
-          warnings: [
-            `- plugins.slots.contextEngine: could not inspect context engine "${engineId}" host requirements because its plugin failed to load: ${message}`,
-          ],
-        };
+        inspectionWarning = `- plugins.slots.contextEngine: could not inspect context engine "${engineId}" host requirements because its plugin failed to load: ${message}`;
+      }
+      if (pluginRegistry) {
+        const registration = pluginRegistry.contextEngines.get(engineId);
+        if (registration?.lifecycle === "readOnlyDiscovery") {
+          inspectionWarning = `- plugins.slots.contextEngine: context engine "${engineId}" is registered for read-only discovery; offline host compatibility inspection is unavailable. This does not indicate a missing runtime registration in the Gateway.`;
+        } else if (registration?.lifecycle !== "runtime") {
+          inspectionWarning = `- plugins.slots.contextEngine: could not inspect context engine "${engineId}" host requirements because it is not registered.`;
+        }
       }
     }
-    if (pluginRegistry?.contextEngines.get(engineId)?.lifecycle !== "runtime") {
-      return {
-        warnings: [
-          `- plugins.slots.contextEngine: could not inspect context engine "${engineId}" host requirements because it is not registered.`,
-        ],
+    if (inspectionWarning) {
+      outcome = { ok: true, result: { warnings: [inspectionWarning] } };
+    } else {
+      const agentId = resolveAmbientOwnerAgentId(params.cfg, undefined, {
+        surface: "context-engine Doctor checks",
+        hint: "Set agents.defaults.systemAgent.agentId before running Doctor.",
+      });
+      const resolve = () =>
+        resolveContextEngine(params.cfg, {
+          initialize: initializeDuringResolution ? ensureContextEnginesInitialized : undefined,
+          agentDir: resolveAgentDir(params.cfg, agentId, params.env),
+          workspaceDir: params.cfg.agents?.defaults?.workspace
+            ? resolveUserPath(params.cfg.agents.defaults.workspace, params.env)
+            : undefined,
+        });
+      engine = await withPluginRuntimeRegistryScope(pluginRegistry, resolve);
+      const info = engine.info;
+      const requirements = info.hostRequirements?.["agent-run"];
+      outcome = {
+        ok: true,
+        result: {
+          info: {
+            id: info.id,
+            name: info.name,
+            hostRequirements: requirements
+              ? {
+                  "agent-run": {
+                    requiredCapabilities: [...requirements.requiredCapabilities],
+                    unsupportedMessage: requirements.unsupportedMessage,
+                  },
+                }
+              : undefined,
+          },
+          warnings: [],
+        },
       };
     }
-  }
-
-  try {
-    const resolve = () =>
-      resolveContextEngine(params.cfg, {
-        agentDir: resolveDefaultAgentDir(params.cfg, params.env),
-        workspaceDir: params.cfg.agents?.defaults?.workspace
-          ? resolveUserPath(params.cfg.agents.defaults.workspace, params.env)
-          : undefined,
-      });
-    const engine = await withPluginRuntimeRegistryScope(pluginRegistry, resolve);
-    return { info: engine.info, warnings: [] };
   } catch (error) {
+    outcome = { ok: false, error };
+  }
+  // The engine's final work must finish before its inspection can retire.
+  for (const cleanup of [() => engine?.dispose?.(), () => inspection?.release()]) {
+    try {
+      await cleanup();
+    } catch (error) {
+      if (outcome.ok) {
+        outcome = { ok: false, error };
+      }
+    }
+  }
+  if (!outcome.ok) {
+    const { error } = outcome;
     const message = error instanceof Error ? error.message : String(error);
     return {
       warnings: [
@@ -295,6 +324,7 @@ async function resolveSelectedContextEngineInfo(params: {
       ],
     };
   }
+  return outcome.result;
 }
 
 function collectHostCompatibilityIssues(params: {
@@ -354,7 +384,7 @@ function formatCompatibilityWarnings(params: {
   const incompatibleAllHosts = params.issues.length === params.hostCount;
   lines.push(
     incompatibleAllHosts
-      ? `- Run "${params.doctorFixCommand}" to switch plugins.slots.contextEngine to "legacy", or configure a compatible runtime/harness for agent runs.`
+      ? `- Run "${params.doctorFixCommand}" to remove the plugins.slots.contextEngine override and restore the default "legacy", or configure a compatible runtime/harness for agent runs.`
       : `- Some configured runtimes support context engine "${params.info.id}" and others do not; doctor will not rewrite the global contextEngine slot automatically. Configure unsupported models to use a compatible runtime/harness or set plugins.slots.contextEngine to "legacy".`,
   );
   return [lines.join("\n")];
@@ -411,13 +441,17 @@ export async function maybeRepairContextEngineHostCompatibility(params: {
   }
 
   const next = structuredClone(params.cfg);
-  next.plugins ??= {};
-  next.plugins.slots ??= {};
-  next.plugins.slots.contextEngine = defaultSlotIdForKey("contextEngine");
+  const slots = next.plugins?.slots;
+  if (slots) {
+    delete slots.contextEngine;
+    if (Object.keys(slots).length === 0) {
+      delete next.plugins?.slots;
+    }
+  }
   return {
     config: next,
     changes: [
-      `Set plugins.slots.contextEngine to "legacy" because context engine "${resolved.info.id}" is incompatible with every configured agent-run host.`,
+      `Reset plugins.slots.contextEngine to the default "legacy" because context engine "${resolved.info.id}" is incompatible with every configured agent-run host.`,
     ],
     warnings: resolved.warnings,
   };

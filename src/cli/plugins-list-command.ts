@@ -18,26 +18,6 @@ function toPluginListJsonRecord(plugin: PluginRecord): Omit<PluginRecord, "agent
   return record;
 }
 
-async function loadHumanListModules() {
-  const [sourceDisplay, table, themeModule, commandFormat, listFormat] = await Promise.all([
-    import("../plugins/source-display.js"),
-    import("../../packages/terminal-core/src/table.js"),
-    import("../../packages/terminal-core/src/theme.js"),
-    import("./command-format.js"),
-    import("./plugins-list-format.js"),
-  ]);
-
-  return {
-    formatPluginLine: listFormat.formatPluginLine,
-    formatPluginSourceForTable: sourceDisplay.formatPluginSourceForTable,
-    formatCliCommand: commandFormat.formatCliCommand,
-    getTerminalTableWidth: table.getTerminalTableWidth,
-    renderTable: table.renderTable,
-    resolvePluginSourceRoots: sourceDisplay.resolvePluginSourceRoots,
-    theme: themeModule.theme,
-  };
-}
-
 /** Render installed plugin discovery state as JSON, compact table, or verbose text. */
 export async function runPluginsListCommand(
   opts: PluginsListOptions,
@@ -55,6 +35,7 @@ export async function runPluginsListCommand(
   if (opts.json) {
     const payload = {
       workspaceDir: report.workspaceDir,
+      workspaceScope: report.workspaceScope,
       registry: {
         source: report.registrySource,
         diagnostics: report.registryDiagnostics,
@@ -66,15 +47,33 @@ export async function runPluginsListCommand(
     return;
   }
 
-  const {
-    formatCliCommand,
-    formatPluginLine,
-    formatPluginSourceForTable,
-    getTerminalTableWidth,
-    renderTable,
-    resolvePluginSourceRoots,
-    theme,
-  } = await loadHumanListModules();
+  const [
+    { formatPluginSourceForTable, resolvePluginSourceRoots },
+    { getTerminalTableWidth, renderTable },
+    { theme },
+    { formatCliCommand },
+    { formatPluginLine, formatPluginStatus },
+  ] = await Promise.all([
+    import("../plugins/source-display.js"),
+    import("../../packages/terminal-core/src/table.js"),
+    import("../../packages/terminal-core/src/theme.js"),
+    import("./command-format.js"),
+    import("./plugins-list-format.js"),
+  ]);
+
+  const diagnostics = [...report.diagnostics, ...report.registryDiagnostics].filter(
+    (diagnostic) =>
+      diagnostic.level !== "info" &&
+      (diagnostic.level !== "error" ||
+        !list.some((plugin) => plugin.status === "error" && plugin.error === diagnostic.message)),
+  );
+  for (const { level, message } of diagnostics) {
+    const format = level === "error" ? theme.error : theme.warn;
+    runtime.log(format(`${level === "error" ? "Error" : "Warning"}: ${message}`));
+  }
+  if (diagnostics.length > 0) {
+    runtime.log("");
+  }
 
   if (list.length === 0) {
     const message =
@@ -89,7 +88,7 @@ export async function runPluginsListCommand(
     return;
   }
 
-  const enabled = list.filter((p) => p.enabled).length;
+  const enabled = list.reduce((count, plugin) => count + (plugin.enabled ? 1 : 0), 0);
   runtime.log(`${theme.heading("Plugins")} ${theme.muted(`(${enabled}/${list.length} enabled)`)}`);
 
   if (!opts.verbose) {
@@ -99,23 +98,18 @@ export async function runPluginsListCommand(
     });
     const usedRoots = new Set<keyof typeof sourceRoots>();
     const rows = list.map((plugin) => {
-      const desc = plugin.description ? theme.muted(plugin.description) : "";
+      const error = plugin.status === "error" && plugin.error;
+      const desc = error ? theme.error(error) : theme.muted(plugin.description ?? "");
       const formattedSource = formatPluginSourceForTable(plugin, sourceRoots);
       if (formattedSource.rootKey) {
         usedRoots.add(formattedSource.rootKey);
       }
-      const sourceLine = desc ? `${formattedSource.value}\n${desc}` : formattedSource.value;
       return {
         Name: plugin.name || plugin.id,
         ID: plugin.name && plugin.name !== plugin.id ? plugin.id : "",
         Format: plugin.format ?? "openclaw",
-        Status:
-          plugin.status === "error"
-            ? theme.error("error")
-            : plugin.enabled
-              ? theme.success("enabled")
-              : theme.warn("disabled"),
-        Source: sourceLine,
+        Status: formatPluginStatus(plugin),
+        Source: desc ? `${formattedSource.value}\n${desc}` : formattedSource.value,
         Version: plugin.version ?? "",
       };
     });
@@ -152,10 +146,5 @@ export async function runPluginsListCommand(
     return;
   }
 
-  const lines: string[] = [];
-  for (const plugin of list) {
-    lines.push(formatPluginLine(plugin, true));
-    lines.push("");
-  }
-  runtime.log(lines.join("\n").trim());
+  runtime.log(list.map(formatPluginLine).join("\n\n").trim());
 }

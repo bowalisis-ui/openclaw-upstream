@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { flushDiagnosticsTimeline } from "../infra/diagnostics-timeline.js";
 import { createGatewayDispatchStartupTrace } from "./startup-trace.js";
 
 function readTimelineEvents(timelinePath: string): Record<string, unknown>[] {
+  flushDiagnosticsTimeline();
   return fs
     .readFileSync(timelinePath, "utf8")
     .trim()
@@ -15,8 +17,52 @@ function readTimelineEvents(timelinePath: string): Record<string, unknown>[] {
 
 describe("CLI startup trace", () => {
   afterEach(() => {
+    flushDiagnosticsTimeline();
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
+
+  it.each([
+    { gateway: false, markers: 2 },
+    { gateway: true, markers: 0 },
+    { gateway: true, markers: 1 },
+    { gateway: true, markers: 2 },
+    { gateway: true, markers: 3 },
+  ])(
+    "reports CLI milestones only to a supporting updater ($gateway, $markers)",
+    async ({ gateway, markers }) => {
+      vi.stubEnv("OPENCLAW_GATEWAY_STARTUP_TRACE", "0");
+      const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+      const trace = createGatewayDispatchStartupTrace(
+        [
+          "node",
+          "openclaw",
+          ...(gateway ? ["gateway", "run"] : ["agent"]),
+          ...Array.from({ length: markers }, () => "--update-canary"),
+        ],
+        "cli.main",
+      );
+      trace.mark("argv");
+      trace.mark("tick.1");
+      await trace.measure("gateway-run-imports.tick.2", async () => {});
+      await expect(trace.measure("gateway-run-imports", async () => "loaded")).resolves.toBe(
+        "loaded",
+      );
+      await expect(
+        trace.measure("gateway-run-bootstrap", async () => {
+          throw new Error("bootstrap failed");
+        }),
+      ).rejects.toThrow("bootstrap failed");
+      expect(stderr.mock.calls.map(([line]) => String(line))).toEqual(
+        gateway && markers >= 2
+          ? [
+              "openclaw-update-canary-progress: cli.main.argv\n",
+              "openclaw-update-canary-progress: cli.main.gateway-run-imports\n",
+            ]
+          : [],
+      );
+    },
+  );
 
   it("records entry marks and measured spans in the diagnostics timeline", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-startup-trace-"));

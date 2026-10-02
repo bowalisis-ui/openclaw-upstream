@@ -5,9 +5,16 @@
  */
 import type { TerminationReason } from "../process/supervisor/types.js";
 
-const EXEC_NO_OUTPUT_PLACEHOLDER = "(no output)";
+export const EXEC_NO_OUTPUT_PLACEHOLDER = "(no output)";
+// Keep launch and later process observations consistent without naming an aliased tool.
+export const EXEC_MANUAL_COLLECTION_FOLLOW_UP =
+  "Automatic completion wake is disabled (tools.exec.notifyOnExit=false). If the task needs this result, use poll with a timeout to collect it before ending the turn, unless another continuation is already arranged.";
 const EXEC_TIMEOUT_RETRY_GUIDANCE =
   "The command was terminated, but external side effects may already have completed. Verify the resulting state before retrying. Do not automatically rerun non-idempotent commands. Use a higher timeout only when the command is known to be safe to retry.";
+
+// Irreversible loss leads model-visible output so later head-preserving caps retain it.
+export const EXEC_RETENTION_CAP_NOTE =
+  "[earlier output was discarded at the retention cap and cannot be recovered]\n\n";
 
 /** Render command output with a stable placeholder for empty output. */
 export function renderExecOutputText(value: string | undefined): string {

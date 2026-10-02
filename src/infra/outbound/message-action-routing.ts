@@ -5,6 +5,7 @@ import {
 import { readToolStringParam } from "../../agents/tools/common.js";
 import { normalizeChatType, type ChatType } from "../../channels/chat-type.js";
 import { normalizeConversationReadInvocationOrigin } from "../../channels/plugins/conversation-read-origin.js";
+import { resolveChannelDefaultAccountId } from "../../channels/plugins/helpers.js";
 import {
   prepareExternalMessageActionTargetForResolution,
   shouldDeferExternalMessageActionTargetResolution,
@@ -29,6 +30,10 @@ import {
 import { hasPotentialPluginActionParam } from "./message-action-param-keys.js";
 import { actionRequiresTarget } from "./message-action-spec.js";
 import { enforceCrossContextPolicy } from "./outbound-policy.js";
+import {
+  invalidMessageActionTargetError,
+  missingMessageActionTargetError,
+} from "./target-errors.js";
 import { normalizeTargetForProvider } from "./target-normalization.js";
 import { resolveChannelTarget, type ResolvedMessagingTarget } from "./target-resolver.js";
 
@@ -37,6 +42,7 @@ async function resolveChannel(
   params: Record<string, unknown>,
   toolContext?: { currentChannelProvider?: string },
   action?: ChannelMessageActionName,
+  agentId?: string,
 ) {
   const channel = readToolStringParam(params, "channel");
   // Explicit reads must never switch to the source conversation when their
@@ -47,31 +53,12 @@ async function resolveChannel(
     cfg,
     channel,
     fallbackChannel,
+    agentId,
   });
   if (selection.source === "tool-context-fallback") {
     params.channel = selection.channel;
   }
   return selection;
-}
-
-function enforceCrossProviderEgressPolicyBeforeTargetResolution(params: {
-  channel: ChannelId;
-  action: ChannelMessageActionName;
-  args: Record<string, unknown>;
-  toolContext?: ChannelThreadingToolContext;
-  cfg: OpenClawConfig;
-  agentId?: string | null;
-}): void {
-  const currentProvider = params.toolContext?.currentChannelProvider;
-  if (!currentProvider || currentProvider === params.channel) {
-    return;
-  }
-  // Cross-context egress policy applies to direct and delegated callers alike;
-  // direct origin bypasses only the conversation-read visibility gate. A
-  // provider mismatch needs no target interpretation, so reject it before an
-  // external resolver can perform provider I/O. Same-provider aliases still
-  // wait for canonicalization before the full policy check below.
-  enforceCrossContextPolicy(params);
 }
 
 function addCandidateAndUnprefixedAlias(candidates: Set<string>, value?: string | null) {
@@ -126,8 +113,7 @@ function resolveTargetBoundAccountId(params: {
   if (!params.agentId) {
     return undefined;
   }
-  const target =
-    normalizeOptionalString(params.args.to) ?? normalizeOptionalString(params.args.channelId) ?? "";
+  const target = readTrimmedStringAlias(params.args, ["to", "channelId"]);
   if (!target) {
     return resolveFirstBoundAccountId({
       cfg: params.cfg,
@@ -156,9 +142,9 @@ function resolveTargetBoundAccountId(params: {
 async function resolveActionTarget(params: {
   cfg: OpenClawConfig;
   channel: ChannelId;
-  action: ChannelMessageActionName;
   args: Record<string, unknown>;
   accountId?: string | null;
+  plugin?: ChannelPlugin;
 }): Promise<ResolvedMessagingTarget | undefined> {
   let resolvedTarget: ResolvedMessagingTarget | undefined;
   const toRaw = normalizeOptionalString(params.args.to) ?? "";
@@ -168,6 +154,7 @@ async function resolveActionTarget(params: {
       channel: params.channel,
       input: toRaw,
       accountId: params.accountId ?? undefined,
+      plugin: params.plugin,
     });
     params.args.to = resolved.to;
     resolvedTarget = resolved;
@@ -179,19 +166,17 @@ async function resolveActionTarget(params: {
       channel: params.channel,
       input: channelIdRaw,
       accountId: params.accountId ?? undefined,
+      plugin: params.plugin,
       preferredKind: "group",
-      validateResolvedTarget: (target) =>
-        target.kind === "user"
-          ? `Channel id "${channelIdRaw}" resolved to a user target.`
-          : undefined,
     });
-    params.args.channelId = sanitizeGroupTargetId(resolved.to);
+    if (resolved.kind === "user") {
+      throw invalidMessageActionTargetError(
+        `Channel id "${channelIdRaw}" resolved to a user target.`,
+      );
+    }
+    params.args.channelId = resolved.to.replace(/^(channel|group):/i, "");
   }
   return resolvedTarget;
-}
-
-function sanitizeGroupTargetId(target: string): string {
-  return target.replace(/^(channel|group):/i, "");
 }
 
 async function resolveResolvedTargetOrThrow(params: {
@@ -199,8 +184,8 @@ async function resolveResolvedTargetOrThrow(params: {
   channel: ChannelId;
   input: string;
   accountId?: string;
+  plugin?: ChannelPlugin;
   preferredKind?: "group" | "user" | "channel";
-  validateResolvedTarget?: (target: ResolvedMessagingTarget) => string | undefined;
 }): Promise<ResolvedMessagingTarget> {
   const resolved = await resolveChannelTarget({
     cfg: params.cfg,
@@ -208,13 +193,10 @@ async function resolveResolvedTargetOrThrow(params: {
     input: params.input,
     accountId: params.accountId,
     preferredKind: params.preferredKind,
+    plugin: params.plugin,
   });
   if (!resolved.ok) {
     throw resolved.error;
-  }
-  const validationError = params.validateResolvedTarget?.(resolved.target);
-  if (validationError) {
-    throw new Error(validationError);
   }
   return resolved.target;
 }
@@ -259,10 +241,7 @@ function isCurrentSourceTargetParam(
     return false;
   }
 
-  const explicitTarget =
-    normalizeOptionalString(params.target) ??
-    normalizeOptionalString(params.to) ??
-    normalizeOptionalString(params.channelId);
+  const explicitTarget = readTrimmedStringAlias(params, ["target", "to", "channelId"]);
   if (!explicitTarget) {
     return false;
   }
@@ -330,6 +309,8 @@ type PreparedMessageRoute = {
   accountId?: string | null;
   dryRun: boolean;
   defersExternalTargetResolution: boolean;
+  assertReadAuthorityCurrent?: () => void;
+  assertTargetAuthorityCurrent?: () => void;
 };
 
 export async function prepareMessageRoute(params: {
@@ -346,13 +327,13 @@ export async function prepareMessageRoute(params: {
   // Missing targets must fail before channel discovery, which can bootstrap or
   // probe configured plugins. Non-standard params may still be owner aliases.
   if (actionRequiresTarget(action) && !hasPotentialActionTargetInput(input, actionParams)) {
-    throw new Error(`Action ${action} requires a target.`);
+    throw missingMessageActionTargetError(action);
   }
 
-  const selection = await resolveChannel(cfg, actionParams, input.toolContext, action);
+  const selection = await resolveChannel(cfg, actionParams, input.toolContext, action, agentId);
   const { channel, plugin: channelPlugin } = selection;
   actionParams.channel = channel;
-  const explicitAccountId = validateExplicitMessageAccountSelection({
+  const explicitAccountId = await validateExplicitMessageAccountSelection({
     cfg,
     channel,
     accountId: readToolStringParam(actionParams, "accountId"),
@@ -370,7 +351,7 @@ export async function prepareMessageRoute(params: {
     action,
     args: actionParams,
     toolContext: input.toolContext,
-    targetAliasSpec: channelPlugin?.actions?.messageActionTargetAliases?.[action],
+    targetAliasSpec: channelPlugin?.actions?.messageActionTargetAliases?.[action] ?? null,
     // Trusted direct operators retain opaque resource-id workflows. Native conversation
     // aliases still normalize above and remain subject to the shared cross-context policy.
     allowResourceOnly: input.conversationReadOrigin === "direct-operator",
@@ -385,21 +366,37 @@ export async function prepareMessageRoute(params: {
       agentId,
     });
   }
+  const delegatesActionToGateway =
+    Boolean(input.gateway) &&
+    channelPlugin?.actions?.resolveExecutionMode?.({ action }) === "gateway";
+  // Resolve once for locally owned sends so formatting and delivery share an
+  // identity. Remote calls must retain omitted input for the Gateway to resolve.
+  if (
+    !accountId &&
+    action === "send" &&
+    !delegatesActionToGateway &&
+    (channelPlugin.outbound?.deliveryMode !== "gateway" || input.gatewayOwnedDelivery === true)
+  ) {
+    accountId = resolveChannelDefaultAccountId({ plugin: channelPlugin, cfg });
+  }
   if (accountId) {
     actionParams.accountId = accountId;
   }
   const dryRun = Boolean(input.dryRun ?? readBooleanParam(actionParams, "dryRun"));
-  enforceCrossProviderEgressPolicyBeforeTargetResolution({
-    channel,
-    action,
-    args: actionParams,
-    toolContext: input.toolContext,
-    cfg,
-    agentId,
-  });
-  const delegatesActionToGateway =
-    Boolean(input.gateway) &&
-    channelPlugin?.actions?.resolveExecutionMode?.({ action }) === "gateway";
+  const currentProvider = input.toolContext?.currentChannelProvider;
+  if (currentProvider && currentProvider !== channel) {
+    // Cross-provider egress needs no target lookup, so reject it before provider I/O.
+    // Same-provider aliases still wait for canonicalization below; direct operators
+    // bypass conversation-read visibility, never the shared egress policy.
+    enforceCrossContextPolicy({
+      channel,
+      action,
+      args: actionParams,
+      toolContext: input.toolContext,
+      cfg,
+      agentId,
+    });
+  }
   const defersExternalTargetResolution =
     delegatesActionToGateway &&
     !dryRun &&
@@ -412,24 +409,41 @@ export async function prepareMessageRoute(params: {
       conversationReadOrigin: normalizeConversationReadInvocationOrigin(
         input.conversationReadOrigin,
       ),
+      messageActionAuthorization: input.messageActionAuthorization,
     });
+  let assertReadAuthorityCurrent: (() => void) | undefined;
+  let assertTargetAuthorityCurrent: (() => void) | undefined;
   if (!delegatesActionToGateway || dryRun) {
     const authorization = input.messageActionAuthorization;
-    actionParams = prepareExternalMessageActionTargetForResolution({
+    const preparedRead = await prepareExternalMessageActionTargetForResolution({
       channel,
       action,
       cfg,
       params: actionParams,
       accountId: accountId ?? undefined,
+      agentId,
+      sessionKey: input.sessionKey,
+      sessionId: input.sessionId,
       requesterAccountId:
         authorization !== undefined
           ? authorization.requesterAccountId
           : (input.requesterAccountId ?? undefined),
+      requesterSenderId:
+        authorization !== undefined
+          ? authorization.requesterSenderId
+          : (input.requesterSenderId ?? undefined),
+      senderIsOwner: input.senderIsOwner,
       conversationReadOrigin: normalizeConversationReadInvocationOrigin(
         input.conversationReadOrigin,
       ),
       toolContext: authorization !== undefined ? authorization.toolContext : input.toolContext,
+      messageActionAuthorization: authorization,
+      assertDirectAdapterHandoff: input.assertDirectAdapterHandoff,
     });
+    actionParams = preparedRead.params;
+    accountId = preparedRead.accountId ?? accountId;
+    assertReadAuthorityCurrent = preparedRead.assertReadAuthorityCurrent;
+    assertTargetAuthorityCurrent = preparedRead.assertTargetAuthorityCurrent;
   }
 
   return {
@@ -439,6 +453,8 @@ export async function prepareMessageRoute(params: {
     accountId,
     dryRun,
     defersExternalTargetResolution,
+    assertReadAuthorityCurrent,
+    assertTargetAuthorityCurrent,
   };
 }
 
@@ -451,16 +467,11 @@ export async function resolveMessageTarget(params: {
   toolContext?: ChannelThreadingToolContext;
   agentId?: string | null;
   deferExternalTargetResolution?: boolean;
+  plugin?: ChannelPlugin;
 }): Promise<ResolvedMessagingTarget | undefined> {
   const resolvedTarget = params.deferExternalTargetResolution
     ? undefined
-    : await resolveActionTarget({
-        cfg: params.cfg,
-        channel: params.channel,
-        action: params.action,
-        args: params.args,
-        accountId: params.accountId,
-      });
+    : await resolveActionTarget(params);
 
   enforceCrossContextPolicy({
     channel: params.channel,

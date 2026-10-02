@@ -1,3 +1,4 @@
+import { randomRelayBase64Url } from "./relay-auth-v2-crypto.js";
 import { ACCESS_MODE_ALL, parsePairingString } from "./relay-core.js";
 
 const NATIVE_HOST_NAME = "ai.openclaw.browser_bootstrap";
@@ -54,15 +55,6 @@ function nativeResponse(value, nonce) {
   return { kind: "malformed" };
 }
 
-function randomNonce() {
-  const hex = crypto.randomUUID().replaceAll("-", "");
-  let binary = "";
-  for (let offset = 0; offset < hex.length; offset += 2) {
-    binary += String.fromCharCode(Number.parseInt(hex.slice(offset, offset + 2), 16));
-  }
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
-}
-
 function isHostMissing(error) {
   const message = String(error?.message ?? error).toLowerCase();
   return RETRYABLE_HOST_ERRORS.some((candidate) => message.includes(candidate));
@@ -98,6 +90,29 @@ function sendNativeBootstrap(chromeApi, request) {
   });
 }
 
+const RELAY_ENSURE_STATUSES = new Set(["spawned", "running", "skipped"]);
+
+/** Ask the native host to start the standalone relay daemon when nothing serves the relay port. */
+export async function requestRelayEnsure(relayPort, chromeApi = chrome) {
+  const nonce = randomRelayBase64Url(crypto, 16);
+  let response;
+  try {
+    response = await sendNativeBootstrap(chromeApi, { v: 1, op: "ensure_relay", nonce, relayPort });
+  } catch {
+    return { status: "unavailable" };
+  }
+  if (
+    hasExactKeys(response, ["v", "ok", "nonce", "relay"]) &&
+    response.v === 1 &&
+    response.ok === true &&
+    response.nonce === nonce &&
+    RELAY_ENSURE_STATUSES.has(response.relay)
+  ) {
+    return { status: response.relay };
+  }
+  return { status: "unavailable" };
+}
+
 /** Own coalescing, retry policy, opt-out, and late-response revocation. */
 export function createNativeBootstrapController({ chromeApi = chrome, getPairing, applyPairing }) {
   let inFlight = null;
@@ -128,6 +143,7 @@ export function createNativeBootstrapController({ chromeApi = chrome, getPairing
     if (!failureCode) {
       await chromeApi.storage.local.remove([FAILURE_KEY]);
     }
+    return { status: state, ...(failureCode ? { code: failureCode } : {}) };
   }
 
   async function attempt() {
@@ -135,6 +151,7 @@ export function createNativeBootstrapController({ chromeApi = chrome, getPairing
       return await inFlight;
     }
     const ownedGeneration = generation;
+    const isCurrent = () => ownedGeneration === generation && !disabledNow;
     inFlight = (async () => {
       const pairing = await getPairing();
       if (pairing?.relayUrl) {
@@ -148,7 +165,7 @@ export function createNativeBootstrapController({ chromeApi = chrome, getPairing
       if (state.state === "manual_required") {
         return { status: "manual_required", code: state.failureCode };
       }
-      const nonce = randomNonce();
+      const nonce = randomRelayBase64Url(crypto, 16);
       let response;
       try {
         response = await sendNativeBootstrap(chromeApi, {
@@ -157,43 +174,46 @@ export function createNativeBootstrapController({ chromeApi = chrome, getPairing
           nonce,
         });
       } catch (error) {
+        if (!isCurrent()) {
+          return { status: "superseded" };
+        }
         if (error === NATIVE_MESSAGE_TIMEOUT || isHostMissing(error)) {
           const code = error === NATIVE_MESSAGE_TIMEOUT ? "native_host_timeout" : "host_not_found";
-          await writeState("retrying", code);
-          return { status: "retrying", code };
+          return await writeState("retrying", code);
         }
-        await writeState("manual_required", "native_host_error");
-        return { status: "manual_required", code: "native_host_error" };
+        return await writeState("manual_required", "native_host_error");
       }
-      if (ownedGeneration !== generation || disabledNow) {
+      if (!isCurrent()) {
         return { status: "superseded" };
       }
       const parsed = nativeResponse(response, nonce);
       if (parsed.kind === "malformed") {
-        await writeState("manual_required", "malformed_response");
-        return { status: "manual_required", code: "malformed_response" };
+        return await writeState("manual_required", "malformed_response");
       }
       if (parsed.kind === "failure") {
-        const retrying = parsed.code === "pairing_unavailable";
-        await writeState(retrying ? "retrying" : "manual_required", parsed.code);
-        return { status: retrying ? "retrying" : "manual_required", code: parsed.code };
+        return await writeState(
+          parsed.code === "pairing_unavailable" ? "retrying" : "manual_required",
+          parsed.code,
+        );
       }
       const current = await getPairing();
-      if (current?.relayUrl || ownedGeneration !== generation || disabledNow) {
+      if (current?.relayUrl || !isCurrent()) {
         return { status: "superseded" };
       }
       const applied = await applyPairing({
         pairing: parsed.pairing,
         accessMode: ACCESS_MODE_ALL,
         source: "native",
-        generation: ownedGeneration,
+        isCurrent,
       });
+      if (!isCurrent()) {
+        return { status: "superseded" };
+      }
       if (!applied?.ok) {
         if (applied?.existing) {
           return { status: "existing" };
         }
-        await writeState("manual_required", "pairing_rejected");
-        return { status: "manual_required", code: "pairing_rejected" };
+        return await writeState("manual_required", "pairing_rejected");
       }
       await writeState("ready");
       return { status: "paired" };

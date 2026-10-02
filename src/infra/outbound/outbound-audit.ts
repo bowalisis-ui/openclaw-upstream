@@ -1,9 +1,8 @@
 import type {
   AuditMessageConversationKind,
-  AuditMessageDeliveryKind,
   AuditMessageFailureStage,
-  AuditOutboundMessageSuppressedReasonCode,
 } from "../../audit/audit-event-types.js";
+import type { ExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
 import {
   emitTrustedMessageAuditEvent,
   hasTrustedMessageAuditListeners,
@@ -21,6 +20,8 @@ import {
 } from "./channel-target-prefix.js";
 import {
   countPhysicalOutboundSends,
+  type OutboundAuditTerminal,
+  type IndexedOutboundAuditTerminal,
   type OutboundDeliveryResult,
   type OutboundPayloadDeliveryOutcome,
 } from "./deliver-types.js";
@@ -30,46 +31,26 @@ import type { OutboundSessionContext } from "./session-context.js";
 type OutboundAuditDeliveryContext = {
   channel: string;
   to: string;
+  runId?: string;
   accountId?: string;
   payloads?: readonly ReplyPayload[];
   replyPayloadSendingHook?: { runId?: string };
-  preparedBatch?: { runId?: string };
+  preparedBatch?: {
+    runId?: string;
+    executionIdentityToken?: ExecutionIdentityAdmissionToken;
+    sourcePayloadCount?: number;
+  };
   session?: OutboundSessionContext;
   mirror?: DeliveryMirror;
 };
 
-type OutboundAuditTerminal =
-  | {
-      outcome: "sent";
-      results: readonly OutboundDeliveryResult[];
-      deliveryKind?: AuditMessageDeliveryKind;
-    }
-  | {
-      outcome: "suppressed";
-      reasonCode: AuditOutboundMessageSuppressedReasonCode;
-      results?: readonly OutboundDeliveryResult[];
-    }
-  | {
-      outcome: "failed";
-      failureStage: AuditMessageFailureStage;
-      results?: readonly OutboundDeliveryResult[];
-      sentBeforeError?: boolean;
-      deliveryKind?: AuditMessageDeliveryKind;
-    }
-  | {
-      outcome: "unknown";
-      failureStage: AuditMessageFailureStage;
-      results?: readonly OutboundDeliveryResult[];
-      sentBeforeError?: boolean;
-    };
-
-type IndexedOutboundAuditTerminal = {
-  payloadIndex: number;
-  terminal: OutboundAuditTerminal;
-};
-
-function outboundQueueAuditSourceId(queueId: string, payloadIndex: number): string {
-  return `message:outbound:queue:${queueId}:payload:${payloadIndex}`;
+function outboundQueueAuditSourceId(
+  queueId: string,
+  payloadIndex: number,
+  lifecycle?: "queued" | "platform_started",
+): string {
+  const terminalId = `message:outbound:queue:${queueId}:payload:${payloadIndex}`;
+  return lifecycle ? `${terminalId}:${lifecycle}` : terminalId;
 }
 
 function outcomesByPayload(
@@ -119,7 +100,11 @@ function projectRecordedOutboundAuditTerminal(
     if (latest.reason === "adapter_returned_no_identity") {
       return { outcome: "unknown", failureStage: "platform_send" };
     }
-    return { outcome: "suppressed", reasonCode: latest.reason };
+    return {
+      outcome: "suppressed",
+      reasonCode:
+        latest.reason === "adapter_returned_no_send" ? "no_visible_payload" : latest.reason,
+    };
   }
   return undefined;
 }
@@ -287,9 +272,9 @@ function resolveConversationKind(
 function firstIdentifier(...values: Array<string | undefined>): string | undefined {
   for (const value of values) {
     const normalized = value?.trim();
-    // "unknown"/"suppressed" are adapter sentinel messageIds (telegram/slack
-    // outbound adapters), not platform identifiers; treating them as real ids
-    // would pseudonymize a constant and corrupt correlation refs.
+    // "unknown"/"suppressed" are adapter sentinel messageIds, not platform
+    // identifiers; treating them as real ids would pseudonymize a constant
+    // and corrupt correlation refs.
     if (normalized && normalized !== "unknown" && normalized !== "suppressed") {
       return normalized;
     }
@@ -306,13 +291,8 @@ function resolveResultIdentifiers(
 } {
   const last = results.at(-1);
   const conversationId =
-    firstIdentifier(
-      last?.conversationId,
-      last?.chatId,
-      last?.channelId,
-      last?.roomId,
-      last?.toJid,
-    ) ?? resolveOutboundTargetFacts(context).conversationId;
+    firstIdentifier(last?.target?.id, last?.toJid) ??
+    resolveOutboundTargetFacts(context).conversationId;
   const messageId = firstIdentifier(
     last?.messageId,
     last?.receipt?.primaryPlatformMessageId,
@@ -321,6 +301,23 @@ function resolveResultIdentifiers(
   return {
     ...(conversationId ? { conversationId } : {}),
     ...(messageId ? { messageId } : {}),
+  };
+}
+
+function outboundAuditContext(context: OutboundAuditDeliveryContext) {
+  const agentId = context.session?.agentId ?? context.mirror?.agentId;
+  return {
+    actorType: agentId ? ("agent" as const) : ("system" as const),
+    actorId: agentId ?? "gateway",
+    ...(agentId ? { agentId } : {}),
+    ...(context.preparedBatch?.executionIdentityToken
+      ? { executionIdentityToken: context.preparedBatch.executionIdentityToken }
+      : {}),
+    direction: "outbound" as const,
+    channel: context.channel,
+    conversationKind: resolveConversationKind(context),
+    ...(context.accountId ? { accountId: context.accountId } : {}),
+    targetId: context.to,
   };
 }
 
@@ -333,12 +330,10 @@ function emitOutboundAuditTerminal(params: {
   terminal: OutboundAuditTerminal;
   startedAt: number;
   sourceId?: string;
-  payloadIndex: number;
 }): void {
   try {
     const { context, terminal } = params;
     const results = terminal.results ?? [];
-    const agentId = context.session?.agentId ?? context.mirror?.agentId;
     const identifiers = resolveResultIdentifiers(context, results);
     const sentBeforeError =
       (terminal.outcome === "failed" || terminal.outcome === "unknown") &&
@@ -378,21 +373,69 @@ function emitOutboundAuditTerminal(params: {
       action: "message.outbound.finished",
       occurredAt: Date.now(),
       ...terminalFields,
-      actorType: agentId ? "agent" : "system",
-      actorId: agentId ?? "gateway",
-      ...(agentId ? { agentId } : {}),
-      ...((context.preparedBatch?.runId ?? context.replyPayloadSendingHook?.runId)
-        ? { runId: context.preparedBatch?.runId ?? context.replyPayloadSendingHook?.runId }
+      ...outboundAuditContext(context),
+      ...((context.runId ?? context.preparedBatch?.runId ?? context.replyPayloadSendingHook?.runId)
+        ? {
+            runId:
+              context.runId ??
+              context.preparedBatch?.runId ??
+              context.replyPayloadSendingHook?.runId,
+          }
         : {}),
-      direction: "outbound",
-      channel: context.channel,
-      conversationKind: resolveConversationKind(context),
       durationMs: Math.max(0, Date.now() - params.startedAt),
       resultCount: countPhysicalOutboundSends(results),
-      ...(context.accountId ? { accountId: context.accountId } : {}),
-      targetId: context.to,
       ...identifiers,
     });
+  } catch {
+    // Audit observers cannot alter delivery or queue semantics.
+  }
+}
+
+/** Emits a replay-safe owner-native receipt after the queue transition commits. */
+export function emitOutboundAuditLifecycle(params: {
+  context: OutboundAuditDeliveryContext;
+  outcome: "queued" | "platform_started";
+  queueId: string;
+  startedAt: number;
+  payloadIndexes?: readonly number[];
+}): void {
+  if (!hasTrustedMessageAuditListeners()) {
+    return;
+  }
+  const payloadCount = params.context.preparedBatch?.sourcePayloadCount ?? 1;
+  const payloadIndexes = params.payloadIndexes ?? Array.from({ length: payloadCount }, (_, i) => i);
+  try {
+    for (const payloadIndex of payloadIndexes) {
+      if (!Number.isSafeInteger(payloadIndex) || payloadIndex < 0 || payloadIndex >= payloadCount) {
+        continue;
+      }
+      const common = {
+        sourceId: outboundQueueAuditSourceId(params.queueId, payloadIndex, params.outcome),
+        occurredAt: Date.now(),
+        status: "started" as const,
+        ...outboundAuditContext(params.context),
+        ...((params.context.runId ?? params.context.preparedBatch?.runId)
+          ? { runId: params.context.runId ?? params.context.preparedBatch?.runId }
+          : {}),
+        durationMs: Math.max(0, Date.now() - params.startedAt),
+        resultCount: 0,
+      };
+      if (params.outcome === "queued") {
+        emitTrustedMessageAuditEvent({
+          ...common,
+          kind: "message",
+          action: "message.outbound.queued",
+          outcome: "queued",
+        });
+      } else {
+        emitTrustedMessageAuditEvent({
+          ...common,
+          kind: "message",
+          action: "message.outbound.platform-started",
+          outcome: "platform_started",
+        });
+      }
+    }
   } catch {
     // Audit observers cannot alter delivery or queue semantics.
   }
@@ -421,7 +464,6 @@ export function emitOutboundAuditTerminals(params: {
       context: params.context,
       terminal: indexed.terminal,
       startedAt: params.startedAt,
-      payloadIndex: indexed.payloadIndex,
       ...(params.queueId
         ? { sourceId: outboundQueueAuditSourceId(params.queueId, indexed.payloadIndex) }
         : {}),

@@ -1,7 +1,4 @@
 import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
-/**
- * Wraps stream functions with pre-call message transforms.
- */
 import {
   PROVIDER_CONTEXT_HANDOFF,
   type ProviderContext,
@@ -9,32 +6,31 @@ import {
 } from "../../../../packages/ai/src/provider-types.js";
 import type { AgentMessage } from "../../runtime/index.js";
 
-/**
- * Stream wrapper for applying message transforms immediately before provider dispatch.
- */
-type MessageTransform = (messages: AgentMessage[], model: unknown) => AgentMessage[];
+type MessageTransform = (
+  messages: AgentMessage[],
+  model: Parameters<StreamFn>[0],
+) => AgentMessage[];
 type ProviderContextMaterializer = (input: {
   context: Parameters<StreamFn>[1];
   signal?: AbortSignal;
 }) => Promise<ProviderContext>;
 
-/** Wraps a stream function with a conditional message-list transform. */
 export function wrapStreamFnWithMessageTransform(
   streamFn: StreamFn,
   transform: MessageTransform,
   materializeProviderContext?: ProviderContextMaterializer,
 ): StreamFn {
   return (model, context, options) => {
-    const messages = (context as unknown as { messages?: unknown })?.messages;
+    const messages = context?.messages;
     const nextMessages = Array.isArray(messages)
       ? transform(messages as AgentMessage[], model)
       : messages;
     const nextContext =
       Array.isArray(messages) && nextMessages !== messages
-        ? ({
-            ...(context as unknown as Record<string, unknown>),
-            messages: nextMessages,
-          } as typeof context)
+        ? {
+            ...context,
+            messages: nextMessages as typeof context.messages,
+          }
         : context;
     if (!materializeProviderContext) {
       return streamFn(model, nextContext, options);

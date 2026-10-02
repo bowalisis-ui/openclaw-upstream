@@ -2,10 +2,7 @@
  * Codex-backed media understanding provider for bounded image description and
  * structured extraction turns.
  */
-import {
-  type JsonSchemaObject,
-  validateJsonSchemaValue,
-} from "openclaw/plugin-sdk/json-schema-runtime";
+import { validateJsonSchemaValue } from "openclaw/plugin-sdk/json-schema-runtime";
 import type {
   ImagesDescriptionRequest,
   ImagesDescriptionResult,
@@ -13,50 +10,30 @@ import type {
   StructuredExtractionRequest,
   StructuredExtractionResult,
 } from "openclaw/plugin-sdk/media-understanding";
-import {
-  runBoundedCodexAppServerTurn,
-  type CodexBoundedTurnOptions,
-} from "./src/app-server/bounded-turn.js";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import type { CodexBoundedTurnOptions } from "./src/app-server/bounded-turn.js";
 import type { CodexUserInput } from "./src/app-server/protocol.js";
 
 const CODEX_MEDIA_PROVIDER_ID = "codex";
-const DEFAULT_CODEX_IMAGE_MODEL = "gpt-5.6-sol";
+const DEFAULT_CODEX_IMAGE_MODEL = "gpt-6-astra";
 const DEFAULT_CODEX_IMAGE_PROMPT = "Describe the image.";
-
-type CodexMediaUnderstandingProviderOptions = CodexBoundedTurnOptions;
 
 /**
  * Builds the media-understanding provider that delegates image tasks to an
  * isolated Codex app-server session.
  */
 export function buildCodexMediaUnderstandingProvider(
-  options: CodexMediaUnderstandingProviderOptions = {},
+  options: CodexBoundedTurnOptions = {},
 ): MediaUnderstandingProvider {
   return {
     id: CODEX_MEDIA_PROVIDER_ID,
     capabilities: ["image"],
     defaultModels: { image: DEFAULT_CODEX_IMAGE_MODEL },
-    describeImage: async (req) =>
+    describeImage: async ({ buffer, fileName, mime, ...req }) =>
       describeCodexImages(
         {
-          images: [
-            {
-              buffer: req.buffer,
-              fileName: req.fileName,
-              mime: req.mime,
-            },
-          ],
-          provider: req.provider,
-          model: req.model,
-          prompt: req.prompt,
-          maxTokens: req.maxTokens,
-          timeoutMs: req.timeoutMs,
-          ...(req.signal ? { signal: req.signal } : {}),
-          profile: req.profile,
-          preferredProfile: req.preferredProfile,
-          authStore: req.authStore,
-          agentDir: req.agentDir,
-          cfg: req.cfg,
+          ...req,
+          images: [{ buffer, fileName, mime }],
         },
         options,
       ),
@@ -67,17 +44,19 @@ export function buildCodexMediaUnderstandingProvider(
 
 async function describeCodexImages(
   req: ImagesDescriptionRequest,
-  options: CodexMediaUnderstandingProviderOptions,
+  options: CodexBoundedTurnOptions,
 ): Promise<ImagesDescriptionResult> {
   const model = req.model.trim();
   if (!model) {
     throw new Error("Codex image understanding requires model id.");
   }
   req.signal?.throwIfAborted();
-
+  const { runBoundedCodexAppServerTurn } = await import("./src/app-server/bounded-turn.js");
+  req.signal?.throwIfAborted();
   const { text } = await runBoundedCodexAppServerTurn({
     config: req.cfg,
     model: { mode: "required", id: model },
+    modelProvider: "openai",
     profile: req.profile,
     timeoutMs: req.timeoutMs,
     signal: req.signal,
@@ -102,7 +81,7 @@ async function describeCodexImages(
 
 async function extractCodexStructured(
   req: StructuredExtractionRequest,
-  options: CodexMediaUnderstandingProviderOptions,
+  options: CodexBoundedTurnOptions,
 ): Promise<StructuredExtractionResult> {
   const model = req.model.trim();
   if (!model) {
@@ -119,10 +98,12 @@ async function extractCodexStructured(
     throw new Error("Codex structured extraction requires at least one image input.");
   }
   req.signal?.throwIfAborted();
-
+  const { runBoundedCodexAppServerTurn } = await import("./src/app-server/bounded-turn.js");
+  req.signal?.throwIfAborted();
   const { text } = await runBoundedCodexAppServerTurn({
     config: req.cfg,
     model: { mode: "required", id: model },
+    modelProvider: "openai",
     profile: req.profile,
     timeoutMs: req.timeoutMs,
     signal: req.signal,
@@ -133,7 +114,7 @@ async function extractCodexStructured(
     developerInstructions:
       "You are OpenClaw's bounded structured-extraction worker. Return only the requested extraction. Do not call tools, edit files, ask follow-up questions, or include secrets.",
     input: buildCodexStructuredInput(req),
-    requiredModalities: requiredStructuredModalities(),
+    requiredModalities: ["text", "image"],
     isolation: "configured-transport",
   });
   return normalizeStructuredExtractionResult({ text, model, provider: req.provider, req });
@@ -145,10 +126,6 @@ function buildCodexImagePrompt(req: ImagesDescriptionRequest): string {
     return prompt;
   }
   return `${prompt}\n\nAnalyze all ${req.images.length} images together.`;
-}
-
-function requiredStructuredModalities(): string[] {
-  return ["text", "image"];
 }
 
 function buildCodexStructuredInput(req: StructuredExtractionRequest): CodexUserInput[] {
@@ -179,10 +156,6 @@ function buildStructuredExtractionPrompt(req: StructuredExtractionRequest): stri
     .join("\n\n");
 }
 
-function isJsonSchemaObject(value: unknown): value is JsonSchemaObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function normalizeStructuredExtractionResult(params: {
   text: string;
   model: string;
@@ -201,7 +174,7 @@ function normalizeStructuredExtractionResult(params: {
     } catch {
       throw new Error("Codex structured extraction returned invalid JSON.");
     }
-    if (isJsonSchemaObject(params.req.jsonSchema)) {
+    if (isRecord(params.req.jsonSchema)) {
       const validation = validateJsonSchemaValue({
         schema: params.req.jsonSchema,
         cacheKey: "codex.media-understanding.extractStructured",

@@ -1,6 +1,6 @@
 // Doctor visibility for channel ingress events retained after terminal failure.
 import { note } from "../../packages/terminal-core/src/note.js";
-import { countFailedChannelIngressQueueEntries } from "../channels/message/ingress-queue.js";
+import { countFailedChannelIngressQueueEntries } from "../channels/message/ingress-queue-health.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { quoteCliArg } from "../cli/quote-cli-arg.js";
 
@@ -10,10 +10,10 @@ type NoteChannelIngressDeadLettersOptions = {
 };
 
 /** Mention channel accounts with retained ingress failures and their recovery command. */
-export function noteChannelIngressDeadLetters(
+export async function noteChannelIngressDeadLetters(
   options: NoteChannelIngressDeadLettersOptions = {},
-): void {
-  const failed = countFailedChannelIngressQueueEntries(options.stateDir);
+): Promise<void> {
+  const failed = await countFailedChannelIngressQueueEntries(options.stateDir);
   if (failed.length === 0) {
     return;
   }

@@ -1,20 +1,24 @@
-// Proxy stream wrapper applies provider-specific wrappers around base stream functions.
+import { resolveOpenAIModelReasoningEfforts } from "@openclaw/ai/internal/openai";
+import {
+  applyAnthropicEphemeralCacheControlMarkers,
+  applyCompletionsAnthropicCacheControl,
+  resolveAnthropicEphemeralCacheControl,
+} from "@openclaw/ai/transports";
+import { parseStrictFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import {
   normalizeOptionalLowercaseString,
   readStringValue,
 } from "@openclaw/normalization-core/string-coerce";
 import { resolveProviderRequestPolicy } from "../../../agents/provider-attribution.js";
-import { resolveProviderRequestPolicyConfig } from "../../../agents/provider-request-config.js";
+import {
+  getModelProviderRequestRouteFacts,
+  resolveProviderRequestPolicyConfig,
+} from "../../../agents/provider-request-config.js";
 import type { StreamFn } from "../../../agents/runtime/index.js";
 import type { ThinkLevel } from "../../../auto-reply/thinking.js";
-import { parseStrictFiniteNumber } from "../../../infra/parse-finite-number.js";
 import { normalizeOpenAICompatibleReasoningPayload } from "../../../plugin-sdk/provider-stream-shared.js";
 import { parseBooleanValue } from "../../../utils/boolean.js";
 import { streamSimple } from "../../stream.js";
-import {
-  applyAnthropicEphemeralCacheControlMarkers,
-  resolveAnthropicEphemeralCacheControl,
-} from "./anthropic-cache-control-payload.js";
 import { isAnthropicModelRef } from "./anthropic-family-cache-semantics.js";
 import { streamWithPayloadPatch } from "./stream-payload-utils.js";
 const KILOCODE_FEATURE_HEADER = "X-KILOCODE-FEATURE";
@@ -28,6 +32,19 @@ const BOOLEAN_PARAM_PARSE_OPTIONS = {
 function resolveKilocodeAppHeaders(): Record<string, string> {
   const feature = process.env[KILOCODE_FEATURE_ENV_VAR]?.trim() || KILOCODE_FEATURE_DEFAULT;
   return { [KILOCODE_FEATURE_HEADER]: feature };
+}
+
+function resolveModelEndpointClass(model: Parameters<StreamFn>[0]) {
+  return (
+    getModelProviderRequestRouteFacts(model)?.capabilities.endpointClass ??
+    resolveProviderRequestPolicy({
+      provider: readStringValue(model.provider),
+      api: readStringValue(model.api),
+      baseUrl: readStringValue(model.baseUrl),
+      capability: "llm",
+      transport: "stream",
+    }).endpointClass
+  );
 }
 
 function readExtraParam(
@@ -58,15 +75,9 @@ function resolveOpenRouterResponseCacheTtlSeconds(value: unknown): string | unde
   return String(Math.max(1, Math.min(86400, Math.trunc(parsed))));
 }
 
-function shouldApplyOpenRouterResponseCacheHeaders(model: Parameters<StreamFn>[0]): boolean {
+function isOpenRouterEndpoint(model: Parameters<StreamFn>[0]): boolean {
   const provider = readStringValue(model.provider);
-  const endpointClass = resolveProviderRequestPolicy({
-    provider,
-    api: readStringValue(model.api),
-    baseUrl: readStringValue(model.baseUrl),
-    capability: "llm",
-    transport: "stream",
-  }).endpointClass;
+  const endpointClass = resolveModelEndpointClass(model);
   return (
     endpointClass === "openrouter" ||
     (endpointClass === "default" && normalizeOptionalLowercaseString(provider) === "openrouter")
@@ -77,7 +88,7 @@ function resolveOpenRouterResponseCacheHeaders(
   model: Parameters<StreamFn>[0],
   extraParams: Record<string, unknown> | undefined,
 ): Record<string, string> | undefined {
-  if (!shouldApplyOpenRouterResponseCacheHeaders(model)) {
+  if (!isOpenRouterEndpoint(model)) {
     return undefined;
   }
   const configuredCache = parseBooleanValue(
@@ -124,28 +135,14 @@ export function createOpenRouterSystemCacheWrapper(
 ): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
   return (model, context, options) => {
-    const provider = readStringValue(model.provider);
     const modelId = readStringValue(model.id);
     // Keep OpenRouter-specific cache markers on verified OpenRouter routes
     // (or the provider's default route), but not on arbitrary OpenAI proxies.
-    const endpointClass = resolveProviderRequestPolicy({
-      provider,
-      api: readStringValue(model.api),
-      baseUrl: readStringValue(model.baseUrl),
-      capability: "llm",
-      transport: "stream",
-    }).endpointClass;
-    if (
-      !modelId ||
-      !isAnthropicModelRef(modelId) ||
-      !(
-        endpointClass === "openrouter" ||
-        (endpointClass === "default" && normalizeOptionalLowercaseString(provider) === "openrouter")
-      )
-    ) {
+    if (!isOpenRouterEndpoint(model) || !modelId || !isAnthropicModelRef(modelId)) {
       return underlying(model, context, options);
     }
 
+    const isCompletions = model.api === "openai-completions";
     const cacheRetention =
       readCacheRetention(options?.cacheRetention) ??
       readCacheRetention(extraParams?.cacheRetention);
@@ -153,9 +150,12 @@ export function createOpenRouterSystemCacheWrapper(
       underlying,
       model,
       context,
-      stripCacheRetentionOption(options),
+      isCompletions ? { ...options, cacheRetention } : stripCacheRetentionOption(options),
       (payloadObj) => {
-        applyAnthropicEphemeralCacheControlMarkers(
+        const applyMarkers = isCompletions
+          ? applyCompletionsAnthropicCacheControl
+          : applyAnthropicEphemeralCacheControlMarkers;
+        applyMarkers(
           payloadObj,
           resolveAnthropicEphemeralCacheControl(readStringValue(model.baseUrl), cacheRetention) ??
             null,
@@ -192,6 +192,7 @@ export function createOpenRouterWrapper(
       baseUrl: readStringValue(model.baseUrl),
       capability: "llm",
       transport: "stream",
+      routeFacts: getModelProviderRequestRouteFacts(model),
       callerHeaders: options?.headers,
       providerHeaders,
       precedence: "caller-wins",
@@ -205,7 +206,12 @@ export function createOpenRouterWrapper(
         headers,
       },
       (payload) => {
-        normalizeOpenAICompatibleReasoningPayload(payload, thinkingLevel);
+        normalizeOpenAICompatibleReasoningPayload(
+          payload,
+          resolveOpenAIModelReasoningEfforts({ compat: model.compat })?.length === 0
+            ? undefined
+            : thinkingLevel,
+        );
       },
     );
   };
@@ -231,6 +237,7 @@ export function createKilocodeWrapper(
       baseUrl: readStringValue(model.baseUrl),
       capability: "llm",
       transport: "stream",
+      routeFacts: getModelProviderRequestRouteFacts(model),
       callerHeaders: options?.headers,
       providerHeaders: resolveKilocodeAppHeaders(),
       precedence: "defaults-win",

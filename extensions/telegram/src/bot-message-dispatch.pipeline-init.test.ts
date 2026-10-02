@@ -1,61 +1,51 @@
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { expect, it, vi } from "vitest";
 import {
-  createChannelMessageReplyPipeline,
   createContext,
-  createRuntime,
-  createStatusReactionController,
+  dispatchReplyWithBufferedBlockDispatcher,
   describeTelegramDispatch,
   dispatchWithContext,
 } from "./bot-message-dispatch.test-harness.js";
-import type { TelegramMessageContext } from "./bot-message-dispatch.test-harness.js";
-import { telegramInboundEventDelivery } from "./inbound-event-delivery.js";
 
 describeTelegramDispatch("dispatchTelegramMessage pipeline-init", () => {
-  it("keeps Telegram typing below its client expiry without a per-message cutoff", async () => {
-    await dispatchWithContext({ context: createContext() });
-
-    expect(createChannelMessageReplyPipeline).toHaveBeenCalledWith(
+  it("awaits routed session metadata persistence before ordinary message dispatch", async () => {
+    const context = createContext();
+    const sessionKey = "agent:main:telegram:group:-42001:topic:42";
+    context.route.sessionKey = sessionKey;
+    context.ctxPayload = {
+      ...context.ctxPayload,
+      RawBody: "Check this please",
+      BodyForAgent: "Check this please",
+      SessionKey: sessionKey,
+      Provider: "telegram",
+      OriginatingChannel: "telegram",
+    };
+    const recorded = createDeferred<void>();
+    const metadata = createDeferred<void>();
+    const recordInboundSession = vi.fn<typeof context.turn.recordInboundSession>(
+      async ({ trackSessionMetaTask }) => {
+        trackSessionMetaTask?.(metadata.promise);
+        recorded.resolve();
+      },
+    );
+    context.turn.recordInboundSession = recordInboundSession;
+    const work = dispatchWithContext({ context, streamMode: "off" });
+    try {
+      await recorded.promise;
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    } finally {
+      metadata.resolve();
+      await work;
+    }
+    expect(recordInboundSession).toHaveBeenCalledWith(
       expect.objectContaining({
-        typing: expect.objectContaining({
-          keepaliveIntervalMs: 4_000,
-          maxDurationMs: 0,
-        }),
+        sessionKey,
+        ctx: expect.objectContaining(context.ctxPayload),
       }),
     );
-  });
-
-  it("cleans delivery correlation when reply-pipeline initialization fails", async () => {
-    const sessionKey = "agent:main:telegram:direct:pipeline-init-failure";
-    const statusReactionController = createStatusReactionController();
-    const reactionApi = vi.fn(async () => undefined);
-    const runtime = createRuntime();
-    runtime.error = vi.fn(() => {
-      telegramInboundEventDelivery.notify({
-        sessionKey,
-        to: "123",
-        accountId: "default",
-      });
-    });
-    createChannelMessageReplyPipeline.mockImplementationOnce(() => {
-      throw new Error("pipeline initialization failed");
-    });
-
-    await dispatchWithContext({
-      context: createContext({
-        ctxPayload: {
-          SessionKey: sessionKey,
-          ChatType: "direct",
-        } as TelegramMessageContext["ctxPayload"],
-        statusReactionController: statusReactionController as never,
-        reactionApi,
-      }),
-      runtime,
-      suppressFailureFallback: true,
-    });
-
-    await vi.waitFor(() => {
-      expect(statusReactionController.restoreInitial).toHaveBeenCalled();
-    });
-    expect(reactionApi).not.toHaveBeenCalled();
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledOnce();
   });
 });

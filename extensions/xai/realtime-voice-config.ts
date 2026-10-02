@@ -1,8 +1,5 @@
-import {
-  isProviderAuthProfileConfigured,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk/provider-auth";
 import type {
+  OpenAICompatibleRealtimeAudioFormat,
   RealtimeVoiceBridgeCreateRequest,
   RealtimeVoiceProviderConfig,
 } from "openclaw/plugin-sdk/realtime-voice";
@@ -32,18 +29,11 @@ type XaiRealtimeVoiceProviderConfig = {
   sessionResumption?: boolean;
 };
 
-export type XaiRealtimeVoiceBridgeConfig = RealtimeVoiceBridgeCreateRequest & {
-  apiKey?: string;
-  baseUrl: string;
-  model?: string;
-  voice?: string;
-  vadThreshold?: number;
-  silenceDurationMs?: number;
-  prefixPaddingMs?: number;
-  reasoningEffort?: XaiRealtimeReasoningEffort;
-  sessionResumption?: boolean;
-  resolveApiKey?: () => Promise<string>;
-};
+export type XaiRealtimeVoiceBridgeConfig = RealtimeVoiceBridgeCreateRequest &
+  Omit<XaiRealtimeVoiceProviderConfig, "interruptResponseOnInputAudio"> & {
+    baseUrl: string;
+    resolveApiKey?: () => Promise<string>;
+  };
 
 type XaiRealtimeResponseItem = {
   id?: string;
@@ -78,10 +68,6 @@ export type XaiRealtimeEvent = {
   error?: unknown;
 };
 
-export type XaiRealtimeAudioFormatConfig =
-  | { type: "audio/pcm"; rate: 24000 }
-  | { type: "audio/pcmu" };
-
 export type XaiRealtimeSessionUpdate = {
   type: "session.update";
   session: {
@@ -96,10 +82,10 @@ export type XaiRealtimeSessionUpdate = {
     };
     audio: {
       input: {
-        format: XaiRealtimeAudioFormatConfig;
+        format: OpenAICompatibleRealtimeAudioFormat;
         transcription: { model: string };
       };
-      output: { format: XaiRealtimeAudioFormatConfig };
+      output: { format: OpenAICompatibleRealtimeAudioFormat };
     };
     reasoning?: { effort: XaiRealtimeReasoningEffort };
     resumption?: { enabled: boolean };
@@ -167,10 +153,6 @@ function normalizeXaiRealtimeVoice(value: unknown): string | undefined {
     : normalized;
 }
 
-function asXaiVadThreshold(value: unknown): number | undefined {
-  return asFiniteNumberInRange(value, { min: 0.1, max: 0.9 });
-}
-
 function asXaiDurationMs(value: unknown): number | undefined {
   return asSafeIntegerInRange(value, { min: 0, max: 10_000 });
 }
@@ -198,7 +180,7 @@ export function normalizeXaiRealtimeProviderConfig(
     baseUrl: normalizeOptionalString(raw.baseUrl),
     model: normalizeOptionalString(raw.model),
     voice: normalizeXaiRealtimeVoice(raw.speakerVoice ?? raw.voice),
-    vadThreshold: asXaiVadThreshold(raw.vadThreshold),
+    vadThreshold: asFiniteNumberInRange(raw.vadThreshold, { min: 0.1, max: 0.9 }),
     silenceDurationMs: asXaiDurationMs(raw.silenceDurationMs),
     prefixPaddingMs: asXaiDurationMs(raw.prefixPaddingMs),
     interruptResponseOnInputAudio: parseBooleanValue(raw.interruptResponseOnInputAudio),
@@ -232,14 +214,4 @@ export function toXaiRealtimeWsUrl(
     url.searchParams.set("conversation_id", conversationId);
   }
   return url.toString();
-}
-
-export function hasXaiRealtimeApiKeyInput(
-  configApiKey: string | undefined,
-  cfg: OpenClawConfig | undefined,
-): boolean {
-  if (normalizeOptionalString(configApiKey) || normalizeOptionalString(process.env.XAI_API_KEY)) {
-    return true;
-  }
-  return isProviderAuthProfileConfigured({ provider: "xai", cfg });
 }

@@ -1,4 +1,6 @@
 // Qa Lab tests cover scenario flow runner plugin behavior.
+import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { describe, expect, it } from "vitest";
 import { createQaBusState } from "./bus-state.js";
 import { QaSuiteScenarioSkipError } from "./errors.js";
@@ -10,7 +12,37 @@ import {
   type QaSeedScenarioWithSource,
 } from "./scenario-catalog.js";
 import { runScenarioFlow } from "./scenario-flow-runner.js";
-import { runLoadedScenarioFlow } from "./scenario-flow-runner.test-support.js";
+import {
+  runLoadedScenarioFlow,
+  assertTelegramRichObservationFlow,
+  telegramRichObservationCases,
+} from "./scenario-flow-runner.test-support.js";
+import { makeQaSuiteTestScenario } from "./suite-test-helpers.js";
+
+type FlowApi = Parameters<typeof runScenarioFlow>[0]["api"];
+
+function createImportApi(
+  id: string,
+  runScenario: FlowApi["runScenario"] = async (name, steps) => {
+    const stepResults = [];
+    for (const step of steps) {
+      const details = (await step.run())?.details;
+      stepResults.push({
+        name: step.name,
+        status: "pass" as const,
+        ...(details !== undefined ? { details } : {}),
+      });
+    }
+    return { name, status: "pass", steps: stepResults };
+  },
+): FlowApi {
+  return {
+    state: createQaBusState(),
+    scenario: makeQaSuiteTestScenario(id),
+    config: {},
+    runScenario,
+  };
+}
 
 function readWebchatTranscriptWaitFlow() {
   const scenario = readQaScenarioById("webchat-direct-reply-routing");
@@ -60,76 +92,18 @@ async function runWebchatTranscriptWait(
         }
         throw new Error("test condition was not met");
       },
-      normalizeLowercaseStringOrEmpty: (value: unknown) =>
-        typeof value === "string" ? value.trim().toLowerCase() : "",
-      formatErrorMessage: (error: unknown) =>
-        error instanceof Error ? error.message : String(error),
+      normalizeLowercaseStringOrEmpty,
+      formatErrorMessage: coerceErrorMessage,
       liveTurnTimeoutMs: (_env: unknown, timeoutMs: number) => timeoutMs,
     },
   });
 }
 
-function readCurrentRunProviderPromptEvidenceFlow(trajectoryEvents: unknown[]): QaScenarioFlow {
-  const scenario = readQaScenarioById("instruction-profile-artifact-followthrough-live");
-  const actions = scenario.execution.flow?.steps[0]?.actions;
-  if (!actions) {
-    throw new Error("instruction profile scenario has no actions");
-  }
-  const evidenceIndex = actions.findIndex(
-    (action) =>
-      typeof action === "object" &&
-      action !== null &&
-      "set" in action &&
-      action.set === "providerPromptEvidence",
-  );
-  const assertionIndex = actions.findIndex(
-    (action, index) =>
-      index > evidenceIndex &&
-      typeof action === "object" &&
-      action !== null &&
-      "assert" in action &&
-      JSON.stringify(action).includes("current-run provider prompt evidence mismatch"),
-  );
-  if (evidenceIndex < 0 || assertionIndex < 0) {
-    throw new Error("instruction profile scenario has no provider prompt evidence assertion");
-  }
-  const instructionContents = scenario.execution.config?.instructionContents;
-  const instructionChars =
-    typeof instructionContents === "string" ? instructionContents.trimEnd().length : 0;
-  return {
-    steps: [
-      {
-        name: "proves current-run provider prompt evidence",
-        actions: [
-          { set: "turn", value: { started: { runId: "current-run" } } },
-          {
-            set: "instructionProfileReport",
-            value: {
-              missing: false,
-              truncated: false,
-              rawChars: instructionChars,
-              injectedChars: instructionChars,
-            },
-          },
-          { set: "trajectoryEvents", value: trajectoryEvents },
-          ...actions
-            .slice(evidenceIndex, assertionIndex + 1)
-            .filter(
-              (action) =>
-                !(
-                  typeof action === "object" &&
-                  action !== null &&
-                  "call" in action &&
-                  action.call === "fs.rm"
-                ),
-            ),
-        ],
-      },
-    ],
-  };
-}
-
-const planningEvidenceCoverageIds = new Set(["runtime.no-meta-leak", "workspace.planning"]);
+const planningEvidenceCoverageIds = new Set([
+  "agent-runtime.external-harness-selection-planning",
+  "openai.codex-harness-no-meta-leak",
+  "openai.codex-harness-planning",
+]);
 
 type PlanningEvidenceScenario = QaSeedScenarioWithSource & {
   execution: Extract<QaScenarioExecution, { kind: "flow" }> & { flow?: QaScenarioFlow };
@@ -200,14 +174,11 @@ function createPlanningEvidenceFixture(
     return {
       scenario,
       outboundText: expectedReply,
-      failureMessage: "missing marked Codex internal plan/reasoning mirror evidence",
+      failureMessage: "missing successful current-attempt progress_card update",
       currentSummary: {
         eventCursor: 9,
-        assistantMirrors: [
-          { identity: "current-turn:plan", text: `Codex plan:\n${internalMarker}` },
-          { identity: "current-turn:assistant", text: expectedReply },
-        ],
-        successfulToolCallCounts: {},
+        assistantMirrors: [{ identity: "current-turn:assistant", text: expectedReply }],
+        successfulToolCallCounts: { progress_card: 1 },
       },
     };
   }
@@ -216,14 +187,11 @@ function createPlanningEvidenceFixture(
     return {
       scenario,
       outboundText,
-      failureMessage: "missing Codex App Server plan signal",
+      failureMessage: "missing Codex harness progress_card signal",
       currentSummary: {
         eventCursor: 9,
-        assistantMirrors: [
-          { identity: "current-turn:plan", text: "Codex plan:\n- build the game" },
-          { identity: "current-turn:assistant", text: outboundText },
-        ],
-        successfulToolCallCounts: {},
+        assistantMirrors: [{ identity: "current-turn:assistant", text: outboundText }],
+        successfulToolCallCounts: { progress_card: 1 },
       },
     };
   }
@@ -231,10 +199,10 @@ function createPlanningEvidenceFixture(
     return {
       scenario,
       outboundText: `Built ${artifactFile}`,
-      failureMessage: "missing OpenClaw update_plan signal",
+      failureMessage: "missing OpenClaw progress_card signal",
       currentSummary: {
         eventCursor: 9,
-        successfulToolCallCounts: { update_plan: 1 },
+        successfulToolCallCounts: { progress_card: 1 },
       },
     };
   }
@@ -250,15 +218,13 @@ function runPlanningEvidenceFixture(
   const summaries = [
     {
       eventCursor: 7,
-      assistantMirrors: [
-        { identity: "old-turn:plan", text: "Codex plan:\nQA_INTERNAL_PLAN_DO_NOT_SEND" },
-        { identity: "old-turn:assistant", text: fixture.outboundText },
-      ],
-      successfulToolCallCounts: { update_plan: 1 },
+      assistantMirrors: [{ identity: "old-turn:assistant", text: fixture.outboundText }],
+      successfulToolCallCounts: { progress_card: 1 },
     },
     currentSummary,
   ];
   let readIndex = 0;
+  const cardStep = fixture.scenario.execution.config?.internalMarker;
   const result = runLoadedScenarioFlow(fixture.scenario.id, {
     flow: readPlanningEvidenceFlow(fixture.scenario),
     state,
@@ -273,6 +239,12 @@ function runPlanningEvidenceFixture(
       env: {
         providerMode: "live-frontier",
         primaryModel: "openai/gpt-5.6-luna",
+        gateway: {
+          call: async (method: string) =>
+            method === "progressCard.get"
+              ? { card: { revision: 1, steps: [{ step: cardStep }] } }
+              : { messages: [{ role: "assistant", content: fixture.outboundText }] },
+        },
       },
       readSessionTranscriptSummary: async (...args: unknown[]) => {
         readOptions.push(args[2]);
@@ -284,8 +256,7 @@ function runPlanningEvidenceFixture(
         return summary;
       },
       resolveQaLiveTurnTimeoutMs: (_env: unknown, timeoutMs: number) => timeoutMs,
-      normalizeLowercaseStringOrEmpty: (value: unknown) =>
-        typeof value === "string" ? value.trim().toLowerCase() : "",
+      normalizeLowercaseStringOrEmpty,
       runAgentPrompt: async () => ({ started: { runId: "current-run" }, waited: { status: "ok" } }),
     },
   });
@@ -297,63 +268,10 @@ const planningEvidenceFixtures = readQaScenarioPack()
   .map(createPlanningEvidenceFixture);
 
 describe("scenario-flow-runner", () => {
-  it("ignores stale provider prompt mismatches when the current run matches", async () => {
-    const currentObservation = {
-      egress: "responses-sdk",
-      payloadVariant: "initial",
-      promptSource: "input.developer",
-      expectedChars: 4096,
-      observedChars: 4096,
-      matchesAssembledPrompt: true,
-    };
-    const result = await runLoadedScenarioFlow("instruction-profile-artifact-followthrough-live", {
-      flow: readCurrentRunProviderPromptEvidenceFlow([
-        {
-          type: "provider.prompt.observed",
-          runId: "stale-run",
-          data: {
-            ...currentObservation,
-            promptSource: "missing",
-            observedChars: 0,
-            matchesAssembledPrompt: false,
-          },
-        },
-        { type: "provider.prompt.observed", runId: "current-run", data: currentObservation },
-      ]),
-    });
-
-    expect(result.status).toBe("pass");
-  });
-
-  it("excludes marker-bearing diagnostic trajectory context from bounded no-leak evidence", async () => {
-    const marker = "INSTRUCTION-PROFILE-CONTEXT-MARKER-A6E29D4B";
-    const trajectoryEvents = [
-      {
-        type: "context.compiled",
-        runId: "current-run",
-        data: { systemPrompt: `diagnostic support context ${marker}` },
-      },
-      {
-        type: "provider.prompt.observed",
-        runId: "current-run",
-        data: {
-          egress: "native-codex-websocket",
-          payloadVariant: "initial",
-          promptSource: "instructions",
-          expectedChars: 4096,
-          observedChars: 4096,
-          matchesAssembledPrompt: true,
-        },
-      },
-    ];
-
-    expect(JSON.stringify(trajectoryEvents)).toContain(marker);
-    const result = await runLoadedScenarioFlow("instruction-profile-artifact-followthrough-live", {
-      flow: readCurrentRunProviderPromptEvidenceFlow(trajectoryEvents),
-    });
-
-    expect(result.status).toBe("pass");
-  });
+  it.each(telegramRichObservationCases)(
+    "correlates Telegram rich observations without crossing account IDs: %s",
+    assertTelegramRichObservationFlow,
+  );
 
   it("keeps live goal followthrough inside the active-goal context limit", async () => {
     const state = createQaBusState();
@@ -397,8 +315,7 @@ describe("scenario-flow-runner", () => {
             throw new Error("goal artifact has not been written");
           },
         },
-        normalizeLowercaseStringOrEmpty: (value: unknown) =>
-          typeof value === "string" ? value.trim().toLowerCase() : "",
+        normalizeLowercaseStringOrEmpty,
       },
       onWaitForOutboundMessage: ({ waitCount, state: currentState }) => {
         const currentInbound = currentState
@@ -562,8 +479,7 @@ describe("scenario-flow-runner", () => {
       runLoadedScenarioFlow(id, {
         state,
         api: {
-          normalizeLowercaseStringOrEmpty: (value: unknown) =>
-            typeof value === "string" ? value.trim().toLowerCase() : "",
+          normalizeLowercaseStringOrEmpty,
           runAgentPrompt: async () => {
             turnCount += 1;
             state.addOutboundMessage({
@@ -636,7 +552,12 @@ describe("scenario-flow-runner", () => {
             token: gatewayToken,
           },
         },
-        buildAgentSessionKey: () => sessionKey,
+        transport: {
+          id: "qa-channel",
+          accountId: "default",
+          buildAgentDelivery: ({ target }: { target: string }) => ({ replyTo: target }),
+        },
+        resolveAgentRoute: () => ({ sessionKey }),
         webOpenPage: async ({ url }: { url: string }) => {
           openedUrls.push(url);
           return { pageId: "control-ui-session-page" };
@@ -732,38 +653,7 @@ describe("scenario-flow-runner", () => {
 
   it("supports qaImport inside flow expressions", async () => {
     const result = await runScenarioFlow({
-      api: {
-        state: createQaBusState(),
-        scenario: {
-          id: "qa-import",
-          title: "qa-import",
-          sourcePath: "qa/scenarios/qa-import.yaml",
-          surface: "test",
-          objective: "test",
-          successCriteria: ["test"],
-          execution: { kind: "flow" },
-        },
-        config: {},
-        runScenario: async (
-          _name: string,
-          steps: Array<{ name: string; run: () => Promise<string | void> }>,
-        ) => {
-          const stepResults = [];
-          for (const step of steps) {
-            const details = await step.run();
-            stepResults.push({
-              name: step.name,
-              status: "pass" as const,
-              ...(details !== undefined ? { details } : {}),
-            });
-          }
-          return {
-            name: "qa-import",
-            status: "pass" as const,
-            steps: stepResults,
-          };
-        },
-      },
+      api: createImportApi("qa-import"),
       scenarioTitle: "qa-import",
       vars: { preparedValue: "ready" },
       flow: {
@@ -803,40 +693,9 @@ describe("scenario-flow-runner", () => {
     });
   });
 
-  it("loads bundled QA fixture modules through qaImport", async () => {
+  it("loads bundled QA runtime modules through qaImport", async () => {
     const result = await runScenarioFlow({
-      api: {
-        state: createQaBusState(),
-        scenario: {
-          id: "qa-fixture-import",
-          title: "qa-fixture-import",
-          sourcePath: "qa/scenarios/qa-fixture-import.yaml",
-          surface: "test",
-          objective: "test",
-          successCriteria: ["test"],
-          execution: { kind: "flow" },
-        },
-        config: {},
-        runScenario: async (
-          _name: string,
-          steps: Array<{ name: string; run: () => Promise<string | void> }>,
-        ) => {
-          const stepResults = [];
-          for (const step of steps) {
-            const details = await step.run();
-            stepResults.push({
-              name: step.name,
-              status: "pass" as const,
-              ...(details !== undefined ? { details } : {}),
-            });
-          }
-          return {
-            name: "qa-fixture-import",
-            status: "pass" as const,
-            steps: stepResults,
-          };
-        },
-      },
+      api: createImportApi("qa-fixture-import"),
       scenarioTitle: "qa-fixture-import",
       flow: {
         steps: [
@@ -850,8 +709,19 @@ describe("scenario-flow-runner", () => {
                 },
               },
               {
+                set: "artifacts",
+                value: { expr: 'await qaImport("./suite-artifacts.js")' },
+              },
+              {
+                set: "redaction",
+                value: { expr: 'await qaImport("./gateway-log-redaction.js")' },
+              },
+              {
                 assert: {
-                  expr: 'typeof plugin.evaluateCodexPluginLifecycle === "function"',
+                  expr:
+                    'typeof plugin.evaluateCodexPluginLifecycle === "function" && ' +
+                    'typeof artifacts.publishQaSuiteArtifactFiles === "function" && ' +
+                    'typeof redaction.redactQaGatewayDebugText === "function"',
                 },
               },
             ],
@@ -870,35 +740,19 @@ describe("scenario-flow-runner", () => {
     let receivedError: unknown;
 
     const result = await runScenarioFlow({
-      api: {
-        state: createQaBusState(),
-        scenario: {
-          id: "qa-skip-import",
-          title: "qa-skip-import",
-          sourcePath: "qa/scenarios/qa-skip-import.yaml",
-          surface: "test",
-          objective: "test",
-          successCriteria: ["test"],
-          execution: { kind: "flow" },
-        },
-        config: {},
-        runScenario: async (
-          _name: string,
-          steps: Array<{ name: string; run: () => Promise<string | void> }>,
-        ) => {
-          try {
-            await steps[0]?.run();
-          } catch (error) {
-            receivedError = error;
-          }
-          return {
-            name: "qa-skip-import",
-            status: "skip" as const,
-            steps: [{ name: "throws imported skip", status: "skip" as const, details: message }],
-            details: message,
-          };
-        },
-      },
+      api: createImportApi("qa-skip-import", async (_name, steps) => {
+        try {
+          await steps[0]?.run();
+        } catch (error) {
+          receivedError = error;
+        }
+        return {
+          name: "qa-skip-import",
+          status: "skip" as const,
+          steps: [{ name: "throws imported skip", status: "skip" as const, details: message }],
+          details: message,
+        };
+      }),
       scenarioTitle: "qa-skip-import",
       flow: {
         steps: [

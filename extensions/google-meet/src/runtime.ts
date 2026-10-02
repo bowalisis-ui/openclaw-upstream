@@ -1,12 +1,18 @@
-// Google Meet composes platform strategies with the shared meeting session runtime.
 import { resolveDefaultAgentId } from "openclaw/plugin-sdk/agent-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   createMeetingSession,
+  endMeetingVoiceCallGatewayCall,
+  getMeetingVoiceCallGatewayCall,
+  isMeetingVoiceCallMissingError,
+  speakMeetingViaVoiceCallGateway,
+  type MeetingVoiceCallGateway,
   MeetingPlatformAdapter,
   MeetingSessionRuntime,
   type MeetingSessionLeaveResult,
+  type MeetingParticipationAttempt,
+  type MeetingParticipationRequest,
   type MeetingSessionRuntimeHandles,
   type MeetingSessionRuntimeJoinContext,
 } from "openclaw/plugin-sdk/meeting-runtime";
@@ -35,15 +41,13 @@ import {
   withSessionAgentConfig,
 } from "./runtime-session.js";
 import { getGoogleMeetRuntimeSetupStatus } from "./runtime-setup.js";
+import { participateInChromeMeet } from "./transports/chrome-participation.js";
 import {
   launchChromeMeet,
   launchChromeMeetOnNode,
   leaveChromeMeet,
-  leaveChromeMeetOnNode,
   readChromeMeetTranscript,
-  readChromeMeetTranscriptOnNode,
   recoverCurrentMeetTab,
-  recoverCurrentMeetTabOnNode,
 } from "./transports/chrome.js";
 import { GOOGLE_MEET_PLATFORM_ADAPTER } from "./transports/google-meet-platform-adapter.js";
 import type {
@@ -53,20 +57,8 @@ import type {
   GoogleMeetJoinResult,
   GoogleMeetSession,
 } from "./transports/types.js";
-import {
-  createVoiceCallGateway,
-  endMeetVoiceCallGatewayCall,
-  getMeetVoiceCallGatewayCall,
-  isVoiceCallMissingError,
-  joinMeetViaVoiceCallGateway,
-  speakMeetViaVoiceCallGateway,
-  type VoiceCallGateway,
-} from "./voice-call-gateway.js";
+import { createVoiceCallGateway, joinMeetViaVoiceCallGateway } from "./voice-call-gateway.js";
 
-type ChromeAudioBridgeResult = NonNullable<
-  | Awaited<ReturnType<typeof launchChromeMeet>>["audioBridge"]
-  | Awaited<ReturnType<typeof launchChromeMeetOnNode>>["audioBridge"]
->;
 type ChromeLaunchResult =
   | Awaited<ReturnType<typeof launchChromeMeet>>
   | Awaited<ReturnType<typeof launchChromeMeetOnNode>>;
@@ -94,9 +86,12 @@ const nowIso = () => new Date().toISOString();
 
 export class GoogleMeetRuntime {
   readonly #createdBrowserTabs = new Map<string, string>();
-  readonly #agentId: string;
-  readonly #voiceCallGateway: VoiceCallGateway;
+  readonly #voiceCallGateway: MeetingVoiceCallGateway;
   readonly #sessions: GoogleMeetSessionRuntime;
+
+  reconcileTranscriptPolicy(enabled: boolean): Promise<void> {
+    return this.#sessions.reconcileTranscriptPolicy(enabled);
+  }
 
   constructor(
     private readonly params: {
@@ -107,9 +102,44 @@ export class GoogleMeetRuntime {
     },
   ) {
     const adapter = GOOGLE_MEET_PLATFORM_ADAPTER;
-    this.#agentId = resolveDefaultAgentId(params.fullConfig);
     this.#voiceCallGateway = createVoiceCallGateway(params);
+    let participationStore:
+      | ReturnType<typeof params.runtime.state.openKeyedStore<MeetingParticipationAttempt>>
+      | undefined;
+    const getParticipationStore = () =>
+      (participationStore ??= params.runtime.state.openKeyedStore<MeetingParticipationAttempt>({
+        namespace: "meeting-participation",
+        maxEntries: 10_000,
+        overflowPolicy: "reject-new",
+      }));
     this.#sessions = new MeetingSessionRuntime({
+      participation: {
+        store: {
+          entries: async () => await getParticipationStore().entries(),
+          delete: async (key) => await getParticipationStore().delete(key),
+          lookup: async (key) => await getParticipationStore().lookup(key),
+          registerIfAbsent: async (key, attempt) =>
+            await getParticipationStore().registerIfAbsent(key, attempt),
+          register: async (key, attempt) => await getParticipationStore().register(key, attempt),
+        },
+        capabilities: (session) =>
+          isBrowserTransport(session.transport) &&
+          session.chrome?.launched &&
+          session.chrome.browserTab &&
+          session.chrome.health?.inCall === true &&
+          !session.chrome.health.manualAction
+            ? (adapter.browser.participation?.capabilities ?? [])
+            : [],
+        validateAction: (action) => adapter.browser.participation?.validateAction(action),
+        execute: async (session, request, assertCurrent) =>
+          await participateInChromeMeet({
+            runtime: params.runtime,
+            config: params.config,
+            session,
+            request,
+            assertCurrent,
+          }),
+      },
       logger: params.logger,
       logScope: "[google-meet]",
       formatError: formatErrorMessage,
@@ -146,9 +176,7 @@ export class GoogleMeetRuntime {
         url: adapter.urls.validateAndNormalize(request.url),
         transport: resolveTransport(request.transport, params.config),
         mode: resolveMode(request.mode, params.config),
-        agentId: normalizeAgentId(
-          request.agentId ?? params.config.realtime.agentId ?? this.#agentId,
-        ),
+        agentId: this.#resolveAgentId(request.agentId),
       }),
       createSession: ({ resolved, createdAt }): GoogleMeetSession =>
         createMeetingSession({ platform: adapter, config: params.config, resolved, createdAt }),
@@ -197,6 +225,7 @@ export class GoogleMeetRuntime {
         await this.#speakViaTransport(session, instructions),
       durableTranscripts: {
         config: params.fullConfig.transcripts,
+        openclawConfig: params.fullConfig,
         providerId: "google-meet",
         providerName: "Google Meet",
       },
@@ -209,6 +238,14 @@ export class GoogleMeetRuntime {
 
   async status(sessionId?: string) {
     return await this.#sessions.status(sessionId);
+  }
+
+  participationContext(sessionId: string) {
+    return this.#sessions.participationContext(sessionId);
+  }
+
+  participate(sessionId: string, request: MeetingParticipationRequest) {
+    return this.#sessions.participate(sessionId, request);
   }
 
   async transcript(sessionId: string, options: { sinceIndex?: number } = {}) {
@@ -251,19 +288,13 @@ export class GoogleMeetRuntime {
     const url = request.url
       ? GOOGLE_MEET_PLATFORM_ADAPTER.urls.validateAndNormalize(request.url)
       : undefined;
-    return transport === "chrome-node"
-      ? await recoverCurrentMeetTabOnNode({
-          runtime: this.params.runtime,
-          config: this.params.config,
-          fullConfig: this.params.fullConfig,
-          url,
-        })
-      : await recoverCurrentMeetTab({
-          runtime: this.params.runtime,
-          config: this.params.config,
-          fullConfig: this.params.fullConfig,
-          url,
-        });
+    return await recoverCurrentMeetTab({
+      runtime: this.params.runtime,
+      config: this.params.config,
+      fullConfig: this.params.fullConfig,
+      transport,
+      url,
+    });
   }
 
   async join(request: GoogleMeetJoinRequest): Promise<GoogleMeetJoinResult> {
@@ -292,8 +323,7 @@ export class GoogleMeetRuntime {
   #probeContext(): GoogleMeetRuntimeProbeContext {
     return {
       config: this.params.config,
-      resolveAgentId: (request) =>
-        normalizeAgentId(request.agentId ?? this.params.config.realtime.agentId ?? this.#agentId),
+      resolveAgentId: (request) => this.#resolveAgentId(request.agentId),
       list: () => this.list(),
       join: async (request) => await this.join(request),
       isReusable: (session, resolved) => this.#sessions.isReusableSession(session, resolved),
@@ -303,6 +333,14 @@ export class GoogleMeetRuntime {
     };
   }
 
+  #resolveAgentId(requestedAgentId?: string): string {
+    return normalizeAgentId(
+      requestedAgentId ??
+        this.params.config.realtime.agentId ??
+        resolveDefaultAgentId(this.params.fullConfig),
+    );
+  }
+
   async #joinTransport(
     request: GoogleMeetJoinRequest,
     session: GoogleMeetSession,
@@ -310,28 +348,18 @@ export class GoogleMeetRuntime {
   ): Promise<{ delegatedSpoken?: boolean }> {
     if (isBrowserTransport(session.transport)) {
       const chromeConfig = withSessionAgentConfig(this.params.config, session.agentId);
-      const result: ChromeLaunchResult =
-        session.transport === "chrome-node"
-          ? await launchChromeMeetOnNode({
-              runtime: this.params.runtime,
-              config: chromeConfig,
-              fullConfig: this.params.fullConfig,
-              meetingSessionId: session.id,
-              requesterSessionKey: request.requesterSessionKey,
-              mode: session.mode,
-              url: session.url,
-              logger: this.params.logger,
-            })
-          : await launchChromeMeet({
-              runtime: this.params.runtime,
-              config: chromeConfig,
-              fullConfig: this.params.fullConfig,
-              meetingSessionId: session.id,
-              requesterSessionKey: request.requesterSessionKey,
-              mode: session.mode,
-              url: session.url,
-              logger: this.params.logger,
-            });
+      const launch =
+        session.transport === "chrome-node" ? launchChromeMeetOnNode : launchChromeMeet;
+      const result: ChromeLaunchResult = await launch({
+        runtime: this.params.runtime,
+        config: chromeConfig,
+        fullConfig: this.params.fullConfig,
+        meetingSessionId: session.id,
+        requesterSessionKey: request.requesterSessionKey,
+        mode: session.mode,
+        url: session.url,
+        logger: this.params.logger,
+      });
       const nodeId = "nodeId" in result ? result.nodeId : undefined;
       let tab = result.tab;
       const createdKey =
@@ -430,7 +458,7 @@ export class GoogleMeetRuntime {
     if (voiceCallResult?.callId) {
       context.attachRuntimeHandles(session, {
         stop: async () => {
-          await endMeetVoiceCallGatewayCall({
+          await endMeetingVoiceCallGatewayCall({
             gateway: this.#voiceCallGateway,
             callId: voiceCallResult.callId,
           });
@@ -449,7 +477,7 @@ export class GoogleMeetRuntime {
 
   #attachChromeAudioBridge(
     session: GoogleMeetSession,
-    audioBridge: ChromeAudioBridgeResult | undefined,
+    audioBridge: ChromeLaunchResult["audioBridge"],
   ): MeetingSessionRuntimeHandles<GoogleMeetChromeHealth> | undefined {
     if (!session.chrome || !audioBridge) {
       return undefined;
@@ -489,26 +517,16 @@ export class GoogleMeetRuntime {
         ? { chromeNode: { ...config.chromeNode, node: session.chrome.nodeId } }
         : {}),
     };
-    const result: ChromeLaunchResult =
-      session.transport === "chrome-node"
-        ? await launchChromeMeetOnNode({
-            runtime: this.params.runtime,
-            config: recoveryConfig,
-            fullConfig: this.params.fullConfig,
-            meetingSessionId: session.id,
-            mode: session.mode,
-            url: session.url,
-            logger: this.params.logger,
-          })
-        : await launchChromeMeet({
-            runtime: this.params.runtime,
-            config: recoveryConfig,
-            fullConfig: this.params.fullConfig,
-            meetingSessionId: session.id,
-            mode: session.mode,
-            url: session.url,
-            logger: this.params.logger,
-          });
+    const launch = session.transport === "chrome-node" ? launchChromeMeetOnNode : launchChromeMeet;
+    const result: ChromeLaunchResult = await launch({
+      runtime: this.params.runtime,
+      config: recoveryConfig,
+      fullConfig: this.params.fullConfig,
+      meetingSessionId: session.id,
+      mode: session.mode,
+      url: session.url,
+      logger: this.params.logger,
+    });
     session.updatedAt = nowIso();
     return this.#attachChromeAudioBridge(session, result.audioBridge);
   }
@@ -518,28 +536,17 @@ export class GoogleMeetRuntime {
     options: { force?: boolean; readOnly?: boolean } = {},
   ): Promise<void> {
     try {
-      const result =
-        session.transport === "chrome-node"
-          ? await recoverCurrentMeetTabOnNode({
-              runtime: this.params.runtime,
-              config: this.params.config,
-              fullConfig: this.params.fullConfig,
-              mode: session.mode,
-              readOnly: options.readOnly,
-              trackedMeetingUrl: session.url,
-              trackedTargetId: session.chrome?.browserTab?.targetId,
-              url: session.url,
-            })
-          : await recoverCurrentMeetTab({
-              runtime: this.params.runtime,
-              config: this.params.config,
-              fullConfig: this.params.fullConfig,
-              mode: session.mode,
-              readOnly: options.readOnly,
-              trackedMeetingUrl: session.url,
-              trackedTargetId: session.chrome?.browserTab?.targetId,
-              url: session.url,
-            });
+      const result = await recoverCurrentMeetTab({
+        runtime: this.params.runtime,
+        config: this.params.config,
+        fullConfig: this.params.fullConfig,
+        transport: session.transport === "chrome-node" ? "chrome-node" : "chrome",
+        mode: session.mode,
+        readOnly: options.readOnly,
+        trackedMeetingUrl: session.url,
+        trackedTargetId: session.chrome?.browserTab?.targetId,
+        url: session.url,
+      });
       if (result.found && session.chrome) {
         if (result.targetId) {
           const currentTab = session.chrome.browserTab;
@@ -578,7 +585,7 @@ export class GoogleMeetRuntime {
       return;
     }
     try {
-      const status = await getMeetVoiceCallGatewayCall({
+      const status = await getMeetingVoiceCallGatewayCall({
         gateway: this.#voiceCallGateway,
         callId,
       });
@@ -602,7 +609,7 @@ export class GoogleMeetRuntime {
       return undefined;
     }
     try {
-      await speakMeetViaVoiceCallGateway({
+      await speakMeetingViaVoiceCallGateway({
         gateway: this.#voiceCallGateway,
         callId: session.twilio.voiceCallId,
         message:
@@ -612,7 +619,7 @@ export class GoogleMeetRuntime {
           "",
       });
     } catch (error) {
-      if (!isVoiceCallMissingError(error)) {
+      if (!isMeetingVoiceCallMissingError(error)) {
         throw error;
       }
       this.#sessions.markSessionEnded(session, "Voice Call is no longer active.");
@@ -628,24 +635,17 @@ export class GoogleMeetRuntime {
     if (!tab) {
       return undefined;
     }
-    return session.transport === "chrome-node"
-      ? await readChromeMeetTranscriptOnNode({
-          runtime: this.params.runtime,
-          nodeId: session.chrome?.nodeId,
-          config: this.params.config,
-          ...(options.finalize === undefined ? {} : { finalize: options.finalize }),
-          meetingUrl: session.url,
-          meetingSessionId: session.id,
-          tab,
-        })
-      : await readChromeMeetTranscript({
-          runtime: this.params.runtime,
-          config: this.params.config,
-          ...(options.finalize === undefined ? {} : { finalize: options.finalize }),
-          meetingUrl: session.url,
-          meetingSessionId: session.id,
-          tab,
-        });
+    return await readChromeMeetTranscript({
+      runtime: this.params.runtime,
+      ...(session.transport === "chrome-node"
+        ? { transport: "chrome-node", nodeId: session.chrome?.nodeId }
+        : {}),
+      config: this.params.config,
+      ...(options.finalize === undefined ? {} : { finalize: options.finalize }),
+      meetingUrl: session.url,
+      meetingSessionId: session.id,
+      tab,
+    });
   }
 
   async #releaseBrowserTab(session: GoogleMeetSession): Promise<boolean | undefined> {
@@ -676,23 +676,16 @@ export class GoogleMeetRuntime {
     }
     let left: boolean;
     try {
-      const result =
-        session.transport === "chrome-node"
-          ? await leaveChromeMeetOnNode({
-              runtime: this.params.runtime,
-              nodeId: session.chrome?.nodeId,
-              config: this.params.config,
-              meetingSessionId: session.id,
-              meetingUrl: session.url,
-              tab,
-            })
-          : await leaveChromeMeet({
-              runtime: this.params.runtime,
-              config: this.params.config,
-              meetingSessionId: session.id,
-              meetingUrl: session.url,
-              tab,
-            });
+      const result = await leaveChromeMeet({
+        runtime: this.params.runtime,
+        ...(session.transport === "chrome-node"
+          ? { transport: "chrome-node", nodeId: session.chrome?.nodeId }
+          : {}),
+        config: this.params.config,
+        meetingSessionId: session.id,
+        meetingUrl: session.url,
+        tab,
+      });
       noteSession(session, result.note);
       left = result.left;
     } catch (error) {

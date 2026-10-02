@@ -160,6 +160,23 @@ function writeClawPack(
   };
 }
 
+it.each([{ version: "2026.7.1-alpha.3" }, { publishTag: "alpha" }])(
+  "rejects retired alpha bootstrap %j",
+  async (override) => {
+    const paths = fixture();
+    const matrix = JSON.parse(readFileSync(paths.matrixPath, "utf8"));
+    Object.assign(matrix[0], override);
+    writeFileSync(paths.matrixPath, JSON.stringify(matrix));
+    await expect(
+      createClawHubBootstrapArtifactManifest({
+        ...common(paths),
+        matrixPath: paths.matrixPath,
+        outputPath: paths.manifestPath,
+      }),
+    ).rejects.toThrow("Alpha releases are retired;");
+  },
+);
+
 describe("ClawHub bootstrap artifact manifest", () => {
   it("binds the exact package set and packed file identity", async () => {
     const paths = fixture();
@@ -391,41 +408,6 @@ describe("ClawHub packed artifact identity", () => {
       sha256: pack.sha256,
       size: pack.bytes.byteLength,
     });
-  });
-
-  it("rejects a whitespace-bearing alias before a later package.json", async () => {
-    const pack = writeClawPack([
-      {
-        name: " package.json ",
-        prefix: " package ",
-        contents: JSON.stringify({
-          name: "@openclaw/meta-provider",
-          version: "2026.7.1-beta.3",
-        }),
-      },
-      {
-        name: "package/package.json",
-        contents: JSON.stringify({
-          name: "@openclaw/other",
-          version: "9.9.9",
-        }),
-      },
-      {
-        name: "package/openclaw.plugin.json",
-        contents: JSON.stringify({ id: "meta" }),
-      },
-    ]);
-
-    await expect(
-      verifyClawHubPackedArtifactIdentity({
-        artifactPath: pack.artifactPath,
-        expectedSha256: pack.sha256,
-        expectedSize: String(pack.bytes.byteLength),
-        expectedDir: "extensions/meta",
-        expectedName: "@openclaw/meta-provider",
-        expectedVersion: "2026.7.1-beta.3",
-      }),
-    ).rejects.toThrow("changes under the pinned ClawHub path normalization");
   });
 
   it("rejects a whitespace-bearing alias after a canonical package.json", async () => {

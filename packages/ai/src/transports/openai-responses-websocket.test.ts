@@ -8,7 +8,6 @@ const websocketState = vi.hoisted(() => ({
   }>,
   clients: [] as Array<{ apiKey?: string }>,
   options: [] as Array<{ headers?: Record<string, string> }>,
-  requests: [] as Array<Record<string, unknown>>,
   responseBatches: [] as Array<Array<Record<string, unknown>>>,
 }));
 
@@ -25,8 +24,7 @@ vi.mock("openai/resources/responses/ws.js", () => ({
       websocketState.options.push(options);
     }
 
-    send(request: Record<string, unknown>) {
-      websocketState.requests.push(request);
+    send() {
       this.events = websocketState.responseBatches.shift() ?? [];
     }
 
@@ -60,11 +58,16 @@ vi.mock("openai/resources/responses/ws.js", () => ({
   },
 }));
 
-import { configureAiTransportHost, getAiTransportHost } from "../host.js";
+import {
+  configureAiTransportHost,
+  createAiTransportHost,
+  getAiTransportHost,
+  runWithAiTransportHost,
+} from "../host.js";
 import { cleanupSessionResources } from "../session-resources.js";
 import {
   createOpenAIResponsesWebSocketStream,
-  supportsNativeOpenAIResponsesWebSocket,
+  supportsNativeOpenAIResponsesEndpoint,
 } from "./openai-responses-websocket.js";
 
 const initialHost = getAiTransportHost();
@@ -83,6 +86,7 @@ const assistantOutput = {
   role: "assistant",
   status: "completed",
   content: [{ type: "output_text", text: "one", annotations: [] }],
+  phase: "final_answer",
 };
 
 function completion(responseId: string, output: Array<Record<string, unknown>> = []) {
@@ -97,18 +101,11 @@ function completion(responseId: string, output: Array<Record<string, unknown>> =
   };
 }
 
-async function consume(stream: AsyncIterable<unknown>): Promise<unknown[]> {
-  const events: unknown[] = [];
-  for await (const event of stream) {
-    events.push(event);
-  }
-  return events;
-}
-
 async function consumeResponse(response: ReturnType<typeof createOpenAIResponsesWebSocketStream>) {
-  const events = await consume(response.stream);
+  for await (const event of response.stream) {
+    void event;
+  }
   response.finish();
-  return events;
 }
 
 function createStream(request: Record<string, unknown>, overrides: { sessionId?: string } = {}) {
@@ -126,7 +123,6 @@ describe("native OpenAI Responses WebSocket transport", () => {
     websocketState.instances.length = 0;
     websocketState.clients.length = 0;
     websocketState.options.length = 0;
-    websocketState.requests.length = 0;
     websocketState.responseBatches.length = 0;
     configureAiTransportHost(initialHost);
   });
@@ -138,7 +134,7 @@ describe("native OpenAI Responses WebSocket transport", () => {
 
   it("only enables WebSockets for the official native OpenAI Responses endpoint", () => {
     expect(
-      supportsNativeOpenAIResponsesWebSocket({
+      supportsNativeOpenAIResponsesEndpoint({
         provider: "openai",
         api: "openai-responses",
         baseUrl: "https://api.openai.com/v1",
@@ -155,7 +151,7 @@ describe("native OpenAI Responses WebSocket transport", () => {
     ["different provider", "azure-openai", "https://api.openai.com/v1"],
   ])("rejects %s", (_name, provider, baseUrl) => {
     expect(
-      supportsNativeOpenAIResponsesWebSocket({ provider, api: "openai-responses", baseUrl }),
+      supportsNativeOpenAIResponsesEndpoint({ provider, api: "openai-responses", baseUrl }),
     ).toBe(false);
   });
 
@@ -206,22 +202,30 @@ describe("native OpenAI Responses WebSocket transport", () => {
     });
   });
 
-  it("uses the response id when persisted encrypted reasoning has a different replay shape", async () => {
+  it("continues across equivalent request ordering, omissions, and persisted reasoning replay", async () => {
     const reasoning = { type: "reasoning", id: "rs_1", encrypted_content: "ciphertext" };
     websocketState.responseBatches.push(
       [completion("resp_1", [reasoning, assistantOutput])],
       [completion("resp_2")],
     );
-    await consumeResponse(createStream({ model: "gpt-5.6-luna", input: [firstUser] }));
+    await consumeResponse(
+      createStream({
+        model: "gpt-5.6-luna",
+        metadata: { beta: "2", alpha: "1" },
+        max_output_tokens: undefined,
+        input: [firstUser],
+      }),
+    );
 
     const second = createStream({
-      model: "gpt-5.6-luna",
       input: [
         firstUser,
         { type: "reasoning", summary: [] },
         assistantOutput,
         { role: "user", content: "second" },
       ],
+      metadata: { alpha: "1", beta: "2" },
+      model: "gpt-5.6-luna",
     });
 
     expect(second.continuationStatus).toBe("continued");
@@ -291,10 +295,10 @@ describe("native OpenAI Responses WebSocket transport", () => {
 
   it.each([
     {
-      name: "tool schema change",
+      name: "tool choice change",
       mutate: (request: Record<string, unknown>) => ({
         ...request,
-        tools: [{ type: "function", name: "write", parameters: { type: "object" } }],
+        tool_choice: "none",
       }),
     },
     {
@@ -302,6 +306,17 @@ describe("native OpenAI Responses WebSocket transport", () => {
       mutate: (request: Record<string, unknown>) => ({
         ...request,
         input: [{ role: "user", content: "rewritten" }],
+      }),
+    },
+    {
+      name: "assistant phase change",
+      mutate: (request: Record<string, unknown>) => ({
+        ...request,
+        input: [
+          firstUser,
+          { ...assistantOutput, phase: "commentary" },
+          { role: "user", content: "second" },
+        ],
       }),
     },
   ])("resets continuation on $name", async ({ mutate }) => {
@@ -375,5 +390,38 @@ describe("native OpenAI Responses WebSocket transport", () => {
     cleanupSessionResources("session-1");
     expect(websocketState.instances[0]?.closed).toBe(true);
     expect(websocketState.instances[1]?.closed).toBe(false);
+  });
+
+  it("keeps matching-session and all-session cleanup inside one runtime owner", async () => {
+    const firstHost = createAiTransportHost();
+    const secondHost = createAiTransportHost();
+    websocketState.responseBatches.push(
+      [completion("first-shared")],
+      [completion("first-other")],
+      [completion("second-shared")],
+    );
+    await runWithAiTransportHost(firstHost, () =>
+      consumeResponse(createStream({ model: "gpt-5.6-luna", input: [firstUser] })),
+    );
+    await runWithAiTransportHost(firstHost, () =>
+      consumeResponse(
+        createStream(
+          { model: "gpt-5.6-luna", input: [{ role: "user", content: "other" }] },
+          { sessionId: "other" },
+        ),
+      ),
+    );
+    await runWithAiTransportHost(secondHost, () =>
+      consumeResponse(createStream({ model: "gpt-5.6-luna", input: [firstUser] })),
+    );
+
+    cleanupSessionResources("session-1", firstHost);
+    expect(websocketState.instances.map(({ closed }) => closed)).toEqual([true, false, false]);
+
+    cleanupSessionResources(undefined, firstHost);
+    expect(websocketState.instances.map(({ closed }) => closed)).toEqual([true, true, false]);
+
+    cleanupSessionResources(undefined, secondHost);
+    expect(websocketState.instances.map(({ closed }) => closed)).toEqual([true, true, true]);
   });
 });

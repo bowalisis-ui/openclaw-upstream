@@ -1,14 +1,16 @@
 import path from "node:path";
+import { assertNoWindowsNetworkPath, safeFileURLToPath } from "@openclaw/fs-safe/advanced";
 import { MAX_VIDEO_BYTES } from "@openclaw/media-core/constants";
 import { normalizeMimeType } from "@openclaw/media-core/mime";
+import { asNonArrayRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type {
   ModelInputContent,
   ProviderContext,
 } from "../../../../packages/ai/src/provider-types.js";
 import { formatErrorMessage } from "../../../infra/errors.js";
-import { assertNoWindowsNetworkPath, safeFileURLToPath } from "../../../infra/local-file-access.js";
 import type { Context, ImageContent, TextContent } from "../../../llm/types.js";
+import { redactSensitiveText } from "../../../logging/redact.js";
 import {
   attachRuntimePromptMediaFacts,
   isImageMediaFact,
@@ -22,7 +24,9 @@ import {
 import { resolveMediaReferenceLocalPath } from "../../../media/media-reference.js";
 import type { PromptImageOrderEntry } from "../../../media/prompt-image-order.js";
 import { finalizeRuntimePromptImages } from "../../../media/runtime-prompt-image-provenance.js";
+import { getMediaDir } from "../../../media/store.js";
 import { loadWebMedia, type WebMediaResult } from "../../../media/web-media.js";
+import type { UserTurnTranscriptRecorder } from "../../../sessions/user-turn-transcript.types.js";
 import { resolveUserPath } from "../../../utils.js";
 import type { ImageSanitizationLimits } from "../../image-sanitization.js";
 import type { AgentMessage } from "../../runtime/index.js";
@@ -32,6 +36,7 @@ import {
 } from "../../sandbox-media-paths.js";
 import type { SandboxFsBridge } from "../../sandbox/fs-bridge.js";
 import { sanitizeImageBlocks } from "../../tool-images.js";
+import { getAgentWorkspaceAccess } from "../../workspace-access.js";
 import { log } from "../logger.js";
 import {
   collectMediaImageRefs,
@@ -61,10 +66,7 @@ const IMAGE_EXTENSION_NAMES = [
   "heic",
   "heif",
 ] as const;
-const IMAGE_EXTENSIONS = new Set<string>();
-for (const ext of IMAGE_EXTENSION_NAMES) {
-  IMAGE_EXTENSIONS.add(`.${ext}`);
-}
+const IMAGE_EXTENSIONS = new Set<string>(IMAGE_EXTENSION_NAMES.map((ext) => `.${ext}`));
 const IMAGE_EXTENSION_PATTERN = IMAGE_EXTENSION_NAMES.join("|");
 const FILE_URL_REGEX_SOURCE = "file://[^\\s<>\"'`\\]]+\\.(?:" + IMAGE_EXTENSION_PATTERN + ")";
 const WINDOWS_DRIVE_PATH_REGEX_SOURCE =
@@ -78,8 +80,7 @@ const LEGACY_ATTACHMENT_MARKER_PATTERN =
   /\[(?:media attached(?:\s+\d+\/\d+)?:|Image:\s*source:)\s*[^\]]+\]/gi;
 
 function isImageExtension(filePath: string): boolean {
-  const ext = normalizeLowercaseStringOrEmpty(path.extname(filePath));
-  return IMAGE_EXTENSIONS.has(ext);
+  return IMAGE_EXTENSIONS.has(normalizeLowercaseStringOrEmpty(path.extname(filePath)));
 }
 
 function normalizeRefForDedupe(raw: string): string {
@@ -176,15 +177,11 @@ export function detectImageReferences(prompt: string): MediaFileRef[] {
     }
   }
 
-  while ((match = WINDOWS_DRIVE_PATH_PATTERN.exec(pathPrompt)) !== null) {
-    if (match[1]) {
-      addPathRef(match[1]);
-    }
-  }
-
-  while ((match = PATH_PATTERN.exec(pathPrompt)) !== null) {
-    if (match[1]) {
-      addPathRef(match[1]);
+  for (const pattern of [WINDOWS_DRIVE_PATH_PATTERN, PATH_PATTERN]) {
+    while ((match = pattern.exec(pathPrompt)) !== null) {
+      if (match[1]) {
+        addPathRef(match[1]);
+      }
     }
   }
 
@@ -220,6 +217,7 @@ async function loadMediaFromRef(
   },
 ): Promise<WebMediaResult | null> {
   options?.signal?.throwIfAborted();
+  const redactedRef = redactSensitiveText(ref.raw || ref.resolved);
   try {
     let targetPath = ref.resolved;
 
@@ -240,8 +238,8 @@ async function loadMediaFromRef(
         });
         targetPath = resolved.resolved;
       } catch (err) {
-        log.debug(
-          `${options?.label ?? "Native media"}: sandbox validation failed: ${formatErrorMessage(err)}`,
+        log.warn(
+          `${options?.label ?? "Native media"}: sandbox validation failed for ${redactedRef}: ${redactSensitiveText(formatErrorMessage(err))}`,
         );
         return null;
       }
@@ -266,46 +264,24 @@ async function loadMediaFromRef(
     return media;
   } catch (err) {
     options?.signal?.throwIfAborted();
-    log.debug(`${options?.label ?? "Native media"}: failed to load: ${formatErrorMessage(err)}`);
+    log.warn(
+      `${options?.label ?? "Native media"}: failed to load ${redactedRef}: ${redactSensitiveText(formatErrorMessage(err))}`,
+    );
     return null;
   }
 }
 
-async function loadImageFromRef(
-  ref: MediaFileRef,
-  workspaceDir: string,
-  options?: Parameters<typeof loadMediaFromRef>[2],
-): Promise<ImageContent | null> {
-  const media = await loadMediaFromRef(ref, workspaceDir, { ...options, label: "Native image" });
-  if (!media || media.kind !== "image") {
-    return null;
-  }
-  return {
-    type: "image",
-    data: media.buffer.toString("base64"),
-    mimeType: media.contentType ?? "image/jpeg",
-  };
-}
-
-function modelSupportsImages(model: { input?: string[] }): boolean {
-  return model.input?.includes("image") ?? false;
-}
-
-export async function detectAndLoadPromptImages(params: {
-  prompt: string;
-  media?: readonly MediaFact[];
-  workspaceDir: string;
-  model: { input?: string[] };
-  existingImages?: ImageContent[];
-  existingImageFactIndexes?: readonly ImageFactIndex[];
-  imageOrder?: PromptImageOrderEntry[];
-  mediaImageLayout?: MediaImageLayout;
-  maxBytes?: number;
-  maxDimensionPx?: number;
-  workspaceOnly?: boolean;
-  localRoots?: readonly string[];
-  sandbox?: { root: string; bridge: SandboxFsBridge };
-}): Promise<{
+export async function detectAndLoadPromptImages(
+  params: Omit<PromptMediaOptions, "provider" | "signal" | "onCurrentTurnImageFailure"> & {
+    prompt: string;
+    userTurnTranscriptRecorder?: Pick<UserTurnTranscriptRecorder, "resolveMessage">;
+    media?: readonly MediaFact[];
+    existingImages?: ImageContent[];
+    existingImageFactIndexes?: readonly ImageFactIndex[];
+    imageOrder?: PromptImageOrderEntry[];
+    mediaImageLayout?: MediaImageLayout;
+  },
+): Promise<{
   images: ImageContent[];
   imageFactIndexes: ImageFactIndex[];
   detectedRefs: MediaFileRef[];
@@ -313,7 +289,7 @@ export async function detectAndLoadPromptImages(params: {
   loadedCount: number;
   skippedCount: number;
 }> {
-  if (!modelSupportsImages(params.model)) {
+  if (!params.model.input?.includes("image")) {
     return {
       images: [],
       imageFactIndexes: [],
@@ -323,12 +299,20 @@ export async function detectAndLoadPromptImages(params: {
       skippedCount: 0,
     };
   }
-  const media = normalizeMediaFacts(params.media);
-  const suppressed = new Set(params.mediaImageLayout?.suppressedFactIndexes ?? []);
+  // Deferred transcript preparation can carry fresher facts than the recorder's
+  // initial message. Resolve without persisting before choosing image ownership.
+  const message = await params.userTurnTranscriptRecorder?.resolveMessage();
+  const media = normalizeMediaFacts(
+    (message ? readPersistedMediaFacts(message) : undefined) ?? params.media,
+  );
+  const mediaImageLayout =
+    (message ? readPersistedMediaImageLayout(message) : undefined) ?? params.mediaImageLayout;
+  const suppressed = new Set([
+    ...(mediaImageLayout?.suppressedFactIndexes ?? []),
+    ...media.flatMap((fact, index) => (fact.hydrationSuppressed === true ? [index] : [])),
+  ]);
   const imageFactIndexes = media.flatMap((fact, factIndex) =>
-    isImageMediaFact(fact) && fact.hydrationSuppressed !== true && !suppressed.has(factIndex)
-      ? [factIndex]
-      : [],
+    isImageMediaFact(fact) && !suppressed.has(factIndex) ? [factIndex] : [],
   );
   const refs = collectMediaImageRefs(media);
   const refsByFact = new Map(refs.flatMap((ref) => (ref ? [[ref.factIndex, ref] as const] : [])));
@@ -359,23 +343,26 @@ export async function detectAndLoadPromptImages(params: {
           : ("offloaded" as const),
     }));
   })();
-  const slots = params.mediaImageLayout?.slots.length
-    ? params.mediaImageLayout.slots.filter(
+  const slots = mediaImageLayout?.slots.length
+    ? mediaImageLayout.slots.filter(
         (slot) => slot.factIndex === undefined || !suppressed.has(slot.factIndex),
       )
     : inferredSlots;
-  const layoutInlineIndexes = slots.flatMap((slot) =>
+  const layoutInlineIndexes = (mediaImageLayout?.slots ?? slots).flatMap((slot) =>
     slot.kind === "inline" ? [slot.factIndex ?? null] : [],
   );
   const existingIndexes =
+    (message ? readPersistedImageBlockFactIndexes(message) : undefined) ??
     params.existingImageFactIndexes ??
     (layoutInlineIndexes.length === (params.existingImages?.length ?? 0)
       ? layoutInlineIndexes
       : params.existingImages?.map(() => null));
-  const unusedExisting = (params.existingImages ?? []).map((image, index) => ({
-    image,
-    factIndex: existingIndexes?.[index] ?? null,
-  }));
+  const unusedExisting = (params.existingImages ?? [])
+    .map((image, index) => ({
+      image,
+      factIndex: existingIndexes?.[index] ?? null,
+    }))
+    .filter((entry) => entry.factIndex === null || !suppressed.has(entry.factIndex));
   const takeExisting = (
     factIndex: number | undefined,
     allowUnowned: boolean,
@@ -421,19 +408,37 @@ export async function detectAndLoadPromptImages(params: {
   let loadedCount = 0;
   let failedMediaCount = 0;
   let skippedCount = 0;
-  const loadRef = async (ref: MediaFileRef & { workspaceDir?: string }) => {
-    const image = await loadImageFromRef(ref, ref.workspaceDir ?? params.workspaceDir, {
+  const loadRef = async (ref: MediaFileRef & { workspaceDir?: string }, attachment = false) => {
+    // Remote workspaces keep admitted attachment originals on Gateway for hydration.
+    // Prompt-discovered workspace references still use the sandbox boundary.
+    const gatewayAttachment =
+      attachment &&
+      Boolean(
+        getAgentWorkspaceAccess(
+          params.agentWorkspaceDir ?? params.workspaceDir,
+          "prepareTurnAttachments",
+        )?.prepareTurnAttachments,
+      );
+    const loadedMedia = await loadMediaFromRef(ref, ref.workspaceDir ?? params.workspaceDir, {
+      label: "Native image",
       maxBytes: params.maxBytes,
       workspaceOnly: params.workspaceOnly,
-      localRoots: params.localRoots ?? (params.workspaceOnly ? [params.workspaceDir] : undefined),
-      sandbox: params.sandbox,
+      localRoots: gatewayAttachment
+        ? [getMediaDir()]
+        : (params.localRoots ?? (params.workspaceOnly ? [params.workspaceDir] : undefined)),
+      sandbox: gatewayAttachment ? undefined : params.sandbox,
     });
-    if (image) {
-      loadedCount++;
-      log.debug(`Native image: loaded ${ref.type} ${ref.resolved}`);
-    } else {
+    if (!loadedMedia || loadedMedia.kind !== "image") {
       skippedCount++;
+      return null;
     }
+    const image: ImageContent = {
+      type: "image",
+      data: loadedMedia.buffer.toString("base64"),
+      mimeType: loadedMedia.contentType ?? "image/jpeg",
+    };
+    loadedCount++;
+    log.debug(`Native image: loaded ${ref.type} ${ref.resolved}`);
     return image;
   };
   const promptImages: PromptImageEntry[] = [];
@@ -443,13 +448,11 @@ export async function detectAndLoadPromptImages(params: {
       promptImages.push(existing);
       continue;
     }
-    if (slot.kind === "inline") {
-      failedMediaCount++;
-      continue;
-    }
+    // Gateway-owned transcripts retain managed facts, not necessarily inline bytes.
+    // A missing inline block must hydrate its exact fact on replay, just like an offloaded slot.
     const ref = slot.factIndex === undefined ? undefined : refsByFact.get(slot.factIndex);
-    const image = ref?.hydrate ? await loadRef(ref) : null;
-    if (ref?.hydrate && !image) {
+    const image = ref?.hydrate ? await loadRef(ref, true) : null;
+    if ((ref?.hydrate || slot.kind === "inline") && !image) {
       failedMediaCount++;
     }
     if (image) {
@@ -480,6 +483,8 @@ export async function detectAndLoadPromptImages(params: {
 
 type PromptMediaOptions = {
   workspaceDir: string;
+  /** Registered agent workspace, when sandbox execution uses a different directory. */
+  agentWorkspaceDir?: string;
   model: { input?: string[] };
   maxBytes?: number;
   maxDimensionPx?: number;
@@ -488,7 +493,12 @@ type PromptMediaOptions = {
   sandbox?: { root: string; bridge: SandboxFsBridge };
   provider?: boolean;
   signal?: AbortSignal;
+  onCurrentTurnImageFailure?: (count: number) => void;
 };
+
+export function buildPromptImageFailureNotice(count: number): string {
+  return `System note: ${count} image attachment${count === 1 ? "" : "s"} could not be loaded; their image contents are unavailable. Tell the user and ask them to resend ${count === 1 ? "the image" : "the images"}; do not claim inspection.`;
+}
 
 const VIDEO_OMISSION = {
   unsupported: "(video omitted: provider does not support native video)",
@@ -506,15 +516,22 @@ async function materializeVideoFact(
     return { type: "text", text: VIDEO_OMISSION.limit };
   }
   const ref = resolveMediaFactLocalRef(fact);
+  const gatewayAttachment = Boolean(
+    getAgentWorkspaceAccess(
+      options.agentWorkspaceDir ?? options.workspaceDir,
+      "prepareTurnAttachments",
+    )?.prepareTurnAttachments,
+  );
   const loaded = ref
     ? await loadMediaFromRef(ref, fact.workspaceDir ?? options.workspaceDir, {
         label: "Native video",
         maxBytes: budget.remaining,
         signal: options.signal,
         workspaceOnly: options.workspaceOnly,
-        localRoots:
-          options.localRoots ?? (options.workspaceOnly ? [options.workspaceDir] : undefined),
-        sandbox: options.sandbox,
+        localRoots: gatewayAttachment
+          ? [getMediaDir()]
+          : (options.localRoots ?? (options.workspaceOnly ? [options.workspaceDir] : undefined)),
+        sandbox: gatewayAttachment ? undefined : options.sandbox,
       })
     : null;
   if (!loaded) {
@@ -543,6 +560,10 @@ async function projectOrderedPromptMedia(params: {
   const projected: ModelInputContent[] = params.content.filter(
     (block): block is TextContent => block.type === "text" && !generatedMarkers.has(block.text),
   );
+  // Hydration already resolved image order, including inline blocks with no managed fact.
+  if (!params.media.some(isVideoMediaFact)) {
+    return [...projected, ...params.images];
+  }
   const imagesByFact = new Map<number, ImageContent[]>();
   const factlessImages: ImageContent[] = [];
   params.images.forEach((image, index) => {
@@ -575,12 +596,13 @@ async function materializePromptMediaMessages(
 ): Promise<AgentMessage[]> {
   let hydrated: AgentMessage[] | undefined;
   const videoBudget = { remaining: MAX_VIDEO_BYTES };
+  const activeUserIndex = messages.findLastIndex((message) => message.role === "user");
   for (const [index, message] of messages.entries()) {
     if (message.role !== "user") {
       continue;
     }
     const runtimeMedia = readRuntimePromptMediaFacts(message);
-    const meta = (message as unknown as Record<string, unknown>)["__openclaw"];
+    const meta = Reflect.get(message, "__openclaw");
     const resolvedMedia = runtimeMedia ?? readPersistedMediaFacts(message) ?? [];
     const runtimeImageOrder = readRuntimePromptImageOrder(message);
     const mediaImageLayout = readPersistedMediaImageLayout(message);
@@ -592,18 +614,12 @@ async function materializePromptMediaMessages(
       : [{ type: "text" as const, text: message.content }];
     const existingImages = content.filter((block): block is ImageContent => block.type === "image");
     const result = await detectAndLoadPromptImages({
+      ...options,
       prompt: "",
       media: resolvedMedia,
-      workspaceDir: options.workspaceDir,
-      model: options.model,
       existingImages,
       existingImageFactIndexes: readPersistedImageBlockFactIndexes(message),
       mediaImageLayout,
-      maxBytes: options.maxBytes,
-      maxDimensionPx: options.maxDimensionPx,
-      workspaceOnly: options.workspaceOnly,
-      localRoots: options.localRoots,
-      sandbox: options.sandbox,
     });
     const projectedContent = await projectOrderedPromptMedia({
       content,
@@ -613,6 +629,17 @@ async function materializePromptMediaMessages(
       options,
       budget: videoBudget,
     });
+    if (
+      (options.provider || options.onCurrentTurnImageFailure) &&
+      index === activeUserIndex &&
+      result.failedMediaCount > 0
+    ) {
+      options.onCurrentTurnImageFailure?.(result.failedMediaCount);
+      projectedContent.push({
+        type: "text",
+        text: buildPromptImageFailureNotice(result.failedMediaCount),
+      });
+    }
     hydrated ??= messages.slice();
     if (options.provider) {
       hydrated[index] = {
@@ -620,13 +647,13 @@ async function materializePromptMediaMessages(
         content: projectedContent,
         timestamp: message.timestamp,
         ...(message.runtimeContextCarrier ? { runtimeContextCarrier: true } : {}),
+        ...(message.runtimeContextCarrierRetained !== undefined
+          ? { runtimeContextCarrierRetained: message.runtimeContextCarrierRetained }
+          : {}),
       } as ProviderContext["messages"][number] as AgentMessage;
       continue;
     }
-    const nextMeta =
-      meta && typeof meta === "object" && !Array.isArray(meta)
-        ? { ...(meta as Record<string, unknown>) }
-        : {};
+    const nextMeta = { ...asNonArrayRecord(meta) };
     if (result.images.length > 0) {
       nextMeta.mediaImageBlockFactIndexes = result.imageFactIndexes;
     } else {
@@ -637,9 +664,9 @@ async function materializePromptMediaMessages(
       content: projectedContent,
     } as AgentMessage;
     if (Object.keys(nextMeta).length > 0) {
-      (hydratedMessage as unknown as Record<string, unknown>)["__openclaw"] = nextMeta;
+      Reflect.set(hydratedMessage, "__openclaw", nextMeta);
     } else {
-      delete (hydratedMessage as unknown as Record<string, unknown>)["__openclaw"];
+      Reflect.deleteProperty(hydratedMessage, "__openclaw");
     }
     if (runtimeMedia) {
       attachRuntimePromptMediaFacts(hydratedMessage, runtimeMedia, runtimeImageOrder);
@@ -658,22 +685,15 @@ export async function hydratePromptMediaMessages(
 }
 
 /** Materializes one transient provider context from exact-message media facts. */
-export async function materializeProviderContext(params: {
-  context: Context;
-  signal?: AbortSignal;
-  workspaceDir: string;
-  workspaceOnly?: boolean;
-  localRoots?: readonly string[];
-  sandbox?: { root: string; bridge: SandboxFsBridge };
-}): Promise<ProviderContext> {
+export async function materializeProviderContext(
+  params: Omit<PromptMediaOptions, "provider" | "model" | "maxBytes" | "maxDimensionPx"> & {
+    context: Context;
+  },
+): Promise<ProviderContext> {
   const messages = await materializePromptMediaMessages(params.context.messages as AgentMessage[], {
-    workspaceDir: params.workspaceDir,
+    ...params,
     model: { input: ["text", "image"] },
-    workspaceOnly: params.workspaceOnly,
-    localRoots: params.localRoots,
-    sandbox: params.sandbox,
     provider: true,
-    signal: params.signal,
   });
   params.signal?.throwIfAborted();
   return messages === params.context.messages

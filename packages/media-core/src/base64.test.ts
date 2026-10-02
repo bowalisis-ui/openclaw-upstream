@@ -1,55 +1,107 @@
-// Media Core tests cover base64 behavior.
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { canonicalizeBase64, estimateBase64DecodedBytes } from "./base64.js";
+import { runNodeScript } from "../../../test/helpers/run-node-script.js";
+import { canonicalizeBase64, estimateBase64DecodedBytes, isValidBase64 } from "./base64.js";
+import { measureBase64Memory } from "./base64.memory.test-support.js";
 
 describe("base64 helpers", () => {
-  function expectBase64HelperCase<T>(actual: T, expected: T) {
-    expect(actual).toBe(expected);
-  }
+  it("canonicalizeBase64 handles attachment-sized payloads without heap blow-up", async ({
+    signal,
+  }) => {
+    // Per-character concatenation previously used >500 MiB for this 16 MiB payload.
+    const memory = await measureBase64Memory("canonical", signal);
+    expect(memory.vmDelta).toBeLessThan(100 * 1024 * 1024);
+  });
 
-  it("canonicalizeBase64 validates large payloads without cons-string overflow", () => {
-    const encoded = Buffer.alloc(1_900_000).toString("base64");
+  it("canonicalizeBase64 handles one whitespace per character without heap blow-up", async ({
+    signal,
+  }) => {
+    // Keep the same coarse memory budget when every data character is its own
+    // whitespace-delimited run (2.7 M runs here).
+    const memory = await measureBase64Memory("shredded", signal);
+    expect(memory.vmDelta).toBeLessThan(64 * 1024 * 1024);
+  });
 
-    expect(canonicalizeBase64(encoded)).toBe(encoded);
+  it.skipIf(!process.versions.bun)(
+    "memory guards exclude predecessor allocations",
+    async ({ signal }) => {
+      const result = await runNodeScript(
+        [fileURLToPath(new URL("./base64.memory-ownership.test-support.mjs", import.meta.url))],
+        process.env,
+        15_000,
+        { signal, maxBuffer: 4096, executable: process.execPath },
+      );
+      expect(result.error, result.stderr).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+    },
+  );
+
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+  it("base64 helpers accept the full standard alphabet", () => {
+    expect(canonicalizeBase64(alphabet)).toBe(alphabet);
+    expect(isValidBase64(alphabet)).toBe(true);
+  });
+
+  it.each([":", "@", "[", "`", "{", "-", "_", "é", "\ud800"])(
+    "base64 helpers reject non-alphabet glyph %j",
+    (glyph) => {
+      expect(canonicalizeBase64("AA" + glyph + "A")).toBeUndefined();
+      expect(isValidBase64("AA" + glyph + "A")).toBe(false);
+    },
+  );
+
+  it.each([
+    ["Q", "AQ==", "AAQ="],
+    ["E", undefined, "AAE="],
+    ["B", undefined, undefined],
+    ["g", "Ag==", "AAg="],
+    ["c", undefined, "AAc="],
+    ["0", undefined, "AA0="],
+    ["+", undefined, undefined],
+    ["/", undefined, undefined],
+  ] as const)("validates padded and unpadded terminal bits for %s", (glyph, byte, pair) => {
+    expect(canonicalizeBase64(`A${glyph}==`)).toBe(byte);
+    expect(canonicalizeBase64(`A${glyph}`)).toBe(byte);
+    expect(canonicalizeBase64(`AA${glyph}=`)).toBe(pair);
+    expect(canonicalizeBase64(`AA${glyph}`)).toBe(pair);
   });
 
   it.each([
-    {
-      name: "canonicalizeBase64 normalizes whitespace and keeps valid base64",
-      actual: canonicalizeBase64(" SGV s bG8= \n"),
-      expected: "SGVsbG8=",
-    },
-    {
-      name: "canonicalizeBase64 pads valid unpadded base64",
-      actual: canonicalizeBase64("SGVsbG8"),
-      expected: "SGVsbG8=",
-    },
-    {
-      name: "canonicalizeBase64 rejects impossible unpadded length",
-      actual: canonicalizeBase64("S"),
-      expected: undefined,
-    },
-    {
-      name: "canonicalizeBase64 rejects invalid base64 characters",
-      actual: canonicalizeBase64('SGVsbG8=" onerror="alert(1)'),
-      expected: undefined,
-    },
-    {
-      name: "canonicalizeBase64 rejects nonzero pad bits",
-      actual: canonicalizeBase64("ZE=="),
-      expected: undefined,
-    },
-    {
-      name: "estimateBase64DecodedBytes handles whitespace",
-      actual: estimateBase64DecodedBytes("SGV s bG8= \n"),
-      expected: 5,
-    },
-    {
-      name: "estimateBase64DecodedBytes handles empty input",
-      actual: estimateBase64DecodedBytes(""),
-      expected: 0,
-    },
-  ] as const)("$name", ({ actual, expected }) => {
-    expectBase64HelperCase(actual, expected);
+    [" SGV s bG8= \n", "SGVsbG8="],
+    ["S", undefined],
+    ['SGVsbG8=" onerror="alert(1)', undefined],
+    ["QQ==QQ==", undefined],
+    ["====", undefined],
+    ["data:image/png;base64,QUJD", undefined],
+    [" \r\n\t", undefined],
+  ] as const)("canonicalizes %j", (input, expected) => {
+    expect(canonicalizeBase64(input)).toBe(expected);
   });
+
+  it.each([
+    ["SGV s bG8= \n", 5],
+    ["", 0],
+  ] as const)("estimates decoded bytes for %j", (input, expected) => {
+    expect(estimateBase64DecodedBytes(input)).toBe(expected);
+  });
+});
+
+it.each<[string, boolean]>([
+  ["", false],
+  ["QQ==", true],
+  ["QUI=", true],
+  ["QUJD", true],
+  ["ZE==", true], // Attachment validation historically accepts nonzero pad bits.
+  ["QQ", false],
+  ["QQ==\n", false],
+  ["Q Q=", false],
+  ["QQ$=", false],
+  ["QQ-_", false],
+  ["QQ=Q", false],
+  ["Q===", false],
+  ["====", false],
+  ["QQ==QQ==", false],
+])("validates attachment base64 %j without normalization", (value, accepted) => {
+  expect(isValidBase64(value)).toBe(accepted);
 });

@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { readCurrentGitCommit, resolveBuildIdentityEnvironment } from "./lib/build-identity.mts";
 
 const WORKSPACE_DIRS_ENV = "OPENCLAW_OCM_WORKSPACE_DEPENDENCY_DIRS";
 const REAL_NPM_ENV = "OPENCLAW_OCM_REAL_NPM_BIN";
@@ -12,7 +13,6 @@ const INTERNAL_NPM_BIN_ENV = "OCM_INTERNAL_NPM_BIN";
 const ALLOW_UNRELEASED_CHANGELOG_ENV = "OPENCLAW_PREPACK_ALLOW_UNRELEASED_CHANGELOG";
 const RUNTIME_BUILD_PROFILE_ENV = "OPENCLAW_OCM_RUNTIME_BUILD_PROFILE";
 const supportedRuntimeBuildProfiles = new Set(["sourcePerformance"]);
-const fullGitCommitPattern = /^[0-9a-f]{40}$/iu;
 
 type WorkspacePackage = { name: string; version: string; tarball: string };
 type WorkspacePackageSource = Omit<WorkspacePackage, "tarball"> & { dir: string };
@@ -110,39 +110,14 @@ export function resolveRuntimePackPlan(args: string[], env: NodeJS.ProcessEnv = 
 export function resolveRuntimePackEnvironment(
   env: NodeJS.ProcessEnv = process.env,
   now: () => Date = () => new Date(),
-  readGitCommit: () => string | null = () => {
-    const result = spawnSync("git", ["rev-parse", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return result.status === 0 ? result.stdout.trim() : null;
-  },
+  readGitCommit: () => string | null = readCurrentGitCommit,
 ) {
-  const explicitTimestamp = env.OPENCLAW_BUILD_TIMESTAMP?.trim();
-  const explicitCommit = env.GIT_COMMIT?.trim() || env.GIT_SHA?.trim();
-  const checkedOutCommit = explicitCommit ? null : readGitCommit()?.trim();
-  const commit = explicitCommit || checkedOutCommit || env.GITHUB_SHA?.trim();
-  if (commit && !fullGitCommitPattern.test(commit)) {
-    throw new Error("runtime pack commit must be a full 40-character hexadecimal SHA");
-  }
-  return {
-    ...env,
-    OPENCLAW_BUILD_TIMESTAMP: explicitTimestamp || now().toISOString(),
-    ...(commit ? { GIT_COMMIT: commit.toLowerCase() } : {}),
-  };
-}
-
-function runTar(args: string[]) {
-  const result = spawnSync("tar", args, {
-    env: process.env,
-    stdio: "inherit",
+  return resolveBuildIdentityEnvironment({
+    commitLabel: "runtime pack commit",
+    env,
+    now,
+    readGitCommit,
   });
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    throw new Error(`tar failed with status ${result.status ?? 1}`);
-  }
 }
 
 function runChecked(command: string, args: string[], options: SpawnSyncOptions = {}) {
@@ -314,7 +289,7 @@ function patchPackageArchiveWorkspaceDependencies(
 ): string {
   const unpackDir = join(outputDir, `${outputStem}-archive`);
   mkdirSync(unpackDir);
-  runTar(["-xzf", archive, "-C", unpackDir]);
+  runChecked("tar", ["-xzf", archive, "-C", unpackDir], { stdio: "inherit" });
 
   const packageJsonPath = join(unpackDir, "package", "package.json");
   const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
@@ -325,21 +300,8 @@ function patchPackageArchiveWorkspaceDependencies(
 
   writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
   const patchedArchive = join(outputDir, `${outputStem}-patched.tgz`);
-  runTar(["-czf", patchedArchive, "-C", unpackDir, "package"]);
+  runChecked("tar", ["-czf", patchedArchive, "-C", unpackDir, "package"], { stdio: "inherit" });
   return patchedArchive;
-}
-
-function patchRootArchiveWorkspaceDependencies(
-  rootArchive: string,
-  workspacePackages: WorkspacePackage[],
-  outputDir: string,
-): string {
-  return patchPackageArchiveWorkspaceDependencies(
-    rootArchive,
-    workspacePackages,
-    outputDir,
-    "openclaw-root",
-  );
 }
 
 function main(): number {
@@ -376,10 +338,11 @@ function main(): number {
   const packDir = mkdtempSync(join(tmpdir(), "openclaw-ocm-workspace-deps-"));
   try {
     const workspacePackages = packWorkspaceDependencies(npm, workspaceDirs, packDir);
-    const rootArchive = patchRootArchiveWorkspaceDependencies(
+    const rootArchive = patchPackageArchiveWorkspaceDependencies(
       plan.rootArchive,
       workspacePackages,
       packDir,
+      "openclaw-root",
     );
     mkdirSync(plan.prefixDir, { recursive: true });
     writeFileSync(

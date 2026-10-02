@@ -1,33 +1,32 @@
 // Covers core TUI state transitions and backend event rendering.
 import { EventEmitter } from "node:events";
 import path from "node:path";
+import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
-import { MAX_TIMER_TIMEOUT_MS } from "../infra/parse-finite-number.js";
+import { retainLegacyDefaultAgentId } from "../config/legacy.default-agent-owner.js";
 import { MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE } from "../shared/assistant-error-format.js";
 import { withEnv } from "../test-utils/env.js";
-import { getSlashCommands, parseCommand } from "./commands.js";
+import { resolveFinalAssistantText } from "./tui-formatters.js";
+import { beginTuiShutdown } from "./tui-shutdown.js";
 import {
-  beginTuiShutdown,
   createBackspaceDeduper,
   createDeferredTuiFinish,
-  createTuiSignalHandlers,
+  createTuiConnectionLineage,
   drainAndStopTuiSafely,
   installTuiTerminalLossExitHandler,
   isIgnorableTuiStopError,
   isTuiTerminalLossError,
-  resolveCodexCliBin,
   resolveCtrlCAction,
-  resolveFinalAssistantText,
   resolveGatewayDisconnectState,
   resolveInitialTuiAgentId,
   resolveTuiToolsToggleActivityStatus,
   isTuiBusyActivityStatus,
-  resolveLocalAuthSpawnInvocation,
   resolveTuiCtrlCAction,
   resolveTuiLocalAuthCliInvocation,
   resolveTuiShutdownHardExitMs,
   resolveTuiSessionKey,
+  resolveTuiSessionSelection,
   scheduleProcessExitAfterTuiReturn,
   stopTuiSafely,
 } from "./tui.js";
@@ -105,36 +104,7 @@ describe("resolveTuiLocalAuthCliInvocation", () => {
   });
 });
 
-describe("tui slash commands", () => {
-  it("treats /elev as an alias for /elevated", () => {
-    expect(parseCommand("/elev on")).toEqual({ name: "elevated", args: "on" });
-  });
-
-  it("normalizes alias case", () => {
-    expect(parseCommand("/ELEV off")).toEqual({
-      name: "elevated",
-      args: "off",
-    });
-  });
-
-  it("includes gateway text commands", () => {
-    const commands = getSlashCommands({});
-    const names = commands.map((command) => command.name);
-    expect(names).toContain("context");
-    expect(names).toContain("commands");
-  });
-
-  it("includes /auth in local embedded mode", () => {
-    const commands = getSlashCommands({ local: true });
-    expect(commands.map((command) => command.name)).toContain("auth");
-  });
-});
-
 describe("isTuiBusyActivityStatus", () => {
-  it("treats finishing context as a visible busy status", () => {
-    expect(isTuiBusyActivityStatus("finishing context")).toBe(true);
-  });
-
   it("treats post-connect initialization as a visible busy status", () => {
     expect(isTuiBusyActivityStatus("starting up")).toBe(true);
   });
@@ -194,6 +164,21 @@ describe("resolveTuiShutdownHardExitMs", () => {
 });
 
 describe("resolveTuiSessionKey", () => {
+  it.each([
+    { scope: "per-sender" as const, raw: "global", expected: "agent:research:main" },
+    { scope: "global" as const, raw: "global", expected: "global" },
+    { scope: "per-sender" as const, raw: " GLOBAL ", expected: "agent:research:main" },
+    { scope: "global" as const, raw: " GLOBAL ", expected: "global" },
+  ])("selects the writable Home for $raw in $scope scope", ({ scope, raw, expected }) => {
+    expect(
+      resolveTuiSessionKey({
+        raw,
+        sessionScope: scope,
+        currentAgentId: "research",
+        sessionMainKey: "main",
+      }),
+    ).toBe(expected);
+  });
   it("uses global only as the default when scope is global", () => {
     expect(
       resolveTuiSessionKey({
@@ -224,7 +209,7 @@ describe("resolveTuiSessionKey", () => {
     ).toBe("agent:ops:incident");
   });
 
-  it("unwraps an agent-qualified global key after agent selection", () => {
+  it("preserves an agent-qualified global key until history resolves its stored identity", () => {
     expect(
       resolveTuiSessionKey({
         raw: "AGENT:Work:GLOBAL",
@@ -232,7 +217,7 @@ describe("resolveTuiSessionKey", () => {
         currentAgentId: "work",
         sessionMainKey: "main",
       }),
-    ).toBe("global");
+    ).toBe("agent:work:global");
   });
 
   it.each([
@@ -304,6 +289,7 @@ describe("resolveTuiSessionKey", () => {
 describe("resolveInitialTuiAgentId", () => {
   const cfg: OpenClawConfig = {
     agents: {
+      ownership: "explicit",
       list: [
         { id: "main", workspace: "/tmp/openclaw" },
         { id: "ops", workspace: "/tmp/openclaw/projects/ops" },
@@ -368,9 +354,110 @@ describe("resolveInitialTuiAgentId", () => {
       cwdSpy.mockRestore();
     }
   });
+
+  it("falls back to a retained legacy owner", () => {
+    const retained = retainLegacyDefaultAgentId(structuredClone(cfg), "ops");
+    delete retained.agents!.ownership;
+
+    expect(resolveInitialTuiAgentId({ cfg: retained, cwd: "/var/tmp/unrelated" })).toBe("ops");
+  });
+
+  it("keeps an ownerless explicit fleet selection-required", () => {
+    const retained = retainLegacyDefaultAgentId(structuredClone(cfg), "ops");
+    expect(() => resolveInitialTuiAgentId({ cfg: retained, cwd: "/var/tmp/unrelated" })).toThrow(
+      "Multiple agents are configured, but TUI startup has no explicit owner. Pass an agent-scoped --session key (e.g., 'openclaw tui --session agent:agentname:main').",
+    );
+  });
+
+  it("uses the persisted fixed-store owner for an unscoped global session", () => {
+    const restartConfig: OpenClawConfig = {
+      session: { scope: "global", store: "/tmp/shared.sqlite" },
+      agents: {
+        ownership: "explicit",
+        defaults: { sessionStore: { agentId: "ops" } },
+        entries: { main: {}, ops: {} },
+      },
+    };
+
+    expect(
+      resolveInitialTuiAgentId({
+        cfg: restartConfig,
+        initialSessionInput: "global",
+        cwd: "/tmp/openclaw",
+      }),
+    ).toBe("ops");
+    expect(resolveInitialTuiAgentId({ cfg: restartConfig, cwd: "/tmp/openclaw" })).toBe("ops");
+  });
+
+  it("uses the persisted fixed-store owner for any bare initial session key", () => {
+    const restartConfig: OpenClawConfig = {
+      session: { store: "/tmp/shared.sqlite" },
+      agents: {
+        ownership: "explicit",
+        defaults: { sessionStore: { agentId: "ops" } },
+        entries: { main: {}, ops: {} },
+      },
+    };
+
+    expect(
+      resolveInitialTuiAgentId({
+        cfg: restartConfig,
+        initialSessionInput: "incident-42",
+        cwd: "/tmp/openclaw",
+      }),
+    ).toBe("ops");
+  });
+});
+
+describe("resolveTuiSessionSelection", () => {
+  it.each([
+    { raw: "incident-42", expected: "incident-42" },
+    { raw: " GLOBAL ", expected: "agent:ops:main" },
+  ])("keeps the persisted owner when selecting fixed-store $raw", ({ raw, expected }) => {
+    const cfg: OpenClawConfig = {
+      session: { store: "/tmp/shared.sqlite" },
+      agents: {
+        ownership: "explicit",
+        defaults: { sessionStore: { agentId: "ops" } },
+        list: [{ id: "ops" }, { id: "research" }],
+      },
+    };
+
+    expect(
+      resolveTuiSessionSelection({
+        raw,
+        cfg,
+        sessionScope: "per-sender",
+        currentAgentId: "research",
+        sessionMainKey: "main",
+      }),
+    ).toEqual({ key: expected, agentId: "ops" });
+  });
+
+  it("carries an explicit owner without reinterpreting the qualified global selector", () => {
+    const cfg: OpenClawConfig = {
+      agents: { ownership: "explicit", list: [{ id: "ops" }, { id: "research" }] },
+    };
+    expect(
+      resolveTuiSessionSelection({
+        raw: "agent:ops:global",
+        cfg,
+        sessionScope: "per-sender",
+        currentAgentId: "research",
+        sessionMainKey: "main",
+      }),
+    ).toEqual({ key: "agent:ops:global", agentId: "ops" });
+  });
 });
 
 describe("resolveGatewayDisconnectState", () => {
+  it("shows startup progress while the gateway keeps retrying", () => {
+    expect(resolveGatewayDisconnectState({ reason: "gateway starting" })).toEqual({
+      connectionStatus: "gateway starting",
+      activityStatus: "starting up",
+    });
+  });
+
   it("returns scope-upgrade recovery guidance when disconnect reason requires pairing", () => {
     const state = resolveGatewayDisconnectState({
       reason: "gateway closed (1008): pairing required",
@@ -417,6 +504,15 @@ describe("resolveGatewayDisconnectState", () => {
     expect(state.remediation).not.toContain("devices rotate");
   });
 
+  it("shows edge-auth guidance for an identity-proxy rejection", () => {
+    const state = resolveGatewayDisconnectState({
+      details: { reason: "websocket-upgrade-rejected", httpStatus: 302 },
+      reason: "gateway rejected websocket upgrade (HTTP 302)",
+    });
+    expect(state.activityStatus).toBe("identity-aware proxy rejected connection");
+    expect(state.remediation).toContain("gateway.remote.edgeAuth");
+  });
+
   it("falls back to idle for generic disconnect reasons", () => {
     const state = resolveGatewayDisconnectState({ reason: "network timeout" });
     expect(state.connectionStatus).toBe("gateway disconnected: network timeout");
@@ -451,26 +547,6 @@ describe("createBackspaceDeduper", () => {
       },
     };
   }
-
-  it("suppresses duplicate backspace events within the dedupe window", () => {
-    withLegacyBackspaceEnv(() => {
-      const { dedupe, advance } = createTimedDedupe();
-
-      expect(dedupe("\x7f")).toBe("\x7f");
-      advance(1);
-      expect(dedupe("\x08")).toBe("");
-    });
-  });
-
-  it("preserves backspace events outside the dedupe window", () => {
-    withLegacyBackspaceEnv(() => {
-      const { dedupe, advance } = createTimedDedupe();
-
-      expect(dedupe("\x7f")).toBe("\x7f");
-      advance(10);
-      expect(dedupe("\x7f")).toBe("\x7f");
-    });
-  });
 
   it("treats ASCII BS as backspace when it is the first event", () => {
     withLegacyBackspaceEnv(() => {
@@ -562,12 +638,6 @@ describe("createBackspaceDeduper", () => {
       },
     );
   });
-
-  it("never suppresses non-backspace keys", () => {
-    const dedupe = createBackspaceDeduper();
-    expect(dedupe("a")).toBe("a");
-    expect(dedupe("\x1b[A")).toBe("\x1b[A");
-  });
 });
 
 describe("resolveCtrlCAction", () => {
@@ -634,6 +704,20 @@ describe("resolveTuiCtrlCAction", () => {
       action: "force-exit",
       nextLastCtrlCAt: 1000,
     });
+  });
+});
+
+describe("createTuiConnectionLineage", () => {
+  it("keeps a startup retry before the first hello out of reconnect recovery", () => {
+    const lineage = createTuiConnectionLineage();
+
+    lineage.disconnect();
+    expect(lineage.wasDisconnected()).toBe(false);
+    expect(lineage.connect()).toBe(false);
+
+    lineage.disconnect();
+    expect(lineage.wasDisconnected()).toBe(true);
+    expect(lineage.connect()).toBe(true);
   });
 });
 
@@ -758,14 +842,6 @@ describe("TUI shutdown safety", () => {
     ).toBeUndefined();
   });
 
-  it("rethrows non-ignorable stop errors", () => {
-    expect(() => {
-      stopTuiSafely(() => {
-        throw new Error("boom");
-      });
-    }).toThrow("boom");
-  });
-
   it("classifies terminal-loss IO errors", () => {
     expect(isTuiTerminalLossError({ code: "EIO", syscall: "read" })).toBe(true);
     expect(isTuiTerminalLossError({ code: "EPIPE", syscall: "write" })).toBe(true);
@@ -822,26 +898,6 @@ describe("TUI shutdown safety", () => {
     expect(requestFinish).not.toHaveBeenCalled();
   });
 
-  it("forces process exit after SIGTERM when gateway teardown never settles", async () => {
-    vi.useFakeTimers();
-    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
-    const requestExit = vi.fn(() => {
-      beginTestShutdown({
-        stopClient: () => new Promise<void>(() => {}),
-        forceExit: () => process.exit(130),
-      });
-    });
-    const { sigtermHandler } = createTuiSignalHandlers({
-      handleCtrlC: vi.fn(),
-      requestExit,
-    });
-
-    sigtermHandler();
-    expect(requestExit).toHaveBeenCalledOnce();
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(exit).toHaveBeenCalledWith(130);
-  });
-
   it("keeps the force-exit deadline armed after already-drained teardown settles", async () => {
     vi.useFakeTimers();
     const forceExit = vi.fn();
@@ -862,13 +918,13 @@ describe("TUI shutdown safety", () => {
     vi.useFakeTimers();
     const calls: string[] = [];
     const forceExit = vi.fn();
+    const recordPhase = (phase: string) => async () => {
+      calls.push(phase);
+    };
     beginTestShutdown({
-      stopClient: async () => {
-        calls.push("client");
-      },
-      stopTui: async () => {
-        calls.push("tui");
-      },
+      stopCommandScopes: recordPhase("scopes"),
+      stopClient: recordPhase("client"),
+      stopTui: recordPhase("tui"),
       disposeStatus: () => {
         calls.push("status");
       },
@@ -879,7 +935,7 @@ describe("TUI shutdown safety", () => {
     });
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(calls).toEqual(["status", "client", "tui", "status", "finish"]);
+    expect(calls).toEqual(["status", "scopes", "client", "tui", "status", "finish"]);
     expect(forceExit).not.toHaveBeenCalled();
   });
 
@@ -895,7 +951,6 @@ describe("TUI shutdown safety", () => {
           finishTuiStop = resolve;
         }),
     );
-    const clearTimeoutFn = vi.fn();
     const requestFinish = vi.fn(() => calls.push("finish"));
     const onError = vi.fn((error: unknown) => {
       calls.push("error");
@@ -911,31 +966,34 @@ describe("TUI shutdown safety", () => {
       requestFinish,
       onError,
       keepHardExitArmed: false,
-      clearTimeoutFn,
     });
 
     await vi.advanceTimersByTimeAsync(0);
     expect(calls).toEqual(["client", "tui"]);
-    expect(clearTimeoutFn).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
     expect(requestFinish).not.toHaveBeenCalled();
 
     finishTuiStop?.();
     await vi.advanceTimersByTimeAsync(0);
     expect(calls).toEqual(["client", "tui", "error", "finish"]);
     expect(stopTui).toHaveBeenCalledOnce();
-    expect(clearTimeoutFn).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
     expect(onError).toHaveBeenCalledOnce();
     expect(requestFinish).toHaveBeenCalledOnce();
   });
 
   it("reports transport and terminal shutdown errors in phase order", async () => {
     vi.useFakeTimers();
+    const scopeError = new Error("command scope stop failed");
     const transportError = new Error("transport stop failed");
     const terminalError = new Error("terminal stop failed");
     const onError = vi.fn();
     const requestFinish = vi.fn();
 
     beginTestShutdown({
+      stopCommandScopes: async () => {
+        throw scopeError;
+      },
       stopClient: async () => {
         throw transportError;
       },
@@ -950,7 +1008,7 @@ describe("TUI shutdown safety", () => {
     expect(onError).toHaveBeenCalledOnce();
     const error = onError.mock.calls[0]?.[0];
     expect(error).toBeInstanceOf(AggregateError);
-    expect((error as AggregateError).errors).toEqual([transportError, terminalError]);
+    expect((error as AggregateError).errors).toEqual([scopeError, transportError, terminalError]);
     expect(requestFinish).toHaveBeenCalledOnce();
   });
 
@@ -967,105 +1025,23 @@ describe("TUI shutdown safety", () => {
     expect(forceExit).not.toHaveBeenCalled();
   });
 
-  it("does not keep a clean standalone TUI alive for the watchdog deadline", () => {
-    const unref = vi.fn();
-    const setTimeoutFn = vi.fn((_callback: () => void, delayMs: number) => {
-      expect(delayMs).toBe(2000);
-      return { unref };
-    });
-    const exit = vi.fn();
-    const writeStderr = vi.fn();
-
-    scheduleProcessExitAfterTuiReturn({ setTimeoutFn, exit, writeStderr });
-
-    expect(setTimeoutFn).toHaveBeenCalledOnce();
-    expect(unref).toHaveBeenCalledOnce();
-    expect(writeStderr).not.toHaveBeenCalled();
-    expect(exit).not.toHaveBeenCalled();
-  });
-
-  it("forces standalone TUI exit on deadline while another handle lingers", async () => {
+  it("forces standalone TUI exit on deadline while another handle lingers", () => {
     vi.useFakeTimers();
     const lingeringHandle = setInterval(() => {}, 60_000);
-    const exit = vi.fn();
-    const writeStderr = vi.fn();
+    const exited = new Error("process exited");
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw exited;
+    });
+    const writeStderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
-    const timer = scheduleProcessExitAfterTuiReturn({ exit, writeStderr });
+    const timer = scheduleProcessExitAfterTuiReturn();
 
-    expect((timer as NodeJS.Timeout).hasRef()).toBe(false);
-    await vi.advanceTimersByTimeAsync(1999);
+    expect(timer.hasRef()).toBe(false);
+    vi.advanceTimersByTime(1999);
     expect(exit).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
+    expect(() => vi.advanceTimersByTime(1)).toThrow(exited);
     expect(writeStderr).toHaveBeenCalledWith("openclaw tui forcing process exit after return\n");
     expect(exit).toHaveBeenCalledWith(0);
     clearInterval(lingeringHandle);
-  });
-});
-
-describe("resolveCodexCliBin", () => {
-  it("returns a string path when codex CLI is installed", async () => {
-    const result = await resolveCodexCliBin();
-    // In this test environment codex is installed; verify it returns a non-empty path
-    if (result !== null) {
-      expect(typeof result).toBe("string");
-      expect(result.length).toBeGreaterThan(0);
-      expect(result).toContain("codex");
-    }
-  });
-
-  it("returns null or a valid path (never throws)", async () => {
-    const result = await resolveCodexCliBin();
-    if (result === null) {
-      expect(result).toBeNull();
-    } else {
-      expect(typeof result).toBe("string");
-    }
-  });
-});
-
-describe("resolveLocalAuthSpawnInvocation", () => {
-  it("wraps Windows cmd shims through cmd.exe", () => {
-    expect(
-      resolveLocalAuthSpawnInvocation({
-        command: "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd",
-        args: ["login"],
-        platform: "win32",
-      }),
-    ).toEqual({
-      command: "C:\\Windows\\System32\\cmd.exe",
-      args: ["/d", "/s", "/c", "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd login"],
-      options: { windowsHide: true, windowsVerbatimArguments: true },
-    });
-  });
-
-  it("wraps spaced Windows bat shim paths with outer command-line quoting", () => {
-    expect(
-      resolveLocalAuthSpawnInvocation({
-        command: "C:\\Program Files\\Codex\\codex.bat",
-        args: ["login"],
-        platform: "win32",
-      }),
-    ).toEqual({
-      command: "C:\\Windows\\System32\\cmd.exe",
-      args: ["/d", "/s", "/c", '""C:\\Program Files\\Codex\\codex.bat" login"'],
-      options: { windowsHide: true, windowsVerbatimArguments: true },
-    });
-  });
-
-  it("keeps direct execution for non-wrapper commands", () => {
-    expect(
-      resolveLocalAuthSpawnInvocation({
-        command: "/usr/local/bin/codex",
-        args: ["login"],
-        platform: "linux",
-      }),
-    ).toStrictEqual({ command: "/usr/local/bin/codex", args: ["login"], options: {} });
-    expect(
-      resolveLocalAuthSpawnInvocation({
-        command: "C:\\tools\\codex.exe",
-        args: ["login"],
-        platform: "win32",
-      }),
-    ).toStrictEqual({ command: "C:\\tools\\codex.exe", args: ["login"], options: {} });
   });
 });

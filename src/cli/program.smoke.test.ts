@@ -107,6 +107,17 @@ describe("cli program (smoke)", () => {
     });
   });
 
+  it.each(["agent:ops:main", "https://gateway.example/chat/stale/movies-a1166b81"])(
+    "preserves the resolved global owner when launching tui from %s",
+    async (target) => {
+      programGatewayCallMock.mockResolvedValue({ ok: true, key: "global", agentId: "ops" });
+
+      await runProgram(["tui", target]);
+
+      expect(firstMockArg(tuiRunMock)).toMatchObject({ session: "global", agentId: "ops" });
+    },
+  );
+
   it("leaves tui agent inference unchanged without a URL agent", async () => {
     await runProgram(["tui"]);
 
@@ -149,9 +160,7 @@ describe("cli program (smoke)", () => {
 
   it("rejects partial tui history limits", async () => {
     await expect(runProgram(["tui", "--history-limit", "10x"])).rejects.toThrow("exit");
-    expect(runtime.error).toHaveBeenCalledWith(
-      "Error: --history-limit must be a positive integer.",
-    );
+    expect(runtime.error).toHaveBeenCalledWith("--history-limit must be a positive integer.");
     expect(tuiRunMock).not.toHaveBeenCalled();
   });
 
@@ -175,7 +184,7 @@ describe("cli program (smoke)", () => {
   it("rejects tui history limits above the Gateway maximum", async () => {
     await expect(runProgram(["tui", "--history-limit", "1001"])).rejects.toThrow("exit");
 
-    expect(runtime.error).toHaveBeenCalledWith("Error: --history-limit must be at most 1000.");
+    expect(runtime.error).toHaveBeenCalledWith("--history-limit must be at most 1000.");
     expect(tuiRunMock).not.toHaveBeenCalled();
   });
 

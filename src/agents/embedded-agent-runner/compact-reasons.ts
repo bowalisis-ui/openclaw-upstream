@@ -1,8 +1,8 @@
-/**
- * Normalizes and classifies compaction failure reasons for diagnostics.
- */
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
+import { formatErrorMessage } from "../../infra/errors.js";
+import type { CompactionSafeguardCancellation } from "../agent-hooks/compaction-safeguard-runtime.js";
+import { hasModelFallbackStop } from "../failover-error.js";
 import { extractFailoverHttpStatus } from "../failover/retry-evidence.js";
 
 const MAX_COMPACTION_REASON_DETAIL_CHARS = 100;
@@ -17,22 +17,38 @@ function isGenericCompactionCancelledReason(reason: string): boolean {
   return normalized === "compaction cancelled" || normalized === "error: compaction cancelled";
 }
 
-/** Prefer a safeguard cancel reason when the runtime only reports generic cancellation. */
-export function resolveCompactionFailureReason(params: {
-  reason: string;
-  safeguardCancelReason?: string | null;
-}): string {
-  if (isGenericCompactionCancelledReason(params.reason) && params.safeguardCancelReason) {
-    return params.safeguardCancelReason;
+/** Preserve terminal failures; otherwise project display text and failure provenance together. */
+export function resolveCompactionFailure(params: {
+  error: unknown;
+  safeguardCancellation?: CompactionSafeguardCancellation | null;
+  abortSignal?: AbortSignal;
+}): { reason: string; error: unknown } {
+  if (hasModelFallbackStop(params.error)) {
+    throw params.error;
   }
-  return params.reason;
+  const reason = formatErrorMessage(params.error);
+  // AgentSessionCompaction wraps hook cancellation in a plain Error("Compaction cancelled").
+  // Only that wrapper yields to safeguard provenance; genuine errors and caller aborts win.
+  const cancellation =
+    !params.abortSignal?.aborted &&
+    params.error instanceof Error &&
+    params.error.name === "Error" &&
+    isGenericCompactionCancelledReason(reason)
+      ? params.safeguardCancellation
+      : undefined;
+  return { reason: cancellation?.reason ?? reason, error: cancellation?.error ?? params.error };
 }
 
-/** Bucket a raw compaction reason into stable telemetry/status classes. */
 export function classifyCompactionReason(reason?: string): string {
   const text = normalizeLowercaseStringOrEmpty(reason);
   if (!text) {
     return "unknown";
+  }
+  if (
+    text.startsWith("no api key found") ||
+    (text.startsWith("authentication failed for ") && text.includes("credentials may have expired"))
+  ) {
+    return "auth_failed";
   }
   if (text.includes("nothing to compact") || text.includes("no real conversation messages")) {
     return "no_compactable_entries";
@@ -73,13 +89,11 @@ export function classifyCompactionReason(reason?: string): string {
   return "unknown";
 }
 
-/** Return whether a classified reason represents an intentional compaction no-op. */
 export function isBenignCompactionSkipReason(reason?: string): boolean {
   const classification = classifyCompactionReason(reason);
   return classification === "below_threshold" || classification === "already_compacted";
 }
 
-/** Return whether a compaction result is an intentional no-op rather than a failure. */
 export function isBenignCompactionSkipResult(result: {
   ok: boolean;
   compacted: boolean;
@@ -94,7 +108,6 @@ export function isBenignCompactionSkipResult(result: {
   );
 }
 
-/** Sanitize an unknown reason into a short log/metric-safe detail suffix. */
 export function formatUnknownCompactionReasonDetail(reason?: string): string | undefined {
   const sanitized = sanitizeForLog((reason ?? "").replace(/\s+/g, " "))
     .trim()

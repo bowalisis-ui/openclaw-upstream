@@ -1,4 +1,5 @@
-import crypto from "node:crypto";
+import { filterStringEntries } from "@openclaw/normalization-core/string-normalization";
+import { sha256Hex } from "../../infra/crypto-digest.js";
 import type { CliReusableSession, PreparedCliRunContext } from "./types.js";
 
 function buildCliLogArgs(params: {
@@ -59,7 +60,10 @@ export const CLAUDE_SELECTED_AUTH_ENV_KEYS = new Set([
   "ANTHROPIC_API_KEY",
   "CLAUDE_CODE_OAUTH_TOKEN",
 ]);
-export const NODE_CLAUDE_FORWARD_ENV_KEYS = new Set(["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]);
+export const NODE_CLAUDE_FORWARD_ENV_KEYS = new Set([
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+]);
 export function resolveNodeClaudeAuthEnv(context: PreparedCliRunContext): Record<string, string> {
   const secretInput = context.preparedBackend.secretInput;
   if (!secretInput) {
@@ -89,22 +93,12 @@ export function parseCliBackendPreserveEnv(raw: string | undefined): Set<string>
   }
   if (trimmed.startsWith("[")) {
     try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      return new Set(
-        Array.isArray(parsed)
-          ? parsed.filter((entry): entry is string => typeof entry === "string")
-          : [],
-      );
+      return new Set(filterStringEntries(JSON.parse(trimmed)));
     } catch {
       return new Set();
     }
   }
-  return new Set(
-    trimmed
-      .split(/[,\s]+/)
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0),
-  );
+  return new Set(trimmed.split(/[,\s]+/).filter(Boolean));
 }
 function listPresentCliEnvKeys(
   env: Record<string, string | undefined>,
@@ -118,18 +112,12 @@ function listPresentCliEnvKeys(
 function formatCliEnvKeyList(keys: readonly string[]): string {
   return keys.length > 0 ? keys.join(",") : "none";
 }
-function buildCliEnvMcpLog(childEnv: Record<string, string>): string {
-  return [
-    `token=${childEnv.OPENCLAW_MCP_TOKEN ? "set" : "missing"}`,
-    `capture=${childEnv.OPENCLAW_MCP_CLI_CAPTURE_KEY ? "set" : "missing"}`,
-  ].join(" ");
-}
 function fingerprintCliSessionId(sessionId?: string): string {
   const trimmed = sessionId?.trim();
   if (!trimmed) {
     return "none";
   }
-  return crypto.createHash("sha256").update(trimmed).digest("hex").slice(0, 12);
+  return sha256Hex(trimmed).slice(0, 12);
 }
 function formatCliSessionReuseLogState(reusableSession: CliReusableSession): string {
   switch (reusableSession.mode) {
@@ -146,7 +134,6 @@ function formatCliSessionReuseLogState(reusableSession: CliReusableSession): str
   return exhaustive;
 }
 
-/** Builds the compact execution summary logged before a CLI backend run. */
 export function buildCliExecLogLine(params: {
   provider: string;
   model: string;
@@ -171,8 +158,7 @@ export function buildCliExecLogLine(params: {
   ].join(" ");
 }
 
-/** Summarizes auth-related env keys preserved or cleared for a CLI child process. */
-export function buildCliEnvAuthLog(childEnv: Record<string, string>): string {
+function buildCliEnvAuthLog(childEnv: Record<string, string>): string {
   const hostKeys = listPresentCliEnvKeys(process.env, CLI_ENV_AUTH_LOG_KEYS);
   const childKeys = listPresentCliEnvKeys(childEnv, CLI_ENV_AUTH_LOG_KEYS);
   const childKeySet = new Set(childKeys);
@@ -205,6 +191,8 @@ export function logCliInvocation(params: {
   params.log(`cli argv: ${params.command} ${logArgs.join(" ")}`);
   params.log(`cli env auth: ${buildCliEnvAuthLog(params.env)}`);
   if (params.env.OPENCLAW_MCP_TOKEN) {
-    params.log(`cli env mcp: ${buildCliEnvMcpLog(params.env)}`);
+    params.log(
+      `cli env mcp: token=set capture=${params.env.OPENCLAW_MCP_CLI_CAPTURE_KEY ? "set" : "missing"}`,
+    );
   }
 }

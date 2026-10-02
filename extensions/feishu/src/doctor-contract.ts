@@ -1,4 +1,3 @@
-// Feishu plugin module implements doctor contract behavior.
 import type {
   ChannelDoctorConfigMutation,
   ChannelDoctorLegacyConfigRule,
@@ -6,12 +5,21 @@ import type {
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   asObjectRecord,
+  createLegacyWebhookListenerDoctorContract,
   defineChannelAliasMigration,
   defineKeyMoveMigration,
+  defineStrayPluginEntryConfigMigration,
   hasLegacyAccountStreamingAliases,
   normalizeChannelConfigEntries,
 } from "openclaw/plugin-sdk/runtime-doctor-migrations";
+import { FeishuConfigSchema } from "./config-schema.js";
 import { DEFAULT_FEISHU_WEBHOOK_PATH, normalizeFeishuWebhookPath } from "./webhook-path.js";
+
+const webhookListenerMigration = createLegacyWebhookListenerDoctorContract({
+  channelKey: "feishu",
+  defaultPort: 3000,
+  defaultHost: "127.0.0.1",
+});
 
 // Feishu's legacy boolean `streaming` gated streaming-card replies with an
 // enabled default, so it migrates through the mode path (true → "partial",
@@ -140,8 +148,18 @@ function normalizeFeishuLegacyConfigEntries(
   }).config;
 }
 
+// The retired rich plugin-entry schema let config UIs park Feishu settings
+// under plugins.entries.feishu.config, which the runtime never reads.
+const feishuStrayEntryConfigMigration = defineStrayPluginEntryConfigMigration({
+  pluginId: "feishu",
+  channelId: "feishu",
+  validateMergedChannelConfig: (merged) => FeishuConfigSchema.safeParse(merged).success,
+});
+
 export const legacyConfigRules: ChannelDoctorLegacyConfigRule[] = [
   ...streamingAliasMigration.legacyConfigRules,
+  ...webhookListenerMigration.legacyConfigRules,
+  feishuStrayEntryConfigMigration.legacyConfigRule,
   {
     path: ["channels", "feishu"],
     message:
@@ -174,8 +192,12 @@ export function normalizeCompatibilityConfig({
   cfg: OpenClawConfig;
 }): ChannelDoctorConfigMutation {
   const aliases = streamingAliasMigration.normalizeChannelConfig({ cfg });
+  const listener = webhookListenerMigration.normalizeCompatibilityConfig({ cfg: aliases.config });
+  const changes = [...aliases.changes, ...listener.changes];
+  const entries = normalizeFeishuLegacyConfigEntries(listener.config, changes);
+  const stray = feishuStrayEntryConfigMigration.normalizeConfig({ cfg: entries });
   return {
-    config: normalizeFeishuLegacyConfigEntries(aliases.config, aliases.changes),
-    changes: aliases.changes,
+    config: stray.config,
+    changes: [...changes, ...stray.changes],
   };
 }

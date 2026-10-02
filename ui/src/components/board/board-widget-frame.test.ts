@@ -1,16 +1,22 @@
 /* @vitest-environment jsdom */
 
+import { render } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { BoardWidget } from "../../lib/board/types.ts";
 import { recordBoardWidgetTicketReceipt } from "../../lib/board/widget-ticket-lifetime.ts";
+import { boardWidget, gatewayContext } from "./board-view.test-support.ts";
 import { BoardWidgetFrameLifecycle } from "./board-widget-frame.ts";
 
 type LifecycleInternals = {
+  boardHostNonce: string;
   sandboxOrigin: string;
   sandboxHost: {
     dispose: () => void;
+    frame?: HTMLIFrameElement;
     handleMessage: (event: MessageEvent) => void;
     setActive: (active: boolean) => void;
+    update?: (options: unknown) => void;
   } | null;
   frameFailureKey: string;
   frameRefreshAttempts: number;
@@ -27,6 +33,7 @@ function createTicketRefreshLifecycle(
     context: () => undefined,
     refreshFrame: () => refreshFrame,
     reportContentHeight: () => {},
+    scrollBy: () => {},
     requestUpdate: () => {},
     resolveFrameUrl: () => () => "",
     root: () => document,
@@ -56,6 +63,7 @@ function terminalFailureError(params: {
     context: () => undefined,
     refreshFrame: () => undefined,
     reportContentHeight: () => {},
+    scrollBy: () => {},
     requestUpdate: () => {},
     resolveFrameUrl: () => () => "",
     root: () => document,
@@ -91,6 +99,7 @@ describe("board widget frame terminal failure message", () => {
     for (const origin of [
       "http://localhost:18790",
       "http://127.0.0.1:18790",
+      "http://127.0.0.5:18790",
       "http://[::1]:18790",
     ]) {
       const message = terminalFailureError({ widget: {}, resolvedSandboxOrigin: origin });
@@ -103,6 +112,144 @@ describe("board widget frame terminal failure message", () => {
     const message = terminalFailureError({ widget: {}, resolvedSandboxOrigin: "" });
     expect(message).toContain("authorization failed");
     expect(message).not.toContain("mcp.apps.sandboxOrigin");
+  });
+});
+
+describe("board widget frame scroll handoff", () => {
+  it.each([true, false])(
+    "reissues scroll authority after document rendering while active=%s",
+    async (activeAtReady) => {
+      let active = true;
+      const scrollBy = vi.fn();
+      const widget = boardWidget({
+        name: "long-dashboard",
+        sandboxUrl: "/mcp-app-sandbox",
+        sandboxOrigin: "https://sandbox.example",
+        sandboxPort: 18790,
+        viewTicket: "ticket",
+      });
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("<p>Saved dashboard</p>"));
+      const context = gatewayContext(null);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const lifecycle = new BoardWidgetFrameLifecycle({
+        active: () => active,
+        connected: () => true,
+        context: () => context,
+        refreshFrame: () => undefined,
+        reportContentHeight: () => {},
+        scrollBy,
+        requestUpdate: () => {},
+        resolveFrameUrl: () => () => "/__openclaw__/board/long-dashboard?bt=ticket",
+        root: () => container,
+        widget: () => widget,
+      });
+      lifecycle.connect();
+      render(lifecycle.render(widget), container);
+      const frame = container.querySelector<HTMLIFrameElement>(".board-widget__frame")!;
+      const resourceReady = createDeferred<{ renderId: string }>();
+      const hostNonces: string[] = [];
+      vi.spyOn(frame.contentWindow!, "postMessage").mockImplementation((message) => {
+        if (message.type === "openclaw:widget-board-host") {
+          hostNonces.push(message.nonce);
+        } else if (message.method === "ui/notifications/sandbox-resource-ready") {
+          resourceReady.resolve(message.params);
+        }
+      });
+      const receive = (data: object) =>
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            source: frame.contentWindow,
+            origin: "https://sandbox.example",
+            data,
+          }),
+        );
+      try {
+        frame.dispatchEvent(new Event("load"));
+        const initialNonce = hostNonces.at(-1);
+        expect(initialNonce).toEqual(expect.any(String));
+        lifecycle.update();
+        receive({
+          method: "ui/notifications/sandbox-proxy-ready",
+          params: { sandboxUrl: frame.src },
+        });
+        const { renderId } = await resourceReady.promise;
+        if (!activeAtReady) {
+          active = false;
+          lifecycle.activityChanged();
+        }
+        receive({
+          method: "ui/notifications/sandbox-resource-loaded",
+          params: { renderId },
+        });
+        expect(hostNonces.at(-1)).not.toBe(initialNonce);
+        if (!activeAtReady) {
+          active = true;
+          lifecycle.activityChanged();
+        }
+        receive({ type: "openclaw:widget-scroll", deltaY: 96, nonce: initialNonce });
+        expect(scrollBy).not.toHaveBeenCalled();
+        receive({ type: "openclaw:widget-scroll", deltaY: 48, nonce: hostNonces.at(-1) });
+        expect(scrollBy).toHaveBeenCalledExactlyOnceWith(48);
+      } finally {
+        lifecycle.disconnect();
+      }
+    },
+  );
+
+  it("accepts a finite vertical remainder only from its exact iframe and nonce", () => {
+    const widget = { name: "long-dashboard", revision: 1 } as BoardWidget;
+    const scrollBy = vi.fn();
+    const lifecycle = new BoardWidgetFrameLifecycle({
+      active: () => true,
+      connected: () => true,
+      context: () => undefined,
+      refreshFrame: () => undefined,
+      reportContentHeight: () => {},
+      scrollBy,
+      requestUpdate: () => {},
+      resolveFrameUrl: () => () => "",
+      root: () => document,
+      widget: () => widget,
+    });
+    const frame = document.createElement("iframe");
+    frame.className = "board-widget__frame";
+    document.body.append(frame);
+    lifecycle.connect();
+    (lifecycle as unknown as LifecycleInternals).boardHostNonce = "board-scroll-nonce";
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: frame.contentWindow,
+        data: { type: "openclaw:widget-scroll", deltaY: 48, nonce: "board-scroll-nonce" },
+      }),
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: window,
+        data: { type: "openclaw:widget-scroll", deltaY: 96, nonce: "board-scroll-nonce" },
+      }),
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: frame.contentWindow,
+        data: {
+          type: "openclaw:widget-scroll",
+          deltaY: Number.POSITIVE_INFINITY,
+          nonce: "board-scroll-nonce",
+        },
+      }),
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: frame.contentWindow,
+        data: { type: "openclaw:widget-scroll", deltaY: 192, nonce: "wrong-nonce" },
+      }),
+    );
+
+    expect(scrollBy).toHaveBeenCalledOnce();
+    expect(scrollBy).toHaveBeenCalledWith(48);
+    lifecycle.disconnect();
   });
 });
 
@@ -124,6 +271,7 @@ describe("board widget frame ticket refresh", () => {
       context: () => undefined,
       refreshFrame: () => refreshFrame,
       reportContentHeight: () => {},
+      scrollBy: () => {},
       requestUpdate: () => {},
       resolveFrameUrl: () => () => "",
       root: () => document,

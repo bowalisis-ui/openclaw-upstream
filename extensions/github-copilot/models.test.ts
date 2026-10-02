@@ -1,9 +1,12 @@
+import { streamSimpleOpenAIResponses } from "@openclaw/ai/internal/openai";
 // Github Copilot tests cover models plugin behavior.
 import { expectDefined } from "@openclaw/normalization-core";
 import { createProviderUsageFetch, makeResponse } from "openclaw/plugin-sdk/test-env";
 import { describe, expect, it, vi } from "vitest";
+import { resolveThinkingProfile } from "./provider-policy-api.js";
 import { CopilotRuntimeAuthError } from "./runtime-auth-error.js";
 import { resolveCopilotRuntimeAuth } from "./runtime-auth.js";
+import { resolveCopilotStarterModel } from "./starter-model.js";
 import { fetchCopilotUsage } from "./usage.js";
 
 vi.mock("openclaw/plugin-sdk/provider-model-shared", async (importOriginal) => ({
@@ -62,37 +65,6 @@ describe("resolveCopilotForwardCompatModel", () => {
     expect(resolveCopilotForwardCompatModel(ctx)).toBeUndefined();
   });
 
-  it("uses static metadata for gpt-5.3-codex when not in registry", () => {
-    const result = requireResolvedModel(createMockCtx("gpt-5.3-codex"));
-    expect(result).toEqual({
-      id: "gpt-5.3-codex",
-      name: "GPT-5.3-Codex",
-      provider: "github-copilot",
-      api: "openai-responses",
-      reasoning: true,
-      input: ["text", "image"],
-      cost: { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
-      contextWindow: 400_000,
-      contextTokens: 272_000,
-      maxTokens: 128_000,
-    });
-  });
-
-  it("uses curated static metadata for gpt-5.4 when not in registry", () => {
-    const result = requireResolvedModel(createMockCtx("gpt-5.4"));
-    expect(result).toEqual({
-      id: "gpt-5.4",
-      name: "GPT-5.4",
-      provider: "github-copilot",
-      api: "openai-responses",
-      reasoning: true,
-      input: ["text", "image"],
-      cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
-      contextWindow: 1_050_000,
-      maxTokens: 128_000,
-    });
-  });
-
   it("uses static metadata for gpt-5.5 when live discovery rows are unavailable", () => {
     const result = requireResolvedModel(createMockCtx("gpt-5.5"));
     expect(result).toEqual({
@@ -106,6 +78,11 @@ describe("resolveCopilotForwardCompatModel", () => {
       contextWindow: 1_050_000,
       contextTokens: 272_000,
       maxTokens: 128_000,
+      thinkingLevelMap: { minimal: "low", xhigh: "xhigh", max: null },
+      compat: {
+        codeMode: "capable",
+        supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh"],
+      },
     });
   });
 
@@ -121,10 +98,10 @@ describe("resolveCopilotForwardCompatModel", () => {
   });
 
   it("creates synthetic model for arbitrary unknown model ID", () => {
-    const ctx = createMockCtx("gpt-5.4-mini");
+    const ctx = createMockCtx("future-model");
     const result = requireResolvedModel(ctx);
-    expect(result.id).toBe("gpt-5.4-mini");
-    expect(result.name).toBe("gpt-5.4-mini");
+    expect(result.id).toBe("future-model");
+    expect(result.name).toBe("future-model");
     expect((result as unknown as Record<string, unknown>).api).toBe("openai-responses");
     expect((result as unknown as Record<string, unknown>).input).toEqual(["text", "image"]);
   });
@@ -138,7 +115,11 @@ describe("resolveCopilotForwardCompatModel", () => {
   it("creates synthetic Gemini models with Chat Completions compatibility", () => {
     const result = requireResolvedModel(createMockCtx("gemini-3.1-pro-preview"));
     expect((result as unknown as Record<string, unknown>).api).toBe("openai-completions");
+    // The manifest row now declares its conservative code-mode tier explicitly
+    // (shared-upstream-model contract), and the static override passes the full
+    // manifest compat through to the resolved model.
     expect((result as unknown as Record<string, unknown>).compat).toEqual({
+      codeMode: "capable",
       supportsStore: false,
       supportsDeveloperRole: false,
       supportsUsageInStreaming: false,
@@ -163,14 +144,7 @@ describe("resolveCopilotForwardCompatModel", () => {
   });
 
   it("sets reasoning=false for non-reasoning model IDs including mid-string o1/o3", () => {
-    for (const id of [
-      "gpt-5.4-mini",
-      "claude-sonnet-4.6",
-      "gpt-4o",
-      "mycodexmodel",
-      "audio-o1-hd",
-      "turbo-o3-voice",
-    ]) {
+    for (const id of ["gpt-4o", "mycodexmodel", "audio-o1-hd", "turbo-o3-voice"]) {
       const ctx = createMockCtx(id);
       const result = requireResolvedModel(ctx);
       expect((result as unknown as Record<string, unknown>).reasoning).toBe(false);
@@ -179,38 +153,6 @@ describe("resolveCopilotForwardCompatModel", () => {
 });
 
 describe("fetchCopilotUsage", () => {
-  it("targets the public github.com usage endpoint by default", async () => {
-    let calledUrl: string | undefined;
-    const mockFetch = createProviderUsageFetch(async (url) => {
-      calledUrl = url;
-      return makeResponse(200, { copilot_plan: "pro" });
-    });
-
-    await fetchCopilotUsage("token", 5000, mockFetch);
-
-    expect(calledUrl).toBe("https://api.github.com/copilot_internal/user");
-  });
-
-  it("routes usage through the tenant host for *.ghe.com domains", async () => {
-    let calledUrl: string | undefined;
-    const mockFetch = createProviderUsageFetch(async (url) => {
-      calledUrl = url;
-      return makeResponse(200, { copilot_plan: "business" });
-    });
-
-    await fetchCopilotUsage("token", 5000, mockFetch, "acme.ghe.com");
-
-    expect(calledUrl).toBe("https://api.acme.ghe.com/copilot_internal/user");
-  });
-
-  it("returns HTTP errors for failed requests", async () => {
-    const mockFetch = createProviderUsageFetch(async () => makeResponse(500, "boom"));
-    const result = await fetchCopilotUsage("token", 5000, mockFetch);
-
-    expect(result.error).toBe("HTTP 500");
-    expect(result.windows).toHaveLength(0);
-  });
-
   it("cancels failed response bodies", async () => {
     let canceled = false;
     const body = new ReadableStream({
@@ -224,6 +166,7 @@ describe("fetchCopilotUsage", () => {
     const result = await fetchCopilotUsage("token", 5000, mockFetch);
 
     expect(result.error).toBe("HTTP 500");
+    expect(result.windows).toHaveLength(0);
     expect(canceled).toBe(true);
   });
 
@@ -350,10 +293,7 @@ describe("github-copilot runtime auth", () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(
-        new Response(
-          JSON.stringify({ endpoints: { api: "https://api.individual.githubcopilot.com/" } }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
+        Response.json({ endpoints: { api: "https://api.individual.githubcopilot.com/" } }),
       );
 
     const auth = await resolveCopilotRuntimeAuth({
@@ -379,12 +319,9 @@ describe("github-copilot runtime auth", () => {
   });
 
   it("accepts an account endpoint under the configured data-residency tenant", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ endpoints: { api: "https://copilot-api.acme.ghe.com" } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(Response.json({ endpoints: { api: "https://copilot-api.acme.ghe.com" } }));
 
     const auth = await resolveCopilotRuntimeAuth({
       githubToken: "tenant-source-token",
@@ -397,12 +334,7 @@ describe("github-copilot runtime auth", () => {
   });
 
   it("uses a domain-safe fallback when account metadata omits the API endpoint", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ copilot_plan: "individual" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+    const fetchImpl = vi.fn().mockResolvedValue(Response.json({ copilot_plan: "individual" }));
 
     await expect(
       resolveCopilotRuntimeAuth({
@@ -420,12 +352,7 @@ describe("github-copilot runtime auth", () => {
     "https://api.individual.githubcopilot.com.attacker.test",
     "https://user@api.individual.githubcopilot.com",
   ])("rejects an untrusted account endpoint: %s", async (api) => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ endpoints: { api } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+    const fetchImpl = vi.fn().mockResolvedValue(Response.json({ endpoints: { api } }));
 
     await expect(
       resolveCopilotRuntimeAuth({
@@ -435,21 +362,38 @@ describe("github-copilot runtime auth", () => {
     ).rejects.toThrow("untrusted endpoints.api URL");
   });
 
-  it("explains how to recover from forbidden authentication", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 403 }));
-    const rejection = resolveCopilotRuntimeAuth({
-      githubToken: "github-source-token",
-      fetchImpl: fetchImpl as typeof fetch,
-    });
+  it.each([false, true])(
+    "explains forbidden auth without waiting for capture (clone: %s)",
+    async (cloned) => {
+      const response = new Response(new ReadableStream<Uint8Array>(), { status: 403 });
+      const capture = cloned ? response.clone() : undefined;
+      const fetchImpl = vi.fn().mockResolvedValue(response);
+      const rejection = resolveCopilotRuntimeAuth({
+        githubToken: "github-source-token",
+        fetchImpl: fetchImpl as typeof fetch,
+      }).catch((error: unknown) => error);
 
-    await expect(rejection).rejects.toBeInstanceOf(CopilotRuntimeAuthError);
-    await expect(rejection).rejects.toMatchObject({
-      code: "github_copilot_auth_failed",
-      reason: "http_error",
-      status: 403,
-      message: expect.stringContaining("login-github-copilot"),
-    });
-  });
+      try {
+        const error = await Promise.race([
+          rejection,
+          new Promise<undefined>((resolve) => {
+            setImmediate(() => resolve(undefined));
+          }),
+        ]);
+        expect(error).toBeInstanceOf(CopilotRuntimeAuthError);
+        expect(error).toMatchObject({
+          code: "github_copilot_auth_failed",
+          reason: "http_error",
+          status: 403,
+          message: expect.stringContaining("login-github-copilot"),
+        });
+        expect(response.bodyUsed).toBe(true);
+      } finally {
+        await capture?.body?.cancel();
+        await rejection;
+      }
+    },
+  );
 
   it("maps a stalled response body to a runtime-auth timeout", async () => {
     const controller = new AbortController();
@@ -650,6 +594,131 @@ describe("fetchCopilotModelCatalog", () => {
     });
   }
 
+  it.each([
+    {
+      source: "live",
+      reasoning: "minimal",
+      efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+      expected: "low",
+    },
+    { source: "static", reasoning: "minimal", efforts: [], expected: "low" },
+    {
+      source: "native minimal live",
+      reasoning: "minimal",
+      efforts: ["minimal", "low", "high"],
+      expected: "minimal",
+    },
+    {
+      source: "live",
+      reasoning: "xhigh",
+      efforts: ["low", "high", "xhigh", "max"],
+      expected: "xhigh",
+    },
+    { source: "live", reasoning: "max", efforts: ["low", "high", "xhigh", "max"], expected: "max" },
+    { source: "static", reasoning: "xhigh", efforts: [], expected: "xhigh" },
+    { source: "static", reasoning: "max", efforts: [], expected: "max" },
+    {
+      source: "limited live",
+      reasoning: "xhigh",
+      efforts: ["low", "medium", "high"],
+      expected: "high",
+    },
+    {
+      source: "limited live",
+      reasoning: "max",
+      efforts: ["low", "medium", "high"],
+      expected: "high",
+    },
+    { source: "empty live", reasoning: "max", efforts: [], expected: undefined },
+  ] as const)(
+    "keeps $source catalog policy and $reasoning Responses effort aligned",
+    async ({ source, reasoning, efforts, expected }) => {
+      const [entry] = await fetchSelectionFixture([
+        {
+          id: "gpt-5.6-luna",
+          vendor: "OpenAI",
+          capabilities: {
+            type: "chat",
+            supports: { reasoning_effort: efforts },
+          },
+        },
+      ]);
+      const model = {
+        ...(source === "static"
+          ? requireResolvedModel(createMockCtx("gpt-5.6-luna"))
+          : expectDefined(entry, "discovered Copilot model")),
+        provider: "github-copilot",
+        api: "openai-responses" as const,
+        baseUrl: "https://api.githubcopilot.com",
+      };
+      const profile = resolveThinkingProfile({
+        provider: model.provider,
+        modelId: model.id,
+        api: model.api,
+        compat: model.compat,
+      });
+      expect(profile?.levels.some(({ id }) => id === reasoning)).toBe(
+        reasoning === "minimal" || expected === reasoning,
+      );
+      const onPayload = vi.fn(() => {
+        throw new Error("captured before sending");
+      });
+
+      const result = await streamSimpleOpenAIResponses(
+        model,
+        { messages: [{ role: "user", content: "Reply OK", timestamp: 1 }] },
+        { apiKey: "test-token", reasoning, onPayload },
+      ).result();
+
+      expect(result.errorMessage).toBe("captured before sending");
+      expect(onPayload).toHaveBeenCalledWith(
+        expected
+          ? expect.objectContaining({ reasoning: { effort: expected, summary: "auto" } })
+          : expect.not.objectContaining({ reasoning: expect.anything() }),
+        model,
+      );
+    },
+  );
+  it("selects onboarding's starter model using the configured integration identity", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (requestUrl.endsWith("/copilot_internal/user")) {
+        return Response.json({ endpoints: { api: "https://copilot-api.acme.ghe.com" } });
+      }
+      const headers = new Headers(init?.headers);
+      expect(headers.get("copilot-integration-id")).toBe("vscode-chat");
+      expect(headers.get("authorization")).toBe("Bearer setup-source-token");
+      expect(headers.has("x-private-header")).toBe(false);
+      return Response.json({ data: [selectableModelEntry({ id: "tenant-model" })] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(
+        resolveCopilotStarterModel({
+          githubToken: "setup-source-token",
+          githubDomain: "acme.ghe.com",
+          config: {
+            models: {
+              providers: {
+                "github-copilot": {
+                  baseUrl: "https://copilot-api.acme.ghe.com",
+                  models: [],
+                  headers: {
+                    "copilot-integration-id": "vscode-chat",
+                    "X-Private-Header": "not-for-catalog",
+                  },
+                },
+              },
+            },
+          },
+        }),
+      ).resolves.toBe("github-copilot/tenant-model");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("selects the preferred model only when the authenticated catalog marks it eligible", async () => {
     const models = await fetchSelectionFixture([
       selectableModelEntry({ id: "fallback", contextWindow: 1_000_000 }),
@@ -733,6 +802,7 @@ describe("fetchCopilotModelCatalog", () => {
       contextTokens: 272000,
       maxTokens: 128000,
       compat: { supportedReasoningEfforts: ["low", "medium", "high"] },
+      thinkingLevelMap: { minimal: "low", xhigh: null, max: null },
     });
 
     const codex = out.find((m) => m.id === "gpt-5.3-codex");

@@ -5,14 +5,15 @@
 import crypto from "node:crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { ensureAuthProfileStore, loadAuthProfileStoreForRuntime } from "./auth-profiles/store.js";
-import type { AuthProfileCredential, AuthProfileStore } from "./auth-profiles/types.js";
+import {
+  ensureAuthProfileStore,
+  loadAuthProfileStoreForRuntime,
+} from "./auth-profiles/store-runtime.js";
+import type { AuthProfileCredential } from "./auth-profiles/types.js";
 import { resolveCliBackendConfig } from "./cli-backends.js";
 import {
-  readClaudeCliCredentialsCached,
   readCodexCliCredentialsCached,
   readGeminiCliCredentialsCached,
-  type ClaudeCliCredential,
   type CodexCliCredential,
   type GeminiCliCredential,
 } from "./cli-credentials.js";
@@ -28,21 +29,14 @@ import {
 } from "./execution-auth-binding.js";
 import type { ResolvedProviderAuth } from "./model-auth-runtime-shared.js";
 
-type CliAuthEpochDeps = {
-  readClaudeCliCredentialsCached: typeof readClaudeCliCredentialsCached;
-  readCodexCliCredentialsCached: typeof readCodexCliCredentialsCached;
-  readGeminiCliCredentialsCached: typeof readGeminiCliCredentialsCached;
-  ensureAuthProfileStore: typeof ensureAuthProfileStore;
-  loadAuthProfileStoreForRuntime: typeof loadAuthProfileStoreForRuntime;
-};
-
-const defaultCliAuthEpochDeps: CliAuthEpochDeps = {
-  readClaudeCliCredentialsCached,
+const defaultCliAuthEpochDeps = {
   readCodexCliCredentialsCached,
   readGeminiCliCredentialsCached,
   ensureAuthProfileStore,
   loadAuthProfileStoreForRuntime,
 };
+
+type CliAuthEpochDeps = typeof defaultCliAuthEpochDeps;
 
 const cliAuthEpochDeps: CliAuthEpochDeps = { ...defaultCliAuthEpochDeps };
 
@@ -97,40 +91,6 @@ function encodeOAuthIdentity(credential: {
     credential.projectId ?? null,
     credential.accountId ?? null,
   ]);
-}
-
-function encodeClaudeCredential(credential: ClaudeCliCredential): string {
-  if (credential.type === "api_key_helper") {
-    return JSON.stringify([credential.type, credential.provider, credential.helperHash]);
-  }
-  // Identity-only hashing for Claude CLI-managed credentials.
-  // The Claude CLI keychain rewrite is not atomic: a token rotation can
-  // briefly produce a partial read where `refreshToken` is missing, and the
-  // parser falls back to a token-shaped credential. With the previous
-  // token-inclusive hash, that transient race flipped the auth-epoch and
-  // forced a session reset on every rotation. Routing these branches through
-  // `encodeOAuthIdentity` collapses partial reads and rotations onto the same
-  // provider-keyed identity hash. Helper auth stays distinct because changing
-  // its configured command can switch accounts. Fixes #74312.
-  return encodeOAuthIdentity({
-    type: "oauth",
-    provider: credential.provider,
-  });
-}
-
-function encodeCodexCredential(credential: CodexCliCredential): string {
-  return encodeOAuthIdentity(credential);
-}
-
-function encodeGeminiCredential(credential: GeminiCliCredential): string {
-  // Delegate to the shared OAuth-identity encoder. The Gemini CLI reader
-  // lifts the Google-account identity (sub, email) off the openid id_token
-  // onto the credential, so the encoder fingerprints the user through stable,
-  // non-secret identity fields — matching the Claude/Codex OAuth contract.
-  // When the id_token is absent (older logins, scope omitted), the encoder
-  // falls back to a provider-keyed constant, the same identity-less behavior
-  // the Claude CLI OAuth branch tolerates.
-  return encodeOAuthIdentity(credential);
 }
 
 function encodeAuthProfileCredential(credential: AuthProfileCredential): string {
@@ -192,69 +152,21 @@ function encodeAuthProfileEpochPart(
   return `profile:${authProfileId}:${credentialHash}`;
 }
 
-function getLocalCliCredentialFingerprint(provider: string): string | undefined {
+function getLocalCliCredential(
+  provider: string,
+  ttlMs = 0,
+): CodexCliCredential | GeminiCliCredential | undefined {
   switch (provider) {
-    case "claude-cli": {
-      const credential = cliAuthEpochDeps.readClaudeCliCredentialsCached({
-        ttlMs: 5000,
-        allowKeychainPrompt: false,
-      });
-      // Keep true credential absence absent so logout/removal invalidates
-      // reusable sessions. The 5s credential cache still masks transient
-      // null reads immediately after a successful read.
-      return credential ? hashCliAuthEpochPart(encodeClaudeCredential(credential)) : undefined;
-    }
-    case "codex-cli": {
-      const credential = cliAuthEpochDeps.readCodexCliCredentialsCached({
-        ttlMs: 5000,
-        allowKeychainPrompt: false,
-      });
-      return credential ? hashCliAuthEpochPart(encodeCodexCredential(credential)) : undefined;
-    }
-    case "google-gemini-cli": {
-      const credential = cliAuthEpochDeps.readGeminiCliCredentialsCached({
-        ttlMs: 5000,
-      });
-      return credential ? hashCliAuthEpochPart(encodeGeminiCredential(credential)) : undefined;
-    }
-    default:
-      return undefined;
-  }
-}
-
-function getLocalCliCredential(provider: string): AuthProfileCredential | undefined {
-  switch (provider) {
-    case "claude-cli": {
-      const auth = cliAuthEpochDeps.readClaudeCliCredentialsCached({
-        ttlMs: 0,
-        allowKeychainPrompt: false,
-      });
-      // Helper auth has no persisted secret/profile shape; its opaque command
-      // fingerprint is already carried by getLocalCliCredentialFingerprint.
-      return auth?.type === "api_key_helper" ? undefined : (auth ?? undefined);
-    }
     case "codex-cli":
       return (
-        cliAuthEpochDeps.readCodexCliCredentialsCached({
-          ttlMs: 0,
-          allowKeychainPrompt: false,
-        }) ?? undefined
+        cliAuthEpochDeps.readCodexCliCredentialsCached({ ttlMs, allowKeychainPrompt: false }) ??
+        undefined
       );
     case "google-gemini-cli":
-      return cliAuthEpochDeps.readGeminiCliCredentialsCached({ ttlMs: 0 }) ?? undefined;
+      return cliAuthEpochDeps.readGeminiCliCredentialsCached({ ttlMs }) ?? undefined;
     default:
       return undefined;
   }
-}
-
-function getAuthProfileCredential(
-  store: AuthProfileStore,
-  authProfileId: string | undefined,
-): AuthProfileCredential | undefined {
-  if (!authProfileId) {
-    return undefined;
-  }
-  return store.profiles[authProfileId];
 }
 
 /** Resolves the stable auth epoch hash for a CLI runtime/provider session. */
@@ -269,9 +181,9 @@ export async function resolveCliAuthEpoch(params: {
   const parts: string[] = [];
 
   if (params.skipLocalCredential !== true) {
-    const localFingerprint = getLocalCliCredentialFingerprint(provider);
-    if (localFingerprint) {
-      parts.push(`local:${provider}:${localFingerprint}`);
+    const credential = getLocalCliCredential(provider, 5000);
+    if (credential) {
+      parts.push(`local:${provider}:${hashCliAuthEpochPart(encodeOAuthIdentity(credential))}`);
     }
   }
 
@@ -280,7 +192,7 @@ export async function resolveCliAuthEpoch(params: {
       readOnly: true,
       allowKeychainPrompt: false,
     });
-    const credential = getAuthProfileCredential(store, authProfileId);
+    const credential = store.profiles[authProfileId];
     if (credential) {
       parts.push(encodeAuthProfileEpochPart(authProfileId, credential));
     }

@@ -1,5 +1,6 @@
 import type { TerminalUploadFile, TerminalUploadResult } from "../../infra/terminal-file-upload.js";
-import type { LocalTerminalBackendSpawner, TerminalBackend } from "./backend.js";
+import type { spawnTerminalPty } from "../../process/terminal-pty.js";
+import type { TerminalBackend } from "./backend.js";
 import type { TerminalOutputController } from "./output-flow-control.js";
 import type { TerminalOutputRing } from "./output-ring.js";
 
@@ -7,9 +8,20 @@ export type TerminalEventSink = (connId: string, event: string, payload: unknown
 
 export type TerminalExitReason = "process_exit" | "closed" | "disconnected" | "detached" | "error";
 
-export type TerminalOwner =
-  | { kind: "conn"; connId: string }
-  | { kind: "agent"; agentSessionKey: string };
+export type AgentTerminalOwner = {
+  kind: "agent";
+  agentSessionKey: string;
+  agentSessionId: string;
+  agentId: string;
+};
+
+export type TerminalOwner = { kind: "conn"; connId: string } | AgentTerminalOwner;
+
+export type AgentTerminalSessionDrain = {
+  drained: Promise<void>;
+  hasWork(): boolean;
+  release(): void;
+};
 
 export type TerminalSession = {
   id: string;
@@ -17,9 +29,12 @@ export type TerminalSession = {
   owner: TerminalOwner | null;
   /** Operator connections co-attached to an agent-owned session. */
   viewers: Set<string>;
+  /** Initial UI viewer may discard this shared PTY until either side adopts it. */
+  unadoptedViewerConnId?: string;
   agentId: string;
   cwd: string;
   shell: string;
+  title?: string;
   backend: TerminalBackend;
   stageUpload: (file: TerminalUploadFile) => Promise<TerminalUploadResult>;
   closed: boolean;
@@ -38,7 +53,7 @@ export type TerminalSession = {
 export type TerminalSessionManagerOptions = {
   emit: TerminalEventSink;
   getBufferedAmount?: (connId: string) => number | undefined;
-  spawn?: LocalTerminalBackendSpawner;
+  spawn?: typeof spawnTerminalPty;
   maxSessions?: number;
   env?: NodeJS.ProcessEnv;
   /** Detach grace; 0 preserves kill-on-disconnect. Gateway wiring owns its default. */
@@ -49,9 +64,12 @@ export type TerminalSessionManagerOptions = {
 
 export type TerminalOpenRequest = {
   owner: TerminalOwner;
+  /** Operator connection initially viewing an agent-owned session. */
+  viewerConnId?: string;
   agentId: string;
   cwd: string;
   shell: string;
+  title?: string;
   args: string[];
   cols: number;
   rows: number;
@@ -65,6 +83,10 @@ export type TerminalOpenRequest = {
 export type TerminalOpenOutcome =
   | { ok: true; sessionId: string; agentId: string; cwd: string; shell: string }
   | { ok: false; code: "limit" | "spawn_failed" | "closed"; message: string };
+
+export type TerminalAgentActionOutcome =
+  | { ok: true }
+  | { ok: false; code: "session_unavailable" | "backend_failed" };
 
 /** Abort state shared between a pending open and lifecycle/policy teardown. */
 export type TerminalPendingOpen = {

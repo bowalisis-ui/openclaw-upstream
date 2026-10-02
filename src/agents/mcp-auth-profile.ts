@@ -3,34 +3,20 @@
  */
 import crypto from "node:crypto";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { filterStringRecord, isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { BundleMcpConfig, BundleMcpServerConfig } from "../plugins/bundle-mcp.js";
-import { resolveApiKeyForProfile } from "./auth-profiles/oauth.js";
-import { loadAuthProfileStoreForSecretsRuntime } from "./auth-profiles/store.js";
+import { createLazyRuntimeMethod } from "../shared/lazy-runtime.js";
 import {
-  buildMcpHttpFetch,
+  buildMcpOAuthAuthorizationFetch,
   withoutMcpAuthorizationHeader,
-  withSameOriginMcpHttpHeaders,
 } from "./mcp-http-fetch.js";
-import { operatorMcpOAuthIdentity } from "./mcp-oauth-identity.js";
-import { resolveMcpOAuthAccessToken, type McpOAuthConfig } from "./mcp-oauth.js";
 import { resolveMcpTransportConfig } from "./mcp-transport-config.js";
 
 type McpAuthProfileOptions = {
   cfg?: OpenClawConfig;
   agentDir?: string;
 };
-
-function normalizeStringHeaders(value: unknown): Record<string, string> | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  const entries = Object.entries(value).filter(
-    (entry): entry is [string, string] => typeof entry[1] === "string",
-  );
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
 
 /** Returns the refresh-capable auth profile selected for one MCP server. */
 export function resolveMcpAuthProfileId(rawServer: unknown): string | undefined {
@@ -51,50 +37,11 @@ export function requiresMcpBearerProjection(rawServer: unknown): boolean {
   return Boolean(resolveMcpAuthProfileId(rawServer) || typeof rawServer.url === "string");
 }
 
-async function resolveMcpAuthProfileBearerToken(
-  params: {
-    serverName: string;
-    profileId: string;
-  } & McpAuthProfileOptions,
-): Promise<string> {
-  const store = loadAuthProfileStoreForSecretsRuntime(params.agentDir, {
-    config: params.cfg,
-    externalCliProfileIds: [params.profileId],
-  });
-  const credential = store.profiles[params.profileId];
-  if (!credential) {
-    throw new Error(
-      `MCP server "${params.serverName}" references auth profile "${params.profileId}", but that profile was not found.`,
-    );
-  }
-  if (credential.type !== "oauth") {
-    throw new Error(
-      `MCP server "${params.serverName}" references auth profile "${params.profileId}", but ${credential.type} profiles are not refreshable. Use a refresh-capable OAuth profile.`,
-    );
-  }
-  const resolved = await resolveApiKeyForProfile({
-    cfg: params.cfg,
-    store,
-    profileId: params.profileId,
-    agentDir: params.agentDir,
-  });
-  if (!resolved || resolved.profileType !== "oauth" || !resolved.apiKey) {
-    throw new Error(
-      `MCP server "${params.serverName}" could not resolve refreshable OAuth auth profile "${params.profileId}". Re-authenticate the profile and retry.`,
-    );
-  }
-  if (
-    !resolved.credential ||
-    resolved.credential.type !== "oauth" ||
-    typeof resolved.credential.access !== "string" ||
-    resolved.credential.access.trim().length === 0
-  ) {
-    throw new Error(
-      `MCP server "${params.serverName}" resolved OAuth auth profile "${params.profileId}", but no raw access token was available for bearer projection.`,
-    );
-  }
-  return resolved.credential.access;
-}
+// Keep profile discovery on credential demand; never memoize the store or bearer.
+const resolveMcpAuthProfileBearerToken = createLazyRuntimeMethod(
+  () => import("./mcp-auth-profile.runtime.js"),
+  (runtime) => runtime.resolveMcpAuthProfileBearerToken,
+);
 
 async function resolveMcpBearerToken(params: {
   serverName: string;
@@ -118,23 +65,14 @@ async function resolveMcpBearerToken(params: {
   if (!resolved || resolved.kind !== "http") {
     return undefined;
   }
-  const fetchFn = withSameOriginMcpHttpHeaders({
-    fetchFn: buildMcpHttpFetch({
-      sslVerify: resolved.sslVerify,
-      clientCert: resolved.clientCert,
-      clientKey: resolved.clientKey,
-      resourceUrl: resolved.url,
-      // External bearer projection performs only OAuth discovery/token work,
-      // so the configured deadline can own the full short-lived response.
-      timeoutMs: resolved.requestTimeoutMs,
-    }),
-    headers: withoutMcpAuthorizationHeader(resolved.headers),
-    resourceUrl: resolved.url,
-  });
+  const [{ operatorMcpOAuthIdentity }, { resolveMcpOAuthAccessToken }] = await Promise.all([
+    import("./mcp-oauth-identity.js"),
+    import("./mcp-oauth.js"),
+  ]);
   return await resolveMcpOAuthAccessToken({
     identity: operatorMcpOAuthIdentity(params.serverName, resolved.url),
-    config: resolved.oauth as McpOAuthConfig | undefined,
-    fetchFn,
+    config: resolved.oauth,
+    fetchFn: buildMcpOAuthAuthorizationFetch(resolved),
   });
 }
 
@@ -229,7 +167,7 @@ export async function resolveMcpBearerBundleConfig(
       nextEnv[envVar] = token;
       authorization = `Bearer \${${envVar}}`;
     }
-    const headers = withoutMcpAuthorizationHeader(normalizeStringHeaders(server.headers));
+    const headers = withoutMcpAuthorizationHeader(filterStringRecord(server.headers));
     nextServers ??= { ...params.config.mcpServers };
     nextServers[serverName] = stripOpenClawOnlyOAuthConfig({
       ...server,

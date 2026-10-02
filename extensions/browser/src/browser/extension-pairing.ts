@@ -1,9 +1,14 @@
-import { isLoopbackHost } from "../gateway/net.js";
-import { type BrowserConfig, type OpenClawConfig, resolveGatewayPort } from "../sdk-config.js";
-import { resolveBrowserConfig } from "./config.js";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { resolveGatewayPort } from "openclaw/plugin-sdk/gateway-config-runtime";
+import { isLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
+import {
+  resolveBrowserConfig,
+  resolveFirstExtensionProfileName,
+  resolveProfile,
+} from "./config.js";
 import { ensureExtensionRelayToken } from "./extension-relay/relay-auth.js";
 
-/** Gateway route for direct extension-only remote pairing. */
+/** Gateway route for extension pairing that must wake Browser control. */
 const GATEWAY_EXTENSION_RELAY_PATH = "/browser/extension";
 
 type BrowserExtensionPairing = {
@@ -12,22 +17,8 @@ type BrowserExtensionPairing = {
   topology: "local" | "browser-node" | "direct-remote";
 };
 
-type PairingConfig = OpenClawConfig & { browser?: BrowserConfig };
-
-function firstExtensionRelayPort(cfg: PairingConfig): number {
-  const resolved = resolveBrowserConfig(cfg.browser, cfg);
-  for (const [name, profile] of Object.entries(resolved.profiles)) {
-    if (profile.driver === "extension") {
-      return (
-        profile.cdpPort ?? resolved.extensionRelayPorts[name] ?? resolved.extensionRelayDefaultPort
-      );
-    }
-  }
-  return resolved.extensionRelayDefaultPort;
-}
-
-/** Resolve a safe direct-Gateway relay URL with the v2-bound route path. */
-function buildDirectGatewayRelayUrl(raw: string): string {
+/** Resolve a safe Gateway relay URL with the v2-bound route path. */
+function buildGatewayExtensionRelayUrl(raw: string): string {
   let url: URL;
   try {
     url = new URL(raw.trim());
@@ -57,15 +48,23 @@ function buildDirectGatewayRelayUrl(raw: string): string {
  * to the remote Gateway rather than the browser host.
  */
 export async function buildBrowserExtensionPairing(params: {
-  cfg: PairingConfig;
+  cfg: OpenClawConfig;
   gatewayUrl?: string;
+  localTransport?: "relay" | "gateway";
+  profile?: string;
   ensureToken?: typeof ensureExtensionRelayToken;
 }): Promise<BrowserExtensionPairing> {
-  const relayPort = firstExtensionRelayPort(params.cfg);
+  const resolved = resolveBrowserConfig(params.cfg.browser, params.cfg);
+  const profileName = params.profile || resolveFirstExtensionProfileName(resolved);
+  const profile = profileName ? resolveProfile(resolved, profileName) : null;
+  if (params.profile && profile?.driver !== "extension") {
+    throw new Error("Native bootstrap requires an existing extension profile");
+  }
+  const relayPort = profile?.cdpPort ?? resolved.extensionRelayDefaultPort;
   const token = await (params.ensureToken ?? ensureExtensionRelayToken)();
   const gateway = params.gatewayUrl?.trim();
   if (gateway) {
-    const relayUrl = new URL(buildDirectGatewayRelayUrl(gateway));
+    const relayUrl = new URL(buildGatewayExtensionRelayUrl(gateway));
     relayUrl.searchParams.set("gateway", gateway);
     return {
       pairingString: `${relayUrl.toString()}#${token}`,
@@ -80,7 +79,15 @@ export async function buildBrowserExtensionPairing(params: {
     throw new Error("Gateway TLS pairing requires --gateway-url wss://<certificate-host>[:port]");
   }
   const gatewayHint = configuredRemote || `ws://127.0.0.1:${resolveGatewayPort(params.cfg)}`;
-  const relayUrl = new URL(`ws://127.0.0.1:${relayPort}/extension`);
+  // Native local bootstrap needs the Gateway to wake Browser control. Manual
+  // local pairing and browser nodes target an already-running host relay.
+  const relayUrl =
+    !configuredRemote && params.localTransport === "gateway"
+      ? new URL(buildGatewayExtensionRelayUrl(gatewayHint))
+      : new URL(`ws://127.0.0.1:${relayPort}/extension`);
+  if (params.profile && relayUrl.pathname === GATEWAY_EXTENSION_RELAY_PATH) {
+    relayUrl.searchParams.set("profile", params.profile);
+  }
   relayUrl.searchParams.set("gateway", gatewayHint);
   return {
     pairingString: `${relayUrl.toString()}#${token}`,

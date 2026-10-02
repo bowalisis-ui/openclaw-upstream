@@ -1,4 +1,3 @@
-// Nostr plugin module implements setup adapter behavior.
 import {
   defineChannelSetupContract,
   type ChannelSetupAdapter,
@@ -13,6 +12,7 @@ import {
 } from "openclaw/plugin-sdk/setup";
 import { uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { DEFAULT_RELAYS } from "./default-relays.js";
+import { NOSTR_PRIVATE_KEY_ENV_VAR, validatePrivateKey } from "./private-key.js";
 
 const channel = "nostr" as const;
 
@@ -48,7 +48,6 @@ export function parseRelayUrls(raw: string): { relays: string[]; error?: string 
 
 export function createNostrSetupAdapter(params: {
   resolveAccountId: (cfg: OpenClawConfig, accountId?: string | null) => string;
-  validatePrivateKey: (privateKey: string) => boolean;
 }): ChannelSetupAdapter<NostrSetupInput> {
   return {
     resolveAccountId: ({ cfg, accountId }) => params.resolveAccountId(cfg, accountId),
@@ -64,7 +63,9 @@ export function createNostrSetupAdapter(params: {
         if (!privateKey) {
           return "Nostr requires --private-key or --use-env.";
         }
-        if (!params.validatePrivateKey(privateKey)) {
+        try {
+          validatePrivateKey(privateKey);
+        } catch {
           return "Nostr private key must be valid nsec or 64-character hex.";
         }
       }
@@ -106,6 +107,7 @@ export function createNostrSetupContract(adapter: ChannelSetupAdapter<NostrSetup
       useEnv: {
         kind: "boolean",
         cli: { flags: "--use-env", description: "Use NOSTR_PRIVATE_KEY" },
+        envVars: [NOSTR_PRIVATE_KEY_ENV_VAR],
       },
     },
     adapter,

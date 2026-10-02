@@ -1,10 +1,10 @@
 import type { OpenClawPluginNodeHostCommand } from "openclaw/plugin-sdk/plugin-entry";
+import { asFiniteNumber as readFiniteNumber } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { clamp } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
-  clamp,
   formatToolError,
   isCapabilityEnabledForHost,
   parseParams,
-  readFiniteNumber,
   type RunCommand,
 } from "./command-utils.js";
 import type { ResolvedLinuxNodePluginConfig } from "./config.js";
@@ -74,9 +74,10 @@ function parseLocationOutput(
     const timestamp = epochSeconds
       ? new Date(Number(epochSeconds) * 1000).toISOString()
       : now().toISOString();
+    const ageMs = now().getTime() - Date.parse(timestamp);
     if (
       maxAgeMs !== undefined &&
-      now().getTime() - Date.parse(timestamp) >= maxAgeMs + GEOCLUE_TIMESTAMP_RESOLUTION_MS
+      (ageMs < 0 || ageMs >= maxAgeMs + GEOCLUE_TIMESTAMP_RESOLUTION_MS)
     ) {
       continue;
     }
@@ -100,6 +101,7 @@ export function createLinuxLocationCommand(
     deps.resolveExecutable("where-am-i", env, GEOCLUE_DEMO_PATHS);
   return {
     command: "location.get",
+    hasActiveWork: () => false,
     cap: "location",
     isAvailable: (context) =>
       deps.platform === "linux" &&

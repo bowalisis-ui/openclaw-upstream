@@ -10,7 +10,6 @@ import type {
   Tool,
   ToolResultMessage,
 } from "@openclaw/llm-core";
-// Agent Core type module defines shared TypeScript contracts.
 import type { Static, TSchema } from "typebox";
 
 /**
@@ -56,12 +55,18 @@ export interface BeforeToolCallResult {
   reason?: string;
 }
 
-/** A validated call participating in an internal whole-batch admission check. */
+/** A call participating in an internal whole-batch admission check. */
 export interface InternalToolBatchCall {
   toolCall: AgentToolCall;
+  /** Validated arguments, or the raw arguments when validation rejected the call. */
   args: unknown;
   /** Resolved tool identity for OpenClaw-owned argument canonicalization. */
   tool?: AgentTool;
+  /**
+   * Error result for a call rejected by argument validation. It never executes;
+   * the batch lifecycle commits it at its assistant-order launch position.
+   */
+  validationFailure?: AgentToolResult<unknown>;
 }
 
 /** Typed core signal used to recover once from a critical tool loop. */
@@ -75,6 +80,13 @@ export interface ToolLoopIntervention {
   reason: string;
 }
 
+/** Bucketed feedback for an admitted call, not a veto or recovery attempt. */
+export interface ToolLoopWarning {
+  kind: "tool-loop-warning";
+  toolCallId: string;
+  count: number;
+}
+
 /** Context for OpenClaw-owned whole-batch tool admission. */
 export interface InternalBeforeToolBatchContext {
   assistantMessage: AssistantMessage;
@@ -83,9 +95,9 @@ export interface InternalBeforeToolBatchContext {
 }
 
 /** Result of OpenClaw-owned whole-batch tool admission. */
-export interface InternalBeforeToolBatchResult {
-  intervention?: ToolLoopIntervention;
-}
+export type InternalBeforeToolBatchResult =
+  | { intervention: ToolLoopIntervention; warnings?: never }
+  | { intervention?: never; warnings?: ToolLoopWarning[] };
 
 export interface DeferredToolCallContext {
   /** The assistant message that requested the deferred tool call. */
@@ -187,6 +199,8 @@ export interface ShouldStopAfterTurnContext {
 
 /** Replacement runtime state used by the agent loop before starting another provider request. */
 export interface AgentLoopTurnUpdate {
+  /** Commit accepted steering and settle this invocation without another model request. */
+  stop?: boolean;
   /** Context for the next provider request. */
   context?: AgentContext;
   /** Model for the next provider request. */
@@ -320,6 +334,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
    */
   getFollowUpMessages?: () => Promise<AgentMessage[]>;
 
+  /** Consumes the cancellation fact for a previously drained queue message. */
+  consumeQueuedMessageCancellation?: (message: AgentMessage) => boolean;
+
   /**
    * Tool execution mode.
    * - "sequential": execute tool calls one by one, checking for steering before each starts
@@ -427,6 +444,8 @@ export interface CustomMessage<T = unknown> {
   content: string | (TextContent | ImageContent)[];
   /** Whether UI surfaces should display this message. */
   display: boolean;
+  /** Keep display-only application activity out of future model context. */
+  excludeFromContext?: boolean;
   /** Optional application-specific metadata. */
   details?: T;
   /** Millisecond timestamp for transcript ordering. */

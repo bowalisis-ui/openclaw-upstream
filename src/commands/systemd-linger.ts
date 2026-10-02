@@ -42,7 +42,7 @@ export async function ensureSystemdUserLingerInteractive(params: {
     return;
   }
   const env = params.env ?? process.env;
-  const prompter = params.prompter ?? { note };
+  const prompter: LingerPrompter = params.prompter ?? { note };
   const title = params.title ?? "Systemd";
   if (!(await isSystemdUserServiceAvailable())) {
     await prompter.note("Systemd user services are unavailable. Skipping lingering checks.", title);
@@ -83,16 +83,9 @@ export async function ensureSystemdUserLingerInteractive(params: {
     env,
     user: status.user,
   });
-  if (resultNoSudo.ok) {
-    await prompter.note(`Enabled systemd lingering for ${status.user}.`, title);
-    return;
-  }
-
-  const result = await enableSystemdUserLinger({
-    env,
-    user: status.user,
-    sudoMode: "prompt",
-  });
+  const result = resultNoSudo.ok
+    ? resultNoSudo
+    : await enableSystemdUserLinger({ env, user: status.user, sudoMode: "prompt" });
   if (result.ok) {
     await prompter.note(`Enabled systemd lingering for ${status.user}.`, title);
     return;

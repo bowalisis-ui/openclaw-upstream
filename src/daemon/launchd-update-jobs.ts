@@ -1,6 +1,9 @@
 /** Discovery and shutdown of stale OpenClaw launchd updater jobs. */
 import path from "node:path";
-import { parseStrictInteger, parseStrictPositiveInteger } from "../infra/parse-finite-number.js";
+import {
+  parseStrictInteger,
+  parseStrictPositiveInteger,
+} from "@openclaw/normalization-core/number-coercion";
 import {
   GATEWAY_SERVICE_KIND,
   GATEWAY_SERVICE_MARKER,
@@ -14,12 +17,11 @@ import { resolveLaunchAgentGuiDomain } from "./launchd-runtime.js";
 import { resolveLaunchAgentPlistPathForLabel } from "./launchd-service-files.js";
 
 const OPENCLAW_UPDATE_LAUNCHD_LABEL_PREFIX = "ai.openclaw.update.";
-const OPENCLAW_MANUAL_UPDATE_LAUNCHD_LABEL_PATTERN = /^ai\.openclaw\.manual-update\.\d+$/;
+const MANUAL_UPDATE_LAUNCHD_LABEL_PATTERN = /^ai\.openclaw\.manual-update\.\d+$/;
 const OPENCLAW_PROFILE_UPDATE_LAUNCHD_LABEL_PATTERN =
   /^ai\.openclaw\.[A-Za-z0-9._-]+\.update\.[A-Za-z0-9._-]+$/;
 const OPENCLAW_DIRECT_CLI_NAMES = new Set(["openclaw", "openclaw.mjs"]);
 const OPENCLAW_NODE_RUNTIME_NAMES = new Set(["bun", "bun.exe", "node", "node.exe"]);
-const OPENCLAW_SCRIPT_NAMES = new Set(["openclaw.mjs"]);
 export type StaleOpenClawUpdateLaunchdJob = {
   label: string;
   pid?: number;
@@ -31,30 +33,21 @@ type OpenClawUpdateLaunchdLabelCandidate = {
   requiresMetadata: boolean;
 };
 
-function normalizeOpenClawUpdateLaunchdLabel(label: unknown): string | null {
-  if (typeof label !== "string") {
-    return null;
-  }
-  const trimmed = label.trim();
-  if (trimmed.startsWith(OPENCLAW_UPDATE_LAUNCHD_LABEL_PREFIX)) {
-    return trimmed;
-  }
-  // Manual update jobs include a timestamp-like suffix and should be cleaned up
-  // without matching arbitrary ai.openclaw labels.
-  return OPENCLAW_MANUAL_UPDATE_LAUNCHD_LABEL_PATTERN.test(trimmed) ? trimmed : null;
-}
-
 function normalizeOpenClawUpdateLaunchdLabelCandidate(
   label: unknown,
 ): OpenClawUpdateLaunchdLabelCandidate | null {
-  const normalized = normalizeOpenClawUpdateLaunchdLabel(label);
-  if (normalized) {
-    return { label: normalized, requiresMetadata: false };
-  }
   if (typeof label !== "string") {
     return null;
   }
   const trimmed = label.trim();
+  // Manual update jobs include a timestamp-like suffix and should be cleaned up
+  // without matching arbitrary ai.openclaw labels.
+  if (
+    trimmed.startsWith(OPENCLAW_UPDATE_LAUNCHD_LABEL_PREFIX) ||
+    MANUAL_UPDATE_LAUNCHD_LABEL_PATTERN.test(trimmed)
+  ) {
+    return { label: trimmed, requiresMetadata: false };
+  }
   return OPENCLAW_PROFILE_UPDATE_LAUNCHD_LABEL_PATTERN.test(trimmed)
     ? { label: trimmed, requiresMetadata: true }
     : null;
@@ -85,10 +78,7 @@ function resolveCurrentOpenClawUpdateLaunchdJobLabel(
     env.OPENCLAW_LAUNCHD_LABEL,
   ]) {
     const candidate = normalizeOpenClawUpdateLaunchdLabelCandidate(label);
-    if (candidate) {
-      if (isCurrentGatewayLaunchdLabel(candidate.label, env)) {
-        continue;
-      }
+    if (candidate && !isCurrentGatewayLaunchdLabel(candidate.label, env)) {
       return candidate;
     }
   }
@@ -144,7 +134,7 @@ function isOpenClawUpdateCommandPrefix(programArguments: string[], updateIndex: 
   }
   const runtimeName = path.basename(programArguments[0] ?? "").toLowerCase();
   const entryName = path.basename(programArguments[1] ?? "").toLowerCase();
-  return OPENCLAW_NODE_RUNTIME_NAMES.has(runtimeName) && OPENCLAW_SCRIPT_NAMES.has(entryName);
+  return OPENCLAW_NODE_RUNTIME_NAMES.has(runtimeName) && entryName === "openclaw.mjs";
 }
 
 function isOpenClawUpdateProgramArguments(programArguments: string[] | undefined): boolean {
@@ -186,21 +176,19 @@ export async function findStaleOpenClawUpdateLaunchdJobs(
   // Never report the active gateway label as stale even when a wrapper exposes
   // update-like launchd metadata through the current environment.
   const jobs: StaleOpenClawUpdateLaunchdJob[] = [];
-  for (const job of parseLaunchctlListOpenClawUpdateJobCandidates(result.stdout)) {
+  for (const { requiresMetadata, ...job } of parseLaunchctlListOpenClawUpdateJobCandidates(
+    result.stdout,
+  )) {
     if (isCurrentGatewayLaunchdLabel(job.label, env)) {
       continue;
     }
     if (
-      job.requiresMetadata &&
+      requiresMetadata &&
       !(await isLaunchdJobConfirmedOpenClawUpdater({ label: job.label, env }))
     ) {
       continue;
     }
-    jobs.push({
-      label: job.label,
-      ...(job.pid !== undefined ? { pid: job.pid } : {}),
-      ...(job.lastExitStatus !== undefined ? { lastExitStatus: job.lastExitStatus } : {}),
-    });
+    jobs.push(job);
   }
   return jobs;
 }
@@ -257,8 +245,6 @@ export async function disableCurrentOpenClawUpdateLaunchdJob(
     env,
     // Detached handoffs preserve the configured label, so only launchd-backed
     // current-process identity may turn the ambient marker into proof.
-    trustCurrentEnvMarker: isCurrentProcessLaunchdServiceLabel(candidate.label, env, {
-      allowConfiguredLabelFallback: false,
-    }),
+    trustCurrentEnvMarker: isCurrentProcessLaunchdServiceLabel(candidate.label, env),
   });
 }

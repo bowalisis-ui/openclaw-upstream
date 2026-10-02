@@ -1,28 +1,277 @@
 /** launchctl state parsing, inspection, and bootstrap primitives. */
 import fs from "node:fs/promises";
+import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import {
+  parseStrictInteger,
+  parseStrictPositiveInteger,
+} from "@openclaw/normalization-core/number-coercion";
+import { isStringRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
-import { parseStrictInteger, parseStrictPositiveInteger } from "../infra/parse-finite-number.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { parseTcpPort, parseTcpPortFromArgs } from "../infra/tcp-port.js";
+import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import { sleep } from "../utils.js";
+import { GATEWAY_SERVICE_KIND } from "./constants.js";
 import { resolveGatewayServiceProbeHosts } from "./gateway-service-probe-hosts.js";
 import {
   execLaunchctl,
   formatLaunchctlResultDetail,
   isLaunchctlNotLoaded,
+  launchctlInspectionReason,
+  type LaunchctlResult,
 } from "./launchd-exec.js";
 import { resolveLaunchAgentLabel } from "./launchd-label.js";
-import { LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS } from "./launchd-plist.js";
+import {
+  LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS,
+  decodeLaunchdPlistMetadata,
+  readLaunchAgentProgramArgumentsFromFile,
+  resolveLaunchAgentProgramArguments,
+  resolveGeneratedEnvWrapperLayout,
+} from "./launchd-plist.js";
 import {
   resolveLaunchAgentPlistPath,
-  readLaunchAgentProgramArguments,
+  resolveLaunchAgentEnvironmentReadOptions,
 } from "./launchd-service-files.js";
 import {
   formatSystemLaunchDaemonOwnershipSummary,
   inspectSystemLaunchDaemonOwnership,
 } from "./launchd-system.js";
-import { parseKeyValueOutput } from "./runtime-parse.js";
+import { mergeGatewayServiceEnv } from "./service-env-merge.js";
+import {
+  ServiceInspectionError,
+  type ServiceInspectionReason,
+} from "./service-inspection-error.js";
 import type { GatewayServiceRuntime } from "./service-runtime.js";
-import type { GatewayServiceEnv, GatewayServiceEnvArgs } from "./service-types.js";
+import type {
+  GatewayServiceCommandConfig,
+  GatewayServiceEnv,
+  GatewayServiceEnvArgs,
+  GatewayServiceReadOptions,
+  GatewayServiceState,
+} from "./service-types.js";
+
+/** Operation-local facts; never serialized into a command fingerprint or used as control authority. */
+export type LoadedLaunchAgentState = GatewayServiceState & {
+  launchAgent?: {
+    readonly target: string;
+    readonly sourcePath: string;
+    readonly program: string;
+    readonly programArguments: readonly string[];
+    readonly workingDirectory?: string;
+    readonly environment: Readonly<Record<string, string>>;
+  };
+};
+
+/** Parse only the selected job's root fields; nested jobs and environments are not its identity. */
+export function parseLaunchctlJob(output: string, serviceTarget: string) {
+  if (!output.startsWith(`${serviceTarget} = {\n`)) {
+    throw new Error(`Cannot parse launchd job ${serviceTarget}`);
+  }
+  const fields = new Map<string, string>();
+  for (const [, name, value] of output.matchAll(/^\t([^\t\n=]+) = (.+)$/gm)) {
+    if (fields.has(name!)) {
+      throw new Error(`Duplicate launchd job field ${name}`);
+    }
+    fields.set(name!, value!);
+  }
+  const block = (name: string) =>
+    output.match(new RegExp(`^\\t${name} = \\{\\n([\\s\\S]*?)^\\t\\}`, "m"))?.[1];
+  const runtime: LaunchctlPrintInfo = {};
+  const state = fields.get("state")?.trim();
+  if (state) {
+    runtime.state = state;
+  }
+  const pid = parseStrictPositiveInteger(fields.get("pid"));
+  if (pid !== undefined) {
+    runtime.pid = pid;
+  }
+  const status = parseStrictInteger(fields.get("last exit status"));
+  if (status !== undefined) {
+    runtime.lastExitStatus = status;
+  }
+  const exitReason = fields.get("last exit reason")?.trim();
+  if (exitReason) {
+    runtime.lastExitReason = exitReason;
+  }
+  return {
+    fields,
+    runtime,
+    arguments: block("arguments")
+      ?.split("\n")
+      .filter((line) => line.startsWith("\t\t"))
+      .map((line) => line.slice(2)),
+    environment: block("environment") ?? "",
+    environmentBlocks: [
+      ...output.matchAll(/^\t(?:inherited |default )?environment = \{\n([\s\S]*?)^\t\}/gm),
+    ]
+      .map((match) => match[1] ?? "")
+      .join("\n"),
+  };
+}
+
+/** Observe the discovered job's loaded command and runtime without granting lifecycle authority. */
+export async function readLoadedLaunchAgentState(
+  env: GatewayServiceEnv,
+  options: { plistPath?: string; timeoutMs?: number } = {},
+): Promise<LoadedLaunchAgentState> {
+  const label = resolveLaunchAgentLabel(env);
+  const expectedPath = options.plistPath ?? resolveLaunchAgentPlistPath(env);
+  // Global LaunchAgents also have system file scope, but still run in the GUI domain.
+  const domain =
+    path.dirname(expectedPath) === "/Library/LaunchDaemons"
+      ? "system"
+      : resolveLaunchAgentGuiDomain();
+  const target = `${domain}/${label}`;
+  const result = await execLaunchctl(["print", target], options.timeoutMs ?? 5_000);
+  const empty: GatewayServiceState = {
+    installed: false,
+    loadState: { status: "not-loaded" },
+    running: false,
+    env,
+    command: null,
+    runtime: { status: "stopped" },
+  };
+  if (isLaunchctlNotLoaded(result)) {
+    return empty;
+  }
+  if (result.code !== 0) {
+    throw new Error(`Cannot inspect launchd job ${target}: ${formatLaunchctlResultDetail(result)}`);
+  }
+  const job = parseLaunchctlJob(result.stdout, target);
+  const sourcePath = job.fields.get("path");
+  if (!sourcePath || !path.isAbsolute(sourcePath)) {
+    throw new Error("Loaded LaunchAgent definition path is unavailable.");
+  }
+  const program = job.fields.get("program");
+  if (!program || !path.isAbsolute(program) || !job.arguments?.length) {
+    throw new Error("Loaded LaunchAgent command is unavailable.");
+  }
+  const args = [program, ...job.arguments.slice(1)];
+  const layout = resolveGeneratedEnvWrapperLayout(
+    args,
+    resolveLaunchAgentEnvironmentReadOptions(env, label),
+  );
+  const environment: Record<string, string> = {};
+  for (const line of job.environment.split("\n").filter(Boolean)) {
+    const match = /^\t\t([A-Za-z_][A-Za-z0-9_]*) => (.*)$/.exec(line);
+    if (!match || Object.hasOwn(environment, match[1]!)) {
+      throw new Error("Loaded LaunchAgent environment is unavailable.");
+    }
+    environment[match[1]!] = match[2]!;
+  }
+  const command: GatewayServiceCommandConfig = {
+    programArguments: layout ? args.slice(layout.commandStartIndex) : args,
+    ...(job.fields.get("working directory")
+      ? { workingDirectory: job.fields.get("working directory") }
+      : {}),
+    ...(Object.keys(environment).length ? { environment } : {}),
+    sourcePath,
+  };
+  const parsed = job.runtime;
+  const running = parsed.state === "running" || (parsed.pid !== undefined && parsed.pid > 1);
+  return {
+    installed: true,
+    loadState: { status: "loaded" },
+    running,
+    env: mergeGatewayServiceEnv(env, command),
+    command,
+    runtime: { ...parsed, status: running ? "running" : "stopped" },
+    launchAgent: {
+      target,
+      sourcePath,
+      program,
+      programArguments: job.arguments,
+      workingDirectory: command.workingDirectory,
+      environment,
+    },
+  };
+}
+
+/** A selected package no-restart exemption still requires its current, unchanged definition. */
+export async function readCorrespondingLaunchAgentCommand(
+  env: GatewayServiceEnv,
+  observation: NonNullable<LoadedLaunchAgentState["launchAgent"]>,
+  timeoutMs: number,
+): Promise<GatewayServiceCommandConfig | null> {
+  const label = resolveLaunchAgentLabel(env);
+  const plistPath = resolveLaunchAgentPlistPath(env);
+  if (
+    observation.target !== `${resolveLaunchAgentGuiDomain()}/${label}` ||
+    path.resolve(observation.sourcePath) !== path.resolve(plistPath)
+  ) {
+    return null;
+  }
+  const plist = await decodeLaunchdPlistMetadata(await fs.readFile(plistPath), timeoutMs);
+  const args = plist?.ProgramArguments;
+  const environment = plist?.EnvironmentVariables ?? {};
+  if (
+    !Array.isArray(args) ||
+    !args.every((arg): arg is string => typeof arg === "string") ||
+    !isStringRecord(environment) ||
+    (plist?.Program ?? args[0]) !== observation.program
+  ) {
+    return null;
+  }
+  const loadedEnvironment = { ...observation.environment };
+  // launchd-current-service recognizes this native label marker. It is not a user override.
+  if (
+    !Object.hasOwn(environment, "XPC_SERVICE_NAME") &&
+    loadedEnvironment.XPC_SERVICE_NAME === label
+  ) {
+    delete loadedEnvironment.XPC_SERVICE_NAME;
+  }
+  // launchd adds logging metadata even when the plist declares no environment.
+  if (!Object.hasOwn(environment, "OSLogRateLimit")) {
+    delete loadedEnvironment.OSLogRateLimit;
+  }
+  if (
+    !isDeepStrictEqual(args, observation.programArguments) ||
+    (plist?.WorkingDirectory || undefined) !== observation.workingDirectory ||
+    !isDeepStrictEqual(environment, loadedEnvironment)
+  ) {
+    return null;
+  }
+  return resolveLaunchAgentProgramArguments(plist, plistPath, {
+    ...resolveLaunchAgentEnvironmentReadOptions(env, label),
+    requireEffective: true,
+    timeoutMs,
+  });
+}
+
+export async function readLaunchAgentProgramArguments(
+  env: GatewayServiceEnv,
+  options?: GatewayServiceReadOptions,
+): Promise<GatewayServiceCommandConfig | null> {
+  const label = resolveLaunchAgentLabel(env);
+  const command = await readLaunchAgentProgramArgumentsFromFile(resolveLaunchAgentPlistPath(env), {
+    ...resolveLaunchAgentEnvironmentReadOptions(env, label),
+    ...options,
+  });
+  if (!command && options?.requireEffective) {
+    // A removed plist can leave its job registered; only launchd can prove absence.
+    const timeoutMs =
+      options.timeoutMs && options.timeoutMs > 0 ? Math.min(options.timeoutMs, 5_000) : 5_000;
+    const [probe, system] = await Promise.all([
+      probeLaunchAgentState(`${resolveLaunchAgentGuiDomain()}/${label}`, timeoutMs).catch(
+        () => null,
+      ),
+      inspectSystemLaunchDaemonOwnership(label, { timeoutMs, scanInstalledPlists: false }),
+    ]);
+    if (probe?.state !== "not-loaded") {
+      const reason =
+        system.status === "loaded" || system.status === "installed"
+          ? "launchd-system-owned"
+          : ((system.status === "unverifiable" ? system.reason : undefined) ??
+            (probe?.state === "unknown" ? probe.inspectionReason : undefined));
+      if (reason) {
+        throw new ServiceInspectionError(reason);
+      }
+      throw new Error("Effective LaunchAgent service command could not be inspected.");
+    }
+  }
+  return command;
+}
 
 // launchd reserves the label until the outgoing job actually exits, and it
 // SIGKILLs that job once ExitTimeOut elapses. Bound the bootstrap retry by that
@@ -30,26 +279,21 @@ import type { GatewayServiceEnv, GatewayServiceEnvArgs } from "./service-types.j
 const LAUNCH_AGENT_BOOTSTRAP_TEARDOWN_TIMEOUT_MS = (LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS + 10) * 1_000;
 const LAUNCH_AGENT_BOOTSTRAP_TEARDOWN_POLL_MS = 500;
 export async function resolveLaunchAgentGatewayContext(env: GatewayServiceEnv): Promise<{
+  env: GatewayServiceEnv;
   port: number | null;
   probeHosts: readonly string[];
 }> {
+  const serviceKind = env.OPENCLAW_SERVICE_KIND?.trim();
+  if (serviceKind && serviceKind !== GATEWAY_SERVICE_KIND) {
+    return { env, port: null, probeHosts: [] };
+  }
   const command = await readLaunchAgentProgramArguments(env).catch(() => null);
-  const fromArgs = parseTcpPortFromArgs(command?.programArguments);
-  if (fromArgs !== null) {
-    return {
-      port: fromArgs,
-      probeHosts: await resolveGatewayServiceProbeHosts({ env, command }),
-    };
-  }
-  const fromServiceEnv = parseTcpPort(command?.environment?.OPENCLAW_GATEWAY_PORT ?? "");
-  if (fromServiceEnv !== null) {
-    return {
-      port: fromServiceEnv,
-      probeHosts: await resolveGatewayServiceProbeHosts({ env, command }),
-    };
-  }
   return {
-    port: parseTcpPort(env.OPENCLAW_GATEWAY_PORT ?? ""),
+    env: mergeGatewayServiceEnv(env, command),
+    port:
+      parseTcpPortFromArgs(command?.programArguments) ??
+      parseTcpPort(command?.environment?.OPENCLAW_GATEWAY_PORT ?? "") ??
+      parseTcpPort(env.OPENCLAW_GATEWAY_PORT ?? ""),
     probeHosts: await resolveGatewayServiceProbeHosts({ env, command }),
   };
 }
@@ -59,14 +303,6 @@ export function resolveLaunchAgentGuiDomain(): string {
     return "gui/501";
   }
   return `gui/${process.getuid()}`;
-}
-
-function throwBootstrapGuiSessionError(params: {
-  detail: string;
-  domain: string;
-  actionHint: string;
-}) {
-  throw new Error(formatLaunchAgentGuiSessionError(params));
 }
 
 export function formatLaunchAgentGuiSessionError(params: {
@@ -91,14 +327,68 @@ export async function bootstrapLaunchAgentOrThrow(params: {
   actionHint: string;
   onMutation?: (mode: "enable" | "bootstrap") => void;
   skipEnable?: boolean;
+  preserveAutoStart?: boolean;
+  preservedEnabled?: boolean;
+  assertCurrent?: () => void;
   // Opt-in for callers that just issued `bootout` on this label. Only those can
   // race a pending teardown, so start/install/recovery paths keep failing fast
   // on an unrelated EIO instead of waiting out the teardown deadline.
   retryPendingTeardown?: boolean;
 }) {
+  if (params.preserveAutoStart) {
+    params.assertCurrent?.();
+    const label = params.serviceTarget.slice(params.domain.length + 1);
+    let enabled = params.preservedEnabled;
+    if (enabled === undefined) {
+      const state = await execLaunchctl(["print-disabled", params.domain]);
+      if (state.code !== 0) {
+        throw new Error(`launchctl print-disabled failed: ${formatLaunchctlResultDetail(state)}`);
+      }
+      enabled = parseLaunchAgentEnabled(state.stdout || state.stderr || "", label);
+    }
+    params.assertCurrent?.();
+    if (!enabled) {
+      const enable = await execLaunchctl(["enable", params.serviceTarget]);
+      if (enable.code !== 0) {
+        throw new Error(`launchctl enable failed: ${formatLaunchctlResultDetail(enable)}`);
+      }
+    }
+    const [boot] = await Promise.allSettled([
+      bootstrapLaunchAgentOrThrow({ ...params, preserveAutoStart: false, skipEnable: true }),
+    ]);
+    if (boot.status === "rejected" && hasCommandProcessCleanupError(boot.reason)) {
+      throw boot.reason;
+    }
+    const failures: unknown[] = boot.status === "rejected" ? [boot.reason] : [];
+    if (!enabled) {
+      try {
+        params.assertCurrent?.();
+        const disable = await execLaunchctl(["disable", params.serviceTarget]);
+        if (disable.code !== 0) {
+          throw new Error(
+            `LaunchAgent disabled policy could not be restored: ${formatLaunchctlResultDetail(disable)}`,
+          );
+        }
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) {
+      throw failures[0];
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(
+        failures,
+        "LaunchAgent bootstrap and disabled-policy restoration failed.",
+      );
+    }
+    return;
+  }
+
   // `disable` state survives bootout and plist rewrites; explicit start/repair
   // paths must clear it before asking launchd to load the job again.
   if (!params.skipEnable) {
+    params.assertCurrent?.();
     const enable = await execLaunchctl(["enable", params.serviceTarget]);
     if (enable.code === 0) {
       params.onMutation?.("enable");
@@ -106,6 +396,7 @@ export async function bootstrapLaunchAgentOrThrow(params: {
   }
   const teardownDeadline = Date.now() + LAUNCH_AGENT_BOOTSTRAP_TEARDOWN_TIMEOUT_MS;
   for (;;) {
+    params.assertCurrent?.();
     const boot = await execLaunchctl(["bootstrap", params.domain, params.plistPath]);
     if (boot.code === 0) {
       params.onMutation?.("bootstrap");
@@ -113,13 +404,15 @@ export async function bootstrapLaunchAgentOrThrow(params: {
     }
     const detail = (boot.stderr || boot.stdout).trim();
     if (isUnsupportedGuiDomain(detail)) {
-      throwBootstrapGuiSessionError({
-        detail,
-        domain: params.domain,
-        actionHint: params.actionHint,
-      });
+      throw new Error(
+        formatLaunchAgentGuiSessionError({
+          detail,
+          domain: params.domain,
+          actionHint: params.actionHint,
+        }),
+      );
     }
-    if (isLaunchctlOperationAlreadyInProgress(detail)) {
+    if (boot.termination === "exit" && isLaunchctlOperationAlreadyInProgress(detail)) {
       const state = await probeLaunchAgentState(params.serviceTarget);
       if (state.state === "running" || state.state === "stopped") {
         params.onMutation?.("bootstrap");
@@ -144,34 +437,6 @@ type LaunchctlPrintInfo = {
   lastExitReason?: string;
 };
 
-export function parseLaunchctlPrint(output: string): LaunchctlPrintInfo {
-  const entries = parseKeyValueOutput(output, "=");
-  const info: LaunchctlPrintInfo = {};
-  const state = entries.state;
-  if (state) {
-    info.state = state;
-  }
-  const pidValue = entries.pid;
-  if (pidValue) {
-    const pid = parseStrictPositiveInteger(pidValue);
-    if (pid !== undefined) {
-      info.pid = pid;
-    }
-  }
-  const exitStatusValue = entries["last exit status"];
-  if (exitStatusValue) {
-    const status = parseStrictInteger(exitStatusValue);
-    if (status !== undefined) {
-      info.lastExitStatus = status;
-    }
-  }
-  const exitReason = entries["last exit reason"];
-  if (exitReason) {
-    info.lastExitReason = exitReason;
-  }
-  return info;
-}
-
 export function parseLaunchAgentEnabled(output: string, label: string): boolean {
   const labelPrefix = `"${label}"`;
   for (const line of output.split("\n")) {
@@ -180,10 +445,10 @@ export function parseLaunchAgentEnabled(output: string, label: string): boolean 
       continue;
     }
     const state = entry.slice(labelPrefix.length).trim();
-    if (state === "=> enabled") {
+    if (state === "=> enabled" || state === "=> false") {
       return true;
     }
-    if (state === "=> disabled") {
+    if (state === "=> disabled" || state === "=> true") {
       return false;
     }
     throw new Error(`launchctl print-disabled returned an unrecognized state for ${label}`);
@@ -195,7 +460,7 @@ export function parseLaunchAgentEnabled(output: string, label: string): boolean 
 export async function isLaunchAgentEnabled(args: GatewayServiceEnvArgs): Promise<boolean> {
   const domain = resolveLaunchAgentGuiDomain();
   const label = resolveLaunchAgentLabel(args.env);
-  const res = await execLaunchctl(["print-disabled", domain]);
+  const res = await execLaunchctl(["print-disabled", domain], args.timeoutMs);
   if (res.code !== 0) {
     throw new Error(`launchctl print-disabled failed: ${formatLaunchctlResultDetail(res)}`);
   }
@@ -205,14 +470,17 @@ export async function isLaunchAgentEnabled(args: GatewayServiceEnvArgs): Promise
 export async function isLaunchAgentLoaded(args: GatewayServiceEnvArgs): Promise<boolean> {
   const domain = resolveLaunchAgentGuiDomain();
   const label = resolveLaunchAgentLabel(args.env);
-  const res = await execLaunchctl(["print", `${domain}/${label}`]);
-  if (res.code === 0) {
+  const probe = await probeLaunchAgentState(`${domain}/${label}`, args.timeoutMs);
+  if (probe.state === "running" || probe.state === "stopped") {
     return true;
   }
-  if (isLaunchctlNotLoaded(res)) {
+  if (probe.state === "not-loaded") {
     return false;
   }
-  throw new Error(`launchctl print failed: ${formatLaunchctlResultDetail(res)}`);
+  if (probe.inspectionReason) {
+    throw new ServiceInspectionError(probe.inspectionReason);
+  }
+  throw new Error(`launchctl print failed: ${probe.detail ?? "unknown error"}`);
 }
 
 export async function launchAgentPlistExists(env: GatewayServiceEnv): Promise<boolean> {
@@ -227,17 +495,20 @@ export async function launchAgentPlistExists(env: GatewayServiceEnv): Promise<bo
 
 export async function readLaunchAgentRuntime(
   env: Record<string, string | undefined>,
+  opts?: Pick<GatewayServiceEnvArgs, "timeoutMs">,
 ): Promise<GatewayServiceRuntime> {
   const domain = resolveLaunchAgentGuiDomain();
   const label = resolveLaunchAgentLabel(env);
-  const [res, systemOwnership] = await Promise.all([
-    execLaunchctl(["print", `${domain}/${label}`]),
-    inspectSystemLaunchDaemonOwnership(label, { scanInstalledPlists: false }),
+  const [probe, systemOwnership] = await Promise.all([
+    probeLaunchAgentState(`${domain}/${label}`, opts?.timeoutMs),
+    inspectSystemLaunchDaemonOwnership(label, { ...opts, scanInstalledPlists: false }),
   ]);
   if (systemOwnership.status !== "absent") {
     return {
       status: "unknown",
       detail: formatSystemLaunchDaemonOwnershipSummary(systemOwnership),
+      inspectionReason:
+        systemOwnership.status === "unverifiable" ? systemOwnership.reason : "launchd-system-owned",
       systemLaunchDaemon: {
         status: systemOwnership.status,
         serviceTarget: systemOwnership.serviceTarget,
@@ -245,24 +516,22 @@ export async function readLaunchAgentRuntime(
       },
     };
   }
-  if (res.code !== 0) {
-    const plistExists = await launchAgentPlistExists(env);
-    const detail = (res.stderr || res.stdout).trim() || undefined;
-    const missingGuiSession = plistExists && isUnsupportedGuiDomain(detail ?? "");
+  const plistExists = await launchAgentPlistExists(env);
+  if (probe.state === "not-loaded") {
+    return plistExists ? { status: "stopped" } : { status: "unknown", missingUnit: true };
+  }
+  if (probe.state === "unknown") {
+    const missingGuiSession = plistExists && isUnsupportedGuiDomain(probe.detail ?? "");
     return {
       status: "unknown",
-      detail,
-      ...(plistExists
-        ? { missingSupervision: true, ...(missingGuiSession ? { missingGuiSession } : {}) }
-        : { missingUnit: true }),
+      detail: probe.detail,
+      inspectionReason: probe.inspectionReason,
+      ...(missingGuiSession ? { missingGuiSession: true } : {}),
     };
   }
-  const parsed = parseLaunchctlPrint(res.stdout || res.stderr || "");
-  const plistExists = await launchAgentPlistExists(env);
-  const state = normalizeLowercaseStringOrEmpty(parsed.state);
-  const status = state === "running" || parsed.pid ? "running" : state ? "stopped" : "unknown";
+  const parsed = probe.runtime;
   return {
-    status,
+    status: probe.state,
     state: parsed.state,
     pid: parsed.pid,
     lastExitStatus: parsed.lastExitStatus,
@@ -271,13 +540,11 @@ export async function readLaunchAgentRuntime(
   };
 }
 
-export function isLaunchctlAlreadyLoaded(res: {
-  stdout: string;
-  stderr: string;
-  code: number;
-}): boolean {
+export function isLaunchctlAlreadyLoaded(res: LaunchctlResult): boolean {
   const detail = normalizeLowercaseStringOrEmpty(res.stderr || res.stdout);
-  return res.code === 130 || detail.includes("already exists in domain");
+  return (
+    res.termination === "exit" && (res.code === 130 || detail.includes("already exists in domain"))
+  );
 }
 
 export function isUnsupportedGuiDomain(detail: string): boolean {
@@ -297,11 +564,7 @@ function isLaunchctlOperationAlreadyInProgress(detail: string): boolean {
   );
 }
 
-function isLaunchctlBootstrapPendingTeardown(res: {
-  stdout: string;
-  stderr: string;
-  code: number;
-}): boolean {
+function isLaunchctlBootstrapPendingTeardown(res: LaunchctlResult): boolean {
   // `bootout` returns once launchd accepts the request, not once the job is gone,
   // so bootstrapping the same label mid-teardown answers EIO. The plist is valid
   // here, so this is a timing conflict to retry rather than a real I/O fault.
@@ -309,24 +572,25 @@ function isLaunchctlBootstrapPendingTeardown(res: {
   // launchd answers the same EIO for a label that is simply still registered
   // ("already exists in domain"). That job is not tearing down, so waiting for a
   // teardown that never comes only delays the failure.
-  if (isLaunchctlAlreadyLoaded(res)) {
+  if (res.termination !== "exit" || isLaunchctlAlreadyLoaded(res)) {
     return false;
   }
   const normalized = normalizeLowercaseStringOrEmpty(res.stderr || res.stdout);
   return normalized.includes("bootstrap failed: 5") || normalized.includes("input/output error");
 }
 type LaunchAgentProbeResult =
-  | { state: "running" }
-  | { state: "stopped" }
+  | { state: "running"; runtime: LaunchctlPrintInfo }
+  | { state: "stopped"; runtime: LaunchctlPrintInfo }
   | { state: "not-loaded" }
-  | { state: "unknown"; detail?: string };
+  | { state: "unknown"; detail?: string; inspectionReason?: ServiceInspectionReason };
 
 export async function probeLaunchAgentState(
   serviceTarget: string,
+  timeoutMs?: number,
 ): Promise<LaunchAgentProbeResult> {
-  // `launchctl print` output is not a stable API, so this is only a stop
-  // confirmation probe. Unknown output falls back to bootout instead of success.
-  const probe = await execLaunchctl(["print", serviceTarget]);
+  // `launchctl print` output is not a stable API. Keep expected absence and
+  // unexpected failures distinct so every caller applies one classification.
+  const probe = await execLaunchctl(["print", serviceTarget], timeoutMs);
   if (probe.code !== 0) {
     if (isLaunchctlNotLoaded(probe)) {
       return { state: "not-loaded" };
@@ -334,33 +598,16 @@ export async function probeLaunchAgentState(
     return {
       state: "unknown",
       detail: formatLaunchctlResultDetail(probe) || undefined,
+      inspectionReason: launchctlInspectionReason(probe, serviceTarget),
     };
   }
-  const runtime = parseLaunchctlPrint(probe.stdout || probe.stderr || "");
-  if (
-    normalizeLowercaseStringOrEmpty(runtime.state) === "running" ||
-    (typeof runtime.pid === "number" && runtime.pid > 1)
-  ) {
-    return { state: "running" };
+  try {
+    const { runtime } = parseLaunchctlJob(probe.stdout || probe.stderr || "", serviceTarget);
+    const running =
+      normalizeLowercaseStringOrEmpty(runtime.state) === "running" ||
+      (typeof runtime.pid === "number" && runtime.pid > 1);
+    return { state: running ? "running" : "stopped", runtime };
+  } catch (error) {
+    return { state: "unknown", detail: formatErrorMessage(error) };
   }
-  return { state: "stopped" };
-}
-
-export async function waitForLaunchAgentStopped(
-  serviceTarget: string,
-): Promise<LaunchAgentProbeResult> {
-  let lastUnknown: LaunchAgentProbeResult | null = null;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const probe = await probeLaunchAgentState(serviceTarget);
-    if (probe.state === "stopped" || probe.state === "not-loaded") {
-      return probe;
-    }
-    if (probe.state === "unknown") {
-      lastUnknown = probe;
-    }
-    await new Promise((resolve) => {
-      setTimeout(resolve, 100);
-    });
-  }
-  return lastUnknown ?? { state: "running" };
 }

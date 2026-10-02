@@ -35,19 +35,20 @@ async function withMatrixQaE2eeTimeout<T>(
 }
 
 export function createMatrixQaE2eeClientLifecycle(params: {
+  abortPendingRequests: () => void;
   detachListeners: () => void;
   drainPendingDecryptions: () => Promise<void>;
   shutdownTimeoutMs: number;
   stopAndPersist: () => Promise<void>;
-  stopWithoutPersist: () => void;
+  stopWithoutPersist: () => Promise<void>;
 }) {
   const activeOperations = new Set<Promise<unknown>>();
   let shutdownStarted = false;
   let stopPromise: Promise<void> | undefined;
 
-  const failShutdown = (phase: string, cause: unknown): never => {
+  const failShutdown = async (phase: string, cause: unknown): Promise<never> => {
     try {
-      params.stopWithoutPersist();
+      await params.stopWithoutPersist();
     } catch {
       // Preserve the lifecycle failure that explains why persistence was skipped.
     }
@@ -70,17 +71,20 @@ export function createMatrixQaE2eeClientLifecycle(params: {
           Promise.allSettled(activeOperations),
           graceMs,
           "active Matrix SDK operations did not settle before shutdown",
-        ).catch((error: unknown) => {
-          failShutdown("waiting for active Matrix SDK operations", error);
+        ).catch(async (error: unknown) => {
+          params.abortPendingRequests();
+          // The grace deadline decides whether persistence is safe, not whether
+          // non-abortable work has settled. Requests are already canceled; join
+          // the admitted work before discard can destroy its client resources.
+          await Promise.allSettled(activeOperations);
+          return await failShutdown("waiting for active Matrix SDK operations", error);
         });
       }
       await withMatrixQaE2eeTimeout(
         params.drainPendingDecryptions(),
         Math.max(0, deadline - Date.now()),
         "pending Matrix decryptions did not drain before shutdown",
-      ).catch((error: unknown) => {
-        failShutdown("draining pending Matrix decryptions", error);
-      });
+      ).catch((error: unknown) => failShutdown("draining pending Matrix decryptions", error));
       await params.stopAndPersist();
     })();
     return stopPromise;
@@ -88,15 +92,18 @@ export function createMatrixQaE2eeClientLifecycle(params: {
 
   const runMatrixQaE2eeClientOperation = async <T>(operation: {
     label: string;
-    run: () => Promise<T>;
+    run: (assertActive: () => void) => Promise<T>;
     timeoutMs: number;
   }): Promise<T> => {
-    if (shutdownStarted) {
-      throw new Error(
-        `Matrix E2EE client shutdown has started; cannot start ${operation.label}. Retry the QA scenario with a fresh client.`,
-      );
-    }
-    const active = operation.run();
+    const assertActive = () => {
+      if (shutdownStarted) {
+        throw new Error(
+          `Matrix E2EE client shutdown has started; cannot start ${operation.label}. Retry the QA scenario with a fresh client.`,
+        );
+      }
+    };
+    assertActive();
+    const active = operation.run(assertActive);
     activeOperations.add(active);
     void active.finally(() => activeOperations.delete(active)).catch(() => undefined);
 
@@ -121,13 +128,8 @@ function shouldRecordMatrixQaObservedEventUpdate(params: {
   }
   const next = params.next;
   return (
-    (previous.body === undefined && next.body !== undefined) ||
-    (previous.formattedBody === undefined && next.formattedBody !== undefined) ||
-    (previous.msgtype === undefined && next.msgtype !== undefined) ||
-    (previous.relatesTo === undefined && next.relatesTo !== undefined) ||
-    (previous.mentions === undefined && next.mentions !== undefined) ||
-    (previous.attachment === undefined && next.attachment !== undefined)
-  );
+    ["body", "formattedBody", "msgtype", "relatesTo", "mentions", "attachment"] as const
+  ).some((field) => previous[field] === undefined && next[field] !== undefined);
 }
 
 export function createMatrixQaE2eeObservedEventRecorder(params: {

@@ -5,14 +5,16 @@ import {
 import {
   ErrorCodes,
   errorShape,
+  type ErrorShape,
   missingScopeErrorShape,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { assertAgentRunLifecycleGenerationCurrent } from "../../infra/agent-events.js";
+import { assertPreparedSkillLibrarySelection } from "../../skills/library/selection.js";
 import { AGENT_SESSION_RESET_COMMAND_RE } from "../agent-command-policy.js";
 import { setGatewayDedupeEntries } from "../agent-turn/agent-dedupe.js";
-import { clientHasAdminScope } from "../agent-turn/agent-handler-helpers.js";
-import { ADMIN_SCOPE } from "../method-scopes.js";
+import { ADMIN_SCOPE, hasGatewayAdminScope } from "../operator-scopes.js";
+import { prepareSkillLibrarySessionCreation } from "../skill-library-session.js";
 import { formatForLog } from "../ws-log.js";
 import type { AgentRunRequest } from "./agent-request-types.js";
 import {
@@ -31,6 +33,7 @@ export type CommittedResetCompletion = {
   sessionKey: string;
   agentId?: string;
   followUpPending: boolean;
+  replyError?: ErrorShape;
 };
 
 type AgentResetPhaseResult = {
@@ -43,6 +46,7 @@ type AgentResetPhaseResult = {
 };
 
 export async function runAgentResetPhase(params: {
+  assertAdmissionCurrent?: () => void;
   request: AgentRunRequest;
   cfg: OpenClawConfig;
   requestedSessionKey?: string;
@@ -79,7 +83,7 @@ export async function runAgentResetPhase(params: {
     return { ...base, stop: true, accepted: true };
   }
   const postResetMessage = normalizeOptionalString(resetCommandMatch[2]) ?? "";
-  if (!clientHasAdminScope(params.client)) {
+  if (!hasGatewayAdminScope(params.client)) {
     params.respond(
       false,
       undefined,
@@ -89,16 +93,30 @@ export async function runAgentResetPhase(params: {
   }
   const resetReason =
     normalizeOptionalLowercaseString(resetCommandMatch[1]) === "new" ? "new" : "reset";
+  params.assertAdmissionCurrent?.();
   let resetResult: Awaited<ReturnType<typeof runSessionResetFromAgent>>;
   try {
+    const creation = prepareSkillLibrarySessionCreation(
+      params.client,
+      params.context.getRuntimeConfig,
+      resolveAgentRunSessionCreation(params.client),
+    );
     resetResult = await runSessionResetFromAgent({
       key: params.requestedSessionKey,
-      ...(params.requestedSessionKey === "global" && params.agentId
-        ? { agentId: params.agentId }
-        : {}),
+      ...(params.agentId ? { agentId: params.agentId } : {}),
       reason: resetReason,
-      creation: resolveAgentRunSessionCreation(params.client),
-      assertCurrent: () => assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration),
+      creation,
+      ...(params.client?.authenticatedUserProfile
+        ? { requestingOperatorProfileId: params.client.authenticatedUserProfile.profileId }
+        : {}),
+      ...(params.client?.internal?.operatorRoleActor
+        ? { operatorRoleActor: params.client.internal.operatorRoleActor }
+        : {}),
+      assertCurrent: () => {
+        params.assertAdmissionCurrent?.();
+        assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
+        assertPreparedSkillLibrarySelection(creation.skillLibrarySelections);
+      },
       onCommitted: (commit) => {
         params.setCommittedResetCompletion({
           reason: resetReason,
@@ -129,13 +147,15 @@ export async function runAgentResetPhase(params: {
     requestedSessionKey: resetResult.key,
     resolvedSessionId: resetResult.sessionId ?? params.resolvedSessionId,
   };
-  params.setCommittedResetCompletion({
+  const completion: CommittedResetCompletion = {
     reason: resetReason,
     sessionId: resetResult.sessionId,
     sessionKey: resetResult.key,
     agentId: params.agentId,
     followUpPending: Boolean(postResetMessage),
-  });
+  };
+  params.setCommittedResetCompletion(completion);
+  params.assertAdmissionCurrent?.();
   if (postResetMessage) {
     if (
       params.abortForLifecycleRotation({ sessionKey: resetResult.key, agentId: params.agentId })
@@ -155,7 +175,6 @@ export async function runAgentResetPhase(params: {
     const deliverySession =
       params.request.deliver === true
         ? loadBareSessionResetDeliverySession({
-            cfg: params.cfg,
             sessionKey: resetResult.key,
             ...(params.agentId ? { agentId: params.agentId } : {}),
           })
@@ -170,8 +189,12 @@ export async function runAgentResetPhase(params: {
       sessionEntry: deliverySession?.entry,
       request: params.sessionKeyFromTo ? { ...params.request, to: undefined } : params.request,
       runId: params.runId,
-      assertCurrent: () => assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration),
+      assertCurrent: () => {
+        params.assertAdmissionCurrent?.();
+        assertAgentRunLifecycleGenerationCurrent(params.lifecycleGeneration);
+      },
     });
+    params.assertAdmissionCurrent?.();
     const responsePayload = buildBareSessionResetResponse({
       runId: params.runId,
       result: resetAckResult,
@@ -184,17 +207,23 @@ export async function runAgentResetPhase(params: {
     params.respond(true, responsePayload, undefined, { runId: params.runId });
     emitSessionsChanged(params.context, {
       sessionKey: resetResult.key,
-      ...(resetResult.key === "global" && params.agentId ? { agentId: params.agentId } : {}),
+      ...(params.agentId ? { agentId: params.agentId } : {}),
       reason: resetReason,
     });
     return { ...next, stop: true, accepted: true };
   } catch (err) {
+    const error = errorShape(ErrorCodes.INVALID_REQUEST, formatForLog(err));
+    // The reset committed, but its requested reply failed. Cleanup and restart
+    // replay must retain that outcome without repeating either side effect.
+    if (params.request.deliver === true) {
+      params.setCommittedResetCompletion({ ...completion, replyError: error });
+    }
     if (
       params.abortForLifecycleRotation({ sessionKey: resetResult.key, agentId: params.agentId })
     ) {
       return { ...next, stop: true, accepted: true };
     }
-    params.respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, formatForLog(err)));
+    params.respond(false, undefined, error);
     return { ...next, stop: true, accepted: false };
   }
 }

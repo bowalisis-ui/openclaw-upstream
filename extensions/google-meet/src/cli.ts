@@ -15,7 +15,6 @@ import {
   parsePositiveIntegerOption,
   promptInput,
   resolveGoogleMeetOAuthCallbackTimeoutMs,
-  testing,
   type CreateOptions,
   type MeetArtifactOptions,
   type OAuthLoginOptions,
@@ -34,13 +33,6 @@ import {
   waitForGoogleMeetAuthCode,
 } from "./oauth.js";
 import type { GoogleMeetRuntime } from "./runtime.js";
-
-export {
-  buildGoogleMeetExportManifest,
-  googleMeetExportFileNames,
-  writeMeetExportBundle,
-} from "./cli-export.js";
-export { testing };
 
 function resolveMeetingInput(config: GoogleMeetConfig, value?: string): string {
   const meeting = value?.trim() || config.defaults.meeting;

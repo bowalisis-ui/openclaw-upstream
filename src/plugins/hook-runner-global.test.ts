@@ -1,5 +1,6 @@
 /** Verifies global hook runner sequencing, mutation, and error behavior. */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import "../test-utils/prepare-compiled-subprocesses.js";
 import { createMockPluginRegistry } from "./hooks.test-fixtures.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "./runtime.js";
 
@@ -72,6 +73,25 @@ describe("hook-runner-global", () => {
     vi.resetModules();
 
     await expectGlobalRunnerState({ hasRunner: false });
+  });
+
+  it("checks scoped reply dispatch with only the host dispatch kind", async () => {
+    const registry = createMockPluginRegistry([]);
+    registry.typedHooks.push({
+      pluginId: "acp-dispatch",
+      hookName: "reply_dispatch",
+      handler: vi.fn(),
+      eligibleDispatchKinds: ["acp"],
+      source: "test",
+    });
+    const mod = await importHookRunnerGlobalModule();
+    setActivePluginRegistry(registry);
+    mod.initializeGlobalHookRunner(registry);
+
+    expect(mod.hasGlobalHooks("reply_dispatch", { dispatchKind: "agent" })).toBe(false);
+    expect(mod.hasGlobalHooks("reply_dispatch", { dispatchKind: "acp" })).toBe(true);
+    expect(mod.hasGlobalHooks("reply_dispatch", {})).toBe(true);
+    expect(mod.hasGlobalHooks("reply_dispatch")).toBe(true);
   });
 
   it.each([

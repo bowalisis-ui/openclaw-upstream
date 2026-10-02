@@ -7,7 +7,12 @@ import {
   asFiniteNumber,
   parseDateStringTimestampMs,
 } from "@openclaw/normalization-core/number-coercion";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import {
+  readCliImageTurnContext,
+  stripCliImageTurnContext,
+} from "../agents/cli-image-turn-correlation.js";
 import { hashCliReseedPrompt, parseCliReseedPrompt } from "../agents/cli-runner/reseed-envelope.js";
 import type { AgentMessage } from "../agents/runtime/index.js";
 import { redactTranscriptMessage } from "../agents/transcript-redact.js";
@@ -29,11 +34,16 @@ const CLAUDE_PROJECTS_RELATIVE_DIR = path.join(".claude", "projects");
 
 export type ClaudeCliProjectEntry = {
   type?: unknown;
+  subtype?: unknown;
+  content?: unknown;
+  summary?: unknown;
   timestamp?: unknown;
   uuid?: unknown;
   isSidechain?: unknown;
   isMeta?: unknown;
   isCompactSummary?: unknown;
+  isVisibleInTranscriptOnly?: unknown;
+  origin?: unknown;
   message?: {
     role?: unknown;
     content?: unknown;
@@ -57,22 +67,65 @@ type ReseedImportState = {
   inspectedFirstUser: boolean;
 };
 
-function resolveHistoryHomeDir(homeDir?: string): string {
-  return normalizeOptionalString(homeDir) || process.env.HOME || os.homedir();
+export function decodeClaudeCliProjectEntry(line: string): ClaudeCliProjectEntry {
+  const entry: unknown = JSON.parse(line);
+  if (!isRecord(entry)) {
+    throw new Error("Claude history row must be an object");
+  }
+  return entry;
+}
+
+export function redactClaudeCliHistoryMessage(
+  message: TranscriptLikeMessage,
+): TranscriptLikeMessage {
+  return redactTranscriptMessage(
+    message as unknown as AgentMessage,
+  ) as unknown as TranscriptLikeMessage;
 }
 
 function resolveClaudeProjectsDir(homeDir?: string): string {
-  return path.join(resolveHistoryHomeDir(homeDir), CLAUDE_PROJECTS_RELATIVE_DIR);
+  return path.join(
+    normalizeOptionalString(homeDir) || process.env.HOME || os.homedir(),
+    CLAUDE_PROJECTS_RELATIVE_DIR,
+  );
+}
+
+function normalizeClaudeCliSessionId(value: string): string | undefined {
+  const sessionId = value.trim();
+  return !sessionId ||
+    sessionId === "." ||
+    sessionId === ".." ||
+    path.isAbsolute(sessionId) ||
+    sessionId.includes("/") ||
+    sessionId.includes("\\")
+    ? undefined
+    : sessionId;
+}
+
+function resolveClaudeSessionCandidate(projectDir: string, sessionId: string): string | undefined {
+  const candidate = path.resolve(projectDir, `${sessionId}.jsonl`);
+  return candidate.startsWith(`${path.resolve(projectDir)}${path.sep}`) ? candidate : undefined;
+}
+
+export function createClaudeReseedImportState(params: {
+  localSessionId?: string;
+  reseedReceipt?: CliSessionReseedReceipt;
+}): ReseedImportState {
+  const localSessionId = normalizeOptionalString(params.localSessionId);
+  const normalizedReceipt = normalizeCliSessionReseedReceipt(params.reseedReceipt);
+  return {
+    receipt:
+      normalizedReceipt && normalizedReceipt.localSessionId === localSessionId
+        ? normalizedReceipt
+        : undefined,
+    inspectedFirstUser: false,
+  };
 }
 
 export function resolveClaudeCliBindingSessionId(
   entry: SessionEntry | undefined,
 ): string | undefined {
   return getCliSessionBinding(entry, CLAUDE_CLI_PROVIDER)?.sessionId;
-}
-
-export function resolveClaudeCliTimestampMs(value: unknown): number | undefined {
-  return parseDateStringTimestampMs(value);
 }
 
 function resolveClaudeCliUsage(raw: ClaudeCliUsage) {
@@ -99,12 +152,8 @@ function resolveClaudeCliUsage(raw: ClaudeCliUsage) {
   };
 }
 
-function cloneJsonValue<T>(value: T): T {
-  return structuredClone(value);
-}
-
 function removeContentBlock<T>(content: T[], blockIndex: number): T[] | null {
-  const nextContent = cloneJsonValue(content);
+  const nextContent = structuredClone(content);
   nextContent.splice(blockIndex, 1);
   return nextContent.length > 0 ? nextContent : null;
 }
@@ -114,16 +163,16 @@ function normalizeClaudeCliContent(
   toolNameRegistry: ToolNameRegistry,
 ): string | unknown[] {
   if (!Array.isArray(content)) {
-    return cloneJsonValue(content);
+    return content;
   }
 
-  const normalized: ToolContentBlock[] = [];
+  const normalized: unknown[] = [];
   for (const item of content) {
     if (!item || typeof item !== "object") {
-      normalized.push(cloneJsonValue(item as ToolContentBlock));
+      normalized.push(structuredClone(item));
       continue;
     }
-    const block = cloneJsonValue(item as ToolContentBlock);
+    const block = structuredClone(item as ToolContentBlock);
     const type = typeof block.type === "string" ? block.type : "";
     if (type === "tool_use") {
       // Claude stores tool calls as `tool_use` with `input`; OpenClaw history
@@ -134,14 +183,11 @@ function normalizeClaudeCliContent(
         toolNameRegistry.set(id, name);
       }
       if (block.input !== undefined && block.arguments === undefined) {
-        block.arguments = cloneJsonValue(block.input);
+        block.arguments = structuredClone(block.input);
       }
       block.type = "toolcall";
       delete block.input;
-      normalized.push(block);
-      continue;
-    }
-    if (type === "tool_result") {
+    } else if (type === "tool_result") {
       const toolUseId = resolveToolUseId(block);
       if (!block.name && toolUseId) {
         const toolName = toolNameRegistry.get(toolUseId);
@@ -149,82 +195,51 @@ function normalizeClaudeCliContent(
           block.name = toolName;
         }
       }
-      normalized.push(block);
-      continue;
     }
     normalized.push(block);
   }
   return normalized;
 }
 
-function getMessageBlocks(message: unknown): ToolContentBlock[] | null {
-  if (!message || typeof message !== "object") {
-    return null;
-  }
-  const content = (message as { content?: unknown }).content;
-  return Array.isArray(content) ? (content as ToolContentBlock[]) : null;
-}
-
-function isAssistantToolCallMessage(message: unknown): boolean {
-  if (!message || typeof message !== "object") {
-    return false;
-  }
-  const role = (message as { role?: unknown }).role;
-  if (role !== "assistant") {
-    return false;
-  }
-  const blocks = getMessageBlocks(message);
-  return Boolean(blocks && blocks.length > 0 && blocks.every(isToolCallBlock));
-}
-
-function isUserToolResultMessage(message: unknown): boolean {
-  if (!message || typeof message !== "object") {
-    return false;
-  }
-  const role = (message as { role?: unknown }).role;
-  if (role !== "user") {
-    return false;
-  }
-  const blocks = getMessageBlocks(message);
-  return Boolean(blocks && blocks.length > 0 && blocks.every(isToolResultBlock));
-}
-
 function coalesceClaudeCliToolMessages(messages: TranscriptLikeMessage[]): TranscriptLikeMessage[] {
   const coalesced: TranscriptLikeMessage[] = [];
-  for (let index = 0; index < messages.length; index += 1) {
-    const current = messages.at(index);
-    if (current === undefined) {
-      break;
-    }
-    const next = messages[index + 1];
-    if (!isAssistantToolCallMessage(current) || !isUserToolResultMessage(next)) {
-      coalesced.push(current);
-      continue;
-    }
+  for (const message of messages) {
+    appendCoalescedClaudeCliToolMessage(coalesced, message);
+  }
+  return coalesced;
+}
 
-    const callBlocks = getMessageBlocks(current) ?? [];
-    const resultBlocks = getMessageBlocks(next) ?? [];
+export function appendCoalescedClaudeCliToolMessage(
+  messages: TranscriptLikeMessage[],
+  message: TranscriptLikeMessage,
+): void {
+  const prior = messages.at(-1);
+  const callBlocks =
+    prior?.role === "assistant" && Array.isArray(prior.content) ? prior.content : [];
+  const resultBlocks =
+    message.role === "user" && Array.isArray(message.content) ? message.content : [];
+  if (
+    callBlocks.length > 0 &&
+    callBlocks.every(isToolCallBlock) &&
+    resultBlocks.length > 0 &&
+    resultBlocks.every(isToolResultBlock)
+  ) {
     const callIds = new Set(
       callBlocks.map(resolveToolUseId).filter((id): id is string => Boolean(id)),
     );
-    const allResultsMatch =
-      resultBlocks.length > 0 &&
-      resultBlocks.every((block) => {
-        const toolUseId = resolveToolUseId(block);
-        return Boolean(toolUseId && callIds.has(toolUseId));
-      });
-    if (!allResultsMatch) {
-      coalesced.push(current);
-      continue;
-    }
-
-    coalesced.push({
-      ...current,
-      content: [...callBlocks.map(cloneJsonValue), ...resultBlocks.map(cloneJsonValue)],
+    const allResultsMatch = resultBlocks.every((block) => {
+      const toolUseId = resolveToolUseId(block);
+      return Boolean(toolUseId && callIds.has(toolUseId));
     });
-    index += 1;
+    if (allResultsMatch) {
+      messages[messages.length - 1] = {
+        ...prior,
+        content: [...callBlocks, ...resultBlocks].map((block) => structuredClone(block)),
+      };
+      return;
+    }
   }
-  return coalesced;
+  messages.push(message);
 }
 
 type ClaudeCliPromptTextCandidate = {
@@ -232,11 +247,31 @@ type ClaudeCliPromptTextCandidate = {
   blockIndex?: number;
 };
 
+// Claude keeps compact summaries and transcript-only rows as visible harness
+// context. isMeta rows are private injections and never reach this projection.
+function isClaudeCliVisibleHarnessContext(entry: ClaudeCliProjectEntry): boolean {
+  return entry.isCompactSummary === true || entry.isVisibleInTranscriptOnly === true;
+}
+
+function isClaudeCliTaskNotification(
+  entry: ClaudeCliProjectEntry,
+  content: string | unknown[],
+): boolean {
+  // Native origin establishes authorship; operator-pasted XML must stay a user turn.
+  return (
+    isRecord(entry.origin) &&
+    entry.origin.kind === "task-notification" &&
+    typeof content === "string" &&
+    content.startsWith("<task-notification>") &&
+    content.endsWith("</task-notification>")
+  );
+}
+
 export function resolveClaudeCliPromptTextCandidates(
   entry: ClaudeCliProjectEntry,
   content: string | unknown[],
 ): ClaudeCliPromptTextCandidate[] {
-  if (entry.isMeta === true || entry.isCompactSummary === true) {
+  if (entry.isMeta === true || isClaudeCliVisibleHarnessContext(entry)) {
     return [];
   }
   if (typeof content === "string") {
@@ -272,7 +307,12 @@ export function parseClaudeCliHistoryEntry(
     reseedState?: ReseedImportState;
   },
 ): TranscriptLikeMessage | null {
-  if (entry.isSidechain === true || !entry.message || typeof entry.message !== "object") {
+  if (
+    entry.isSidechain === true ||
+    entry.isMeta === true ||
+    !entry.message ||
+    typeof entry.message !== "object"
+  ) {
     return null;
   }
   const type = typeof entry.type === "string" ? entry.type : undefined;
@@ -281,7 +321,7 @@ export function parseClaudeCliHistoryEntry(
     return null;
   }
 
-  const timestamp = resolveClaudeCliTimestampMs(entry.timestamp);
+  const timestamp = parseDateStringTimestampMs(entry.timestamp);
   const externalId = normalizeOptionalString(entry.uuid);
   const baseMeta = {
     id: externalId ?? `${CLAUDE_CLI_PROVIDER}:${cliSessionId}:line:${sourceLineNumber}`,
@@ -342,7 +382,7 @@ export function parseClaudeCliHistoryEntry(
                 content = contentWithoutReseed;
                 break;
               }
-              const nextContent = cloneJsonValue(content);
+              const nextContent = structuredClone(content);
               const block = nextContent[candidate.blockIndex];
               if (block && typeof block === "object") {
                 (block as Record<string, unknown>).text = reseedPrompt.userMessage;
@@ -354,16 +394,30 @@ export function parseClaudeCliHistoryEntry(
         }
       }
     }
+    const cliImageTurnKey =
+      typeof content === "string" ? readCliImageTurnContext(content) : undefined;
+    if (cliImageTurnKey && typeof content === "string") {
+      content = stripCliImageTurnContext(content, cliImageTurnKey);
+    }
+    // Record provenance here, where the native row shape is known, so downstream
+    // display never has to infer operator authorship from message text.
+    const sourceTool = isClaudeCliTaskNotification(entry, content)
+      ? "claude_cli_task_notification"
+      : isClaudeCliVisibleHarnessContext(entry)
+        ? "cli_harness_context"
+        : undefined;
     return attachOpenClawTranscriptMeta(
       {
         role: "user",
         content,
+        ...(sourceTool ? { provenance: { kind: "internal_system", sourceTool } } : {}),
         ...(timestamp !== undefined ? { timestamp } : {}),
       },
-      baseMeta,
+      { ...baseMeta, ...(cliImageTurnKey ? { cliImageTurnKey } : {}) },
     ) as TranscriptLikeMessage;
   }
 
+  const usage = resolveClaudeCliUsage(entry.message.usage);
   return attachOpenClawTranscriptMeta(
     {
       role: "assistant",
@@ -374,9 +428,7 @@ export function parseClaudeCliHistoryEntry(
       ...(normalizeOptionalString(entry.message.stop_reason)
         ? { stopReason: entry.message.stop_reason }
         : {}),
-      ...(resolveClaudeCliUsage(entry.message.usage)
-        ? { usage: resolveClaudeCliUsage(entry.message.usage) }
-        : {}),
+      ...(usage ? { usage } : {}),
       ...(timestamp !== undefined ? { timestamp } : {}),
     },
     baseMeta,
@@ -387,15 +439,8 @@ function resolveClaudeCliSessionFilePath(params: {
   cliSessionId: string;
   homeDir?: string;
 }): string | undefined {
-  const sessionId = params.cliSessionId.trim();
-  if (
-    !sessionId ||
-    sessionId === "." ||
-    sessionId === ".." ||
-    path.isAbsolute(sessionId) ||
-    sessionId.includes("/") ||
-    sessionId.includes("\\")
-  ) {
+  const sessionId = normalizeClaudeCliSessionId(params.cliSessionId);
+  if (!sessionId) {
     return undefined;
   }
   const projectsDir = resolveClaudeProjectsDir(params.homeDir);
@@ -411,12 +456,55 @@ function resolveClaudeCliSessionFilePath(params: {
       continue;
     }
     const projectDir = path.join(projectsDir, entry.name);
-    const candidate = path.resolve(projectDir, `${sessionId}.jsonl`);
-    const resolvedProjectDir = path.resolve(projectDir);
-    if (!candidate.startsWith(`${resolvedProjectDir}${path.sep}`)) {
-      continue;
+    const candidate = resolveClaudeSessionCandidate(projectDir, sessionId);
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
     }
-    if (fs.existsSync(candidate)) {
+  }
+  return undefined;
+}
+
+export async function resolveClaudeCliSessionFilePathAsync(params: {
+  cliSessionId: string;
+  homeDir?: string;
+}): Promise<string | undefined> {
+  const sessionId = normalizeClaudeCliSessionId(params.cliSessionId);
+  if (!sessionId) {
+    return undefined;
+  }
+  const projectsDir = resolveClaudeProjectsDir(params.homeDir);
+  let projectEntries: fs.Dirent[];
+  try {
+    projectEntries = await fs.promises.readdir(projectsDir, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+
+  // Bound filesystem work while preserving the first match in directory order.
+  const batchSize = 16;
+  for (let offset = 0; offset < projectEntries.length; offset += batchSize) {
+    const candidates = await Promise.all(
+      projectEntries.slice(offset, offset + batchSize).map(async (entry) => {
+        if (!entry.isDirectory()) {
+          return undefined;
+        }
+        const candidate = resolveClaudeSessionCandidate(
+          path.join(projectsDir, entry.name),
+          sessionId,
+        );
+        if (!candidate) {
+          return undefined;
+        }
+        try {
+          await fs.promises.access(candidate);
+          return candidate;
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    const candidate = candidates.find((value) => value !== undefined);
+    if (candidate) {
       return candidate;
     }
   }
@@ -444,15 +532,7 @@ export function readClaudeCliSessionMessages(params: {
 
   const messages: TranscriptLikeMessage[] = [];
   const toolNameRegistry: ToolNameRegistry = new Map();
-  const localSessionId = normalizeOptionalString(params.localSessionId);
-  const normalizedReceipt = normalizeCliSessionReseedReceipt(params.reseedReceipt);
-  const reseedState: ReseedImportState = {
-    receipt:
-      normalizedReceipt && normalizedReceipt.localSessionId === localSessionId
-        ? normalizedReceipt
-        : undefined,
-    inspectedFirstUser: false,
-  };
+  const reseedState = createClaudeReseedImportState(params);
   const lines = content.split(/\r?\n/);
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex] ?? "";
@@ -460,7 +540,7 @@ export function readClaudeCliSessionMessages(params: {
       continue;
     }
     try {
-      const parsed = JSON.parse(line) as ClaudeCliProjectEntry;
+      const parsed = decodeClaudeCliProjectEntry(line);
       const message = parseClaudeCliHistoryEntry(
         parsed,
         params.cliSessionId,
@@ -481,57 +561,13 @@ export function readClaudeCliSessionMessages(params: {
   const visibleMessages = coalesceClaudeCliToolMessages(messages);
   // Match local transcript persistence before dedupe so imported secrets cannot
   // bypass exact-text matching or reach chat history through the external copy.
-  return visibleMessages.map(
-    (message) =>
-      redactTranscriptMessage(
-        message as unknown as AgentMessage,
-      ) as unknown as TranscriptLikeMessage,
-  );
+  return visibleMessages.map(redactClaudeCliHistoryMessage);
 }
-
-type ClaudeCliCompactBoundaryEntry = {
-  type: "system";
-  subtype?: unknown;
-  content?: unknown;
-  timestamp?: unknown;
-  compactMetadata?: {
-    trigger?: unknown;
-    preTokens?: unknown;
-  };
-};
-
-type ClaudeCliSummaryEntry = {
-  type: "summary";
-  summary?: unknown;
-  leafUuid?: unknown;
-  timestamp?: unknown;
-};
 
 export type ClaudeCliFallbackSeed = {
   summaryText?: string;
   recentTurns: TranscriptLikeMessage[];
 };
-
-function isCompactBoundary(entry: ClaudeCliProjectEntry): boolean {
-  if (entry.type !== "system") {
-    return false;
-  }
-  const subtype = (entry as ClaudeCliCompactBoundaryEntry).subtype;
-  return typeof subtype === "string" && subtype === "compact_boundary";
-}
-
-function extractCompactBoundaryFallbackText(entry: ClaudeCliProjectEntry): string | undefined {
-  const content = (entry as ClaudeCliCompactBoundaryEntry).content;
-  return typeof content === "string" && content.trim() ? content.trim() : undefined;
-}
-
-function extractSummaryText(entry: ClaudeCliProjectEntry): string | undefined {
-  if (entry.type !== "summary") {
-    return undefined;
-  }
-  const summary = (entry as ClaudeCliSummaryEntry).summary;
-  return typeof summary === "string" && summary.trim() ? summary.trim() : undefined;
-}
 
 export function readClaudeCliFallbackSeed(params: {
   cliSessionId: string;
@@ -563,23 +599,24 @@ export function readClaudeCliFallbackSeed(params: {
     }
     let parsed: ClaudeCliProjectEntry;
     try {
-      parsed = JSON.parse(line) as ClaudeCliProjectEntry;
+      parsed = decodeClaudeCliProjectEntry(line);
     } catch {
       continue;
     }
 
-    const explicitSummary = extractSummaryText(parsed);
+    const explicitSummary =
+      parsed.type === "summary" ? normalizeOptionalString(parsed.summary) : undefined;
     if (explicitSummary) {
       pendingSummary = explicitSummary;
       continue;
     }
 
-    if (isCompactBoundary(parsed)) {
+    if (parsed.type === "system" && parsed.subtype === "compact_boundary") {
       // Compact boundaries split Claude history into context windows. Keep the
       // latest summary plus only post-boundary turns for fallback seeding.
       lastSummary = pendingSummary;
       pendingSummary = undefined;
-      lastBoundaryFallback = extractCompactBoundaryFallbackText(parsed) ?? lastBoundaryFallback;
+      lastBoundaryFallback = normalizeOptionalString(parsed.content) ?? lastBoundaryFallback;
       windowedTurns = [];
       toolNameRegistry.clear();
       continue;

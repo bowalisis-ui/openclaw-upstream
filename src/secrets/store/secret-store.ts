@@ -1,13 +1,15 @@
 import { err, ok, type Result } from "@openclaw/normalization-core/result";
 import type { Selectable } from "kysely";
-import { ENV_SECRET_REF_ID_RE } from "../../config/types.secrets.js";
+import { isRedactedSecretValue } from "../../config/redact-sentinel.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../../infra/kysely-sync.js";
 import { normalizeSqliteNumber } from "../../infra/sqlite-number.js";
+import { createSqliteWorkerWriteAdmission } from "../../infra/sqlite-worker-store.js";
 import { registerSecretValueForRedaction } from "../../logging/secret-redaction-registry.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { withExistingOpenClawStateDatabaseReadOnly } from "../../state/openclaw-state-db-readonly.js";
 import { ensureSecretStoreSchema } from "../../state/openclaw-state-db-schema-additive.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../../state/openclaw-state-db.generated.js";
@@ -16,11 +18,59 @@ import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
 } from "../../state/openclaw-state-db.js";
+import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import {
+  executeOpenClawStateWorker,
+  runOpenClawStateWorkerOperation,
+} from "../../state/openclaw-state-worker-store.js";
+import { sealSecretSentinel } from "../sentinel.js";
+import { captureSecretStoreExpiryCutoffs } from "./secret-store-expiry.kernel.js";
+import {
+  classifyHiddenGitHubStoreName,
+  GITHUB_SETUP_HANDOFF_MAX_AGE_MS,
+} from "./secret-store-hidden-github.js";
+import { isMissingSecretStoreTableError } from "./secret-store-sqlite.js";
+import { SecretStoreValidationError } from "./secret-store-validation-error.js";
+import {
+  assertSecretStoreEnvName,
+  assertSecretStoreMutationName,
+  assertSecretStoreValue,
+  normalizeScope,
+  normalizeSecretAllowedHosts,
+  parseSecretAllowedHosts,
+  type SecretStoreKind,
+  type SecretStoreScope,
+} from "./secret-store-validation.js";
+
+export {
+  assertSecretStoreValue,
+  normalizeSecretAllowedHosts,
+  type SecretStoreKind,
+  type SecretStoreScope,
+} from "./secret-store-validation.js";
+export {
+  writeSecretStoreEntry,
+  writeSecretStoreEntries,
+  writeSecretStoreEntryWithRollback,
+  type SecretStoreBatchWriteParams,
+  type SecretStoreWriteEntry,
+  type SecretStoreWriteParams,
+} from "./secret-store-write.js";
+
+export {
+  deleteHiddenGitHubSecretRecord,
+  listHiddenGitHubSecretRecordNames,
+  readHiddenGitHubSecretRecord,
+  writeHiddenGitHubSecretRecord,
+} from "./secret-store-hidden-github.js";
+export {
+  SECRET_STORE_ALLOWED_HOSTS_MAX,
+  SECRET_STORE_VALUE_MAX_BYTES,
+  SecretStoreValidationError,
+} from "./secret-store-validation-error.js";
 
 type SecretStoreDatabase = Pick<OpenClawStateKyselyDatabase, "secret_store_entries">;
 type SecretStoreRow = Selectable<OpenClawStateKyselyDatabase["secret_store_entries"]>;
-type SecretStoreScope = { kind: "team" };
-type SecretStoreKind = "secret" | "env";
 
 export type SecretStoreEntryMetadata = {
   name: string;
@@ -30,7 +80,20 @@ export type SecretStoreEntryMetadata = {
   updatedAtMs: number;
   createdAtMs: number;
   updatedBy: string | null;
+  allowedHosts?: string[];
   valuePreview?: string;
+};
+
+type SecretStoreEgressBinding = {
+  name: string;
+  sentinel: string;
+  allowedHosts: string[];
+};
+
+export type SecretStoreExecEnvironment = {
+  env?: Record<string, string>;
+  secretSentinels?: Record<string, string>;
+  secretEgressBindings?: SecretStoreEgressBinding[];
 };
 
 type SecretStoreReadError =
@@ -38,64 +101,7 @@ type SecretStoreReadError =
   | { code: "SECRET_STORE_INVALID_NAME"; message: string }
   | { code: "SECRET_STORE_UNAVAILABLE"; message: string; cause: unknown };
 
-type SecretStoreValidationCode =
-  | "SECRET_STORE_INVALID_NAME"
-  | "SECRET_STORE_VALUE_TOO_LARGE"
-  | "SECRET_STORE_VALUE_EMPTY";
-
-export class SecretStoreValidationError extends Error {
-  constructor(
-    readonly code: SecretStoreValidationCode,
-    message: string,
-  ) {
-    super(message);
-    this.name = "SecretStoreValidationError";
-  }
-}
-
-export const SECRET_STORE_VALUE_MAX_BYTES = 64 * 1024;
-const SECRET_STORE_RETENTION_MS = 30 * 24 * 60 * 60_000;
-
-function normalizeScope(_scope: SecretStoreScope): { scopeKind: "team"; scopeId: "" } {
-  return { scopeKind: "team", scopeId: "" };
-}
-
-function assertSecretStoreName(name: string): void {
-  if (!ENV_SECRET_REF_ID_RE.test(name)) {
-    throw new SecretStoreValidationError(
-      "SECRET_STORE_INVALID_NAME",
-      `Secret store name must match ${String(ENV_SECRET_REF_ID_RE)}.`,
-    );
-  }
-}
-
-function assertSecretStoreValue(value: string, kind: SecretStoreKind): void {
-  const bytes = Buffer.byteLength(value, "utf8");
-  if (bytes > SECRET_STORE_VALUE_MAX_BYTES) {
-    throw new SecretStoreValidationError(
-      "SECRET_STORE_VALUE_TOO_LARGE",
-      `Secret store value exceeds ${SECRET_STORE_VALUE_MAX_BYTES} UTF-8 bytes.`,
-    );
-  }
-  // An empty credential is never meaningful and cannot be diagnosed later: `get`
-  // refuses secret kinds and listings mask them, so a silently-empty secret (a
-  // failed `op read |` pipe, for example) would surface only as a confusing 401.
-  // Env entries may legitimately be empty.
-  if (kind === "secret" && value.length === 0) {
-    throw new SecretStoreValidationError(
-      "SECRET_STORE_VALUE_EMPTY",
-      "Secret store value is empty. Secret entries require a value; check the command that produced it.",
-    );
-  }
-}
-
-function isMissingSecretStoreTableError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error as NodeJS.ErrnoException).code === "ERR_SQLITE_ERROR" &&
-    error.message === "no such table: secret_store_entries"
-  );
-}
+const log = createSubsystemLogger("secrets/store");
 
 function toMetadata(row: SecretStoreRow): SecretStoreEntryMetadata {
   if (row.kind === "secret") {
@@ -109,6 +115,7 @@ function toMetadata(row: SecretStoreRow): SecretStoreEntryMetadata {
     updatedAtMs: normalizeSqliteNumber(row.updated_at_ms) ?? 0,
     createdAtMs: normalizeSqliteNumber(row.created_at_ms) ?? 0,
     updatedBy: row.updated_by,
+    ...(row.kind === "secret" ? { allowedHosts: parseSecretAllowedHosts(row.allowed_hosts) } : {}),
     ...(row.kind === "env" ? { valuePreview: row.value } : {}),
   };
 }
@@ -116,6 +123,7 @@ function toMetadata(row: SecretStoreRow): SecretStoreEntryMetadata {
 export function listSecretStoreEntries(params: {
   scope: SecretStoreScope;
   includeDeleted?: boolean;
+  redactedOnly?: boolean;
   database?: OpenClawStateDatabaseOptions;
 }): SecretStoreEntryMetadata[] {
   const { scopeKind, scopeId } = normalizeScope(params.scope);
@@ -132,12 +140,146 @@ export function listSecretStoreEntries(params: {
         if (!params.includeDeleted) {
           query = query.where("deleted_at_ms", "is", null);
         }
-        return executeSqliteQuerySync(sqlite, query).rows.map(toMetadata);
+        return executeSqliteQuerySync(sqlite, query)
+          .rows.filter(
+            (row) =>
+              classifyHiddenGitHubStoreName(row.name) === undefined &&
+              (!params.redactedOnly || isRedactedSecretValue(row.value)),
+          )
+          .map(toMetadata);
       }, params.database ?? {}) ?? []
     );
   } catch (error) {
     if (isMissingSecretStoreTableError(error)) {
       return [];
+    }
+    throw error;
+  }
+}
+
+/** Atomically returns and hard-deletes one exact fresh, non-egress GitHub setup handoff. */
+export function consumeGitHubSetupHandoff(params: {
+  name: string;
+  nowMs?: number;
+  database?: OpenClawStateDatabaseOptions;
+}): string | undefined {
+  if (classifyHiddenGitHubStoreName(params.name) !== "setup") {
+    return undefined;
+  }
+  const now = params.nowMs ?? Date.now();
+  try {
+    let value: string | undefined;
+    runOpenClawStateWriteTransaction(
+      ({ db: sqlite }) => {
+        const db = getNodeSqliteKysely<SecretStoreDatabase>(sqlite);
+        const row = executeSqliteQueryTakeFirstSync(
+          sqlite,
+          db
+            .selectFrom("secret_store_entries")
+            .select("value")
+            .where("scope_kind", "=", "team")
+            .where("scope_id", "=", "")
+            .where("name", "=", params.name)
+            .where("kind", "=", "secret")
+            .where("allowed_hosts", "is", null)
+            .where("created_at_ms", ">=", now - GITHUB_SETUP_HANDOFF_MAX_AGE_MS)
+            .where("created_at_ms", "<=", now)
+            .where("deleted_at_ms", "is", null),
+        );
+        if (!row) {
+          return;
+        }
+        executeSqliteQuerySync(
+          sqlite,
+          db
+            .deleteFrom("secret_store_entries")
+            .where("scope_kind", "=", "team")
+            .where("scope_id", "=", "")
+            .where("name", "=", params.name),
+        );
+        value = row.value;
+      },
+      params.database,
+      { operationLabel: "secrets.store.consume-github-setup-handoff" },
+    );
+    if (value !== undefined) {
+      registerSecretValueForRedaction(value);
+    }
+    return value;
+  } catch (error) {
+    if (isMissingSecretStoreTableError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/** Captures one coherent team-store snapshot for an agent run's exec environment. */
+export function readSecretStoreExecEnvironment(params: {
+  includeSecretSentinels: boolean;
+  excludeNames?: readonly string[];
+  database?: OpenClawStateDatabaseOptions;
+}): SecretStoreExecEnvironment {
+  try {
+    return (
+      withExistingOpenClawStateDatabaseReadOnly(({ db: sqlite }) => {
+        const db = getNodeSqliteKysely<SecretStoreDatabase>(sqlite);
+        const rows = executeSqliteQuerySync(
+          sqlite,
+          db
+            .selectFrom("secret_store_entries")
+            .selectAll()
+            .where("scope_kind", "=", "team")
+            .where("scope_id", "=", "")
+            .where("deleted_at_ms", "is", null)
+            .orderBy("name", "asc"),
+        ).rows;
+        const env: Record<string, string> = {};
+        const secretSentinels: Record<string, string> = {};
+        const secretEgressBindings: SecretStoreEgressBinding[] = [];
+        const excludedNames = new Set(params.excludeNames ?? []);
+        for (const row of rows) {
+          if (
+            classifyHiddenGitHubStoreName(row.name) !== undefined ||
+            excludedNames.has(row.name)
+          ) {
+            continue;
+          }
+          if (isRedactedSecretValue(row.value)) {
+            log.warn(
+              `Secret store entry "${row.name}" contains a redaction placeholder; excluded from the exec environment. Replace it with a real value, or run openclaw doctor --fix for a Gateway token.`,
+            );
+            continue;
+          }
+          if (row.kind === "env") {
+            env[row.name] = row.value;
+            continue;
+          }
+          registerSecretValueForRedaction(row.value);
+          if (params.includeSecretSentinels) {
+            // Subprocesses must never receive plaintext, even when provider-auth
+            // sentinel masking is disabled for compatibility.
+            const sentinel = sealSecretSentinel(row.value, {
+              label: `exec-store:${row.name}`,
+            });
+            secretSentinels[row.name] = sentinel;
+            secretEgressBindings.push({
+              name: row.name,
+              sentinel,
+              allowedHosts: parseSecretAllowedHosts(row.allowed_hosts),
+            });
+          }
+        }
+        return {
+          ...(Object.keys(env).length > 0 ? { env } : {}),
+          ...(Object.keys(secretSentinels).length > 0 ? { secretSentinels } : {}),
+          ...(secretEgressBindings.length > 0 ? { secretEgressBindings } : {}),
+        };
+      }, params.database ?? {}) ?? {}
+    );
+  } catch (error) {
+    if (isMissingSecretStoreTableError(error)) {
+      return {};
     }
     throw error;
   }
@@ -149,7 +291,7 @@ export function readSecretStoreValue(params: {
   database?: OpenClawStateDatabaseOptions;
 }): Result<string, SecretStoreReadError> {
   try {
-    assertSecretStoreName(params.name);
+    assertSecretStoreEnvName(params.name);
     const { scopeKind, scopeId } = normalizeScope(params.scope);
     const row = withExistingOpenClawStateDatabaseReadOnly(({ db: sqlite }) => {
       const db = getNodeSqliteKysely<SecretStoreDatabase>(sqlite);
@@ -192,50 +334,87 @@ export function readSecretStoreValue(params: {
   }
 }
 
-export function writeSecretStoreEntry(params: {
+/**
+ * Saves a secret for one config key in a fresh team-store entry through the
+ * state worker and returns the entry name. `assertCurrent` is the requester's
+ * live authority; the worker checks it again at transaction and commit
+ * admission, so a revoked request writes nothing.
+ */
+export async function writeSecretStoreEntryForConfigRef(params: {
+  baseName: string;
+  value: string;
+  updatedBy: string;
+  assertCurrent?: () => void;
+  database?: Pick<OpenClawStateDatabaseOptions, "path" | "env">;
+}): Promise<string> {
+  registerSecretValueForRedaction(params.value);
+  assertSecretStoreValue(params.value, "secret", params.baseName);
+  const context = captureOpenClawStateWorkerContext(params.database);
+  const assertCurrent = () => {
+    context.admission.assertCurrent();
+    params.assertCurrent?.();
+  };
+  const { name } = await runOpenClawStateWorkerOperation(
+    context,
+    (scope) =>
+      scope.execute({
+        type: "secrets.writeForConfigRef",
+        input: {
+          baseName: params.baseName,
+          value: params.value,
+          writer: params.updatedBy,
+          now: Date.now(),
+        },
+      }),
+    {
+      assertCurrent,
+      createAdmission: createSqliteWorkerWriteAdmission(assertCurrent, [
+        context.admission.databasePath,
+      ]),
+    },
+  );
+  return name;
+}
+
+export function updateSecretStoreAllowedHosts(params: {
   scope: SecretStoreScope;
   name: string;
-  value: string;
-  kind: SecretStoreKind;
+  allowedHosts: readonly string[];
   updatedBy: string | null;
   database?: OpenClawStateDatabaseOptions;
 }): void {
-  assertSecretStoreName(params.name);
-  assertSecretStoreValue(params.value, params.kind);
+  assertSecretStoreEnvName(params.name);
+  const allowedHosts = normalizeSecretAllowedHosts(params.allowedHosts);
   const { scopeKind, scopeId } = normalizeScope(params.scope);
   const now = Date.now();
   runOpenClawStateWriteTransaction(
     ({ db: sqlite }) => {
       ensureSecretStoreSchema(sqlite);
       const db = getNodeSqliteKysely<SecretStoreDatabase>(sqlite);
-      executeSqliteQuerySync(
+      const updated = executeSqliteQuerySync(
         sqlite,
         db
-          .insertInto("secret_store_entries")
-          .values({
-            scope_kind: scopeKind,
-            scope_id: scopeId,
-            name: params.name,
-            value: params.value,
-            kind: params.kind,
-            created_at_ms: now,
+          .updateTable("secret_store_entries")
+          .set({
+            allowed_hosts: allowedHosts.length ? JSON.stringify(allowedHosts) : null,
             updated_at_ms: now,
             updated_by: params.updatedBy,
-            deleted_at_ms: null,
           })
-          .onConflict((conflict) =>
-            conflict.columns(["scope_kind", "scope_id", "name"]).doUpdateSet({
-              value: params.value,
-              kind: params.kind,
-              updated_at_ms: now,
-              updated_by: params.updatedBy,
-              deleted_at_ms: null,
-            }),
-          ),
+          .where("scope_kind", "=", scopeKind)
+          .where("scope_id", "=", scopeId)
+          .where("name", "=", params.name)
+          .where("kind", "=", "secret")
+          .where("deleted_at_ms", "is", null),
       );
+      if (Number(updated.numAffectedRows ?? 0n) !== 1) {
+        throw new SecretStoreValidationError(
+          "SECRET_STORE_INVALID_ALLOWED_HOST",
+          `Secret store entry "${params.name}" is missing or is not a secret entry.`,
+        );
+      }
     },
     params.database,
-    { operationLabel: "secrets.store.write" },
+    { operationLabel: "secrets.store.allowed-hosts" },
   );
 }
 
@@ -244,7 +423,7 @@ export function deleteSecretStoreEntry(params: {
   name: string;
   database?: OpenClawStateDatabaseOptions;
 }): void {
-  assertSecretStoreName(params.name);
+  assertSecretStoreMutationName(params.name);
   const { scopeKind, scopeId } = normalizeScope(params.scope);
   const state = openOpenClawStateDatabase(params.database);
   const now = Date.now();
@@ -252,16 +431,21 @@ export function deleteSecretStoreEntry(params: {
     runOpenClawStateWriteTransaction(
       ({ db: sqlite }) => {
         const db = getNodeSqliteKysely<SecretStoreDatabase>(sqlite);
-        executeSqliteQuerySync(
-          sqlite,
-          db
-            .updateTable("secret_store_entries")
-            .set({ deleted_at_ms: now, updated_at_ms: now })
-            .where("scope_kind", "=", scopeKind)
-            .where("scope_id", "=", scopeId)
-            .where("name", "=", params.name)
-            .where("deleted_at_ms", "is", null),
-        );
+        const query =
+          classifyHiddenGitHubStoreName(params.name) === "setup"
+            ? db
+                .deleteFrom("secret_store_entries")
+                .where("scope_kind", "=", scopeKind)
+                .where("scope_id", "=", scopeId)
+                .where("name", "=", params.name)
+            : db
+                .updateTable("secret_store_entries")
+                .set({ deleted_at_ms: now, updated_at_ms: now })
+                .where("scope_kind", "=", scopeKind)
+                .where("scope_id", "=", scopeId)
+                .where("name", "=", params.name)
+                .where("deleted_at_ms", "is", null);
+        executeSqliteQuerySync(sqlite, query);
       },
       { ...params.database, database: state },
       { operationLabel: "secrets.store.delete" },
@@ -273,33 +457,10 @@ export function deleteSecretStoreEntry(params: {
   }
 }
 
-export function purgeExpiredSecretStoreEntries(
-  params: {
-    database?: OpenClawStateDatabaseOptions;
-  } = {},
-): number {
-  const state = openOpenClawStateDatabase(params.database);
-  const threshold = Date.now() - SECRET_STORE_RETENTION_MS;
-  try {
-    return runOpenClawStateWriteTransaction(
-      ({ db: sqlite }) => {
-        const db = getNodeSqliteKysely<SecretStoreDatabase>(sqlite);
-        const deleted = executeSqliteQuerySync(
-          sqlite,
-          db
-            .deleteFrom("secret_store_entries")
-            .where("deleted_at_ms", "is not", null)
-            .where("deleted_at_ms", "<", threshold),
-        );
-        return Number(deleted.numAffectedRows ?? 0n);
-      },
-      { ...params.database, database: state },
-      { operationLabel: "secrets.store.purge" },
-    );
-  } catch (error) {
-    if (isMissingSecretStoreTableError(error)) {
-      return 0;
-    }
-    throw error;
-  }
+export async function purgeExpiredSecretStoreEntries(
+  params: { database?: Pick<OpenClawStateDatabaseOptions, "path" | "env"> } = {},
+): Promise<number> {
+  const input = captureSecretStoreExpiryCutoffs();
+  const context = captureOpenClawStateWorkerContext(params.database);
+  return await executeOpenClawStateWorker(context, { type: "secrets.purge", input });
 }

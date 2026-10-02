@@ -5,41 +5,51 @@ import {
   resolveExecApprovalsSocketPath,
 } from "./exec-approvals-config.js";
 import type { ExecApprovalsDefaultOverrides } from "./exec-approvals-contracts.js";
-import type { ExecApprovalsFile, ExecApprovalsResolved } from "./exec-approvals-core.js";
+import type {
+  ExecApprovalsFile,
+  ExecApprovalsResolved,
+  ExecApprovalsSnapshot,
+} from "./exec-approvals-core.js";
 import { resolveExecApprovalsFromFilePrepared } from "./exec-approvals-resolver.js";
-import {
-  ensureExecApprovals,
-  ensureExecApprovalsSnapshot,
-  loadExecApprovals,
-} from "./exec-approvals-store.js";
+import { ensureExecApprovalsSnapshot, loadExecApprovals } from "./exec-approvals-store.js";
 import { expandHomePrefix } from "./home-dir.js";
 
 export * from "./exec-approvals-analysis.js";
 export * from "./exec-approvals-allowlist.js";
 export * from "./exec-approvals-core.js";
+export * from "./exec-approvals-generated-migration.js";
 export type { ExecApprovalPolicySnapshot } from "./exec-approval-policy-snapshot.js";
-export type { ExecAllowlistEntry } from "./exec-approvals.types.js";
+export type { AllowAlwaysPattern, ExecAllowlistEntry } from "./exec-approvals.types.js";
 export type { ExecApprovalsDefaultOverrides } from "./exec-approvals-contracts.js";
 export {
   DEFAULT_EXEC_APPROVAL_ASK_FALLBACK,
   mergeExecApprovalsSocketDefaults,
   resolveExecApprovalsDisplayPath,
-  resolveExecApprovalsPath,
-  resolveExecApprovalsSocketPath,
-  resolveExecApprovalsTranscriptPath,
 } from "./exec-approvals-config.js";
 export {
-  ensureExecApprovals,
   ensureExecApprovalsSnapshot,
   loadExecApprovals,
-  loadExecApprovalsAsync,
+  loadExecApprovalsReadOnly,
   readExecApprovalsSnapshot,
-  restoreExecApprovalsSnapshot,
   restoreExecApprovalsSnapshotLocked,
-  saveExecApprovals,
   updateExecApprovals,
   withAgentExecApprovalsRemoved,
 } from "./exec-approvals-store.js";
+
+export function redactExecApprovals(
+  snapshot: Omit<ExecApprovalsSnapshot, "raw"> & { raw?: ExecApprovalsSnapshot["raw"] },
+): Omit<ExecApprovalsSnapshot, "raw"> {
+  const { raw: _raw, ...rest } = snapshot;
+  const socketPath = snapshot.file.socket?.path?.trim();
+  // Socket connection material is runtime-only; presentation boundaries need only its path.
+  return {
+    ...rest,
+    file: {
+      ...snapshot.file,
+      socket: socketPath ? { path: socketPath } : undefined,
+    },
+  };
+}
 
 export function normalizeExecApprovals(file: ExecApprovalsFile): ExecApprovalsFile {
   const socketPath = file.socket?.path?.trim();
@@ -82,33 +92,6 @@ function resolveExecApprovalsWithoutSocket(params: {
     (resolved.agent.security === "full" || resolved.agent.security === "deny") &&
     resolved.agent.ask === "off";
   return noPrompt && !params.file.socket?.token?.trim() ? resolved : null;
-}
-
-export function resolveExecApprovals(
-  agentId?: string,
-  overrides?: ExecApprovalsDefaultOverrides,
-): ExecApprovalsResolved {
-  const filePath = resolveExecApprovalsDisplayPath();
-  if (!overrides?.requireSocket) {
-    const file = loadExecApprovals();
-    const resolved = resolveExecApprovalsWithoutSocket({
-      file,
-      filePath,
-      agentId,
-      overrides,
-    });
-    if (resolved) {
-      return resolved;
-    }
-  }
-  const file = ensureExecApprovals();
-  return shapeResolvedExecApprovals({
-    file,
-    filePath,
-    agentId,
-    overrides,
-    socket: "persisted",
-  });
 }
 
 export async function resolveExecApprovalsLocked(
@@ -156,12 +139,6 @@ export function resolveExecApprovalsFromFile(params: {
 }
 
 export {
-  DEFAULT_EXEC_APPROVAL_DECISIONS,
-  OPTIONAL_EXEC_APPROVAL_DECISIONS,
-} from "./exec-approvals-policy.js";
-export {
-  commandRequiresSecurityAuditSuppressionApproval,
-  isExecApprovalDecisionAllowed,
   maxAsk,
   minSecurity,
   normalizeExecApprovalUnavailableDecisions,
@@ -171,27 +148,18 @@ export {
   resolveExecApprovalUnavailableDecisions,
 } from "./exec-approvals-policy.js";
 export {
-  addAllowlistEntry,
-  addDurableCommandApproval,
   createExecApprovalPolicySnapshot,
   hasDurableExecApproval,
   hasExactCommandDurableExecApproval,
   hasNodeCommandAllowAlwaysMarker,
   isExecApprovalPolicySnapshotCurrent,
-  persistAllowAlwaysDecision,
-  persistAllowAlwaysPatterns,
   resolveAllowAlwaysPatternCoverage,
   resolveAllowAlwaysPersistenceDecision,
   resolveDurableExecApprovalRequirement,
 } from "./exec-approvals-allow-always.js";
-export type {
-  AllowAlwaysPersistenceDecision,
-  AllowAlwaysPersistenceReason,
-} from "./exec-approvals-contracts.js";
+export type { AllowAlwaysPersistenceDecision } from "./exec-approvals-contracts.js";
 export {
   commitExecAuthorizationLocked,
   recordAllowlistMatchesUse,
-  recordAllowlistUse,
 } from "./exec-approvals-authorization.js";
 export type { ExecApprovalUsageAuthorization } from "./exec-approvals-authorization.js";
-export { requestExecApprovalViaSocket } from "./exec-approvals-socket.js";

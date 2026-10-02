@@ -2,11 +2,16 @@ import { statSync } from "node:fs";
 import path from "node:path";
 import { createAccountListHelpers } from "openclaw/plugin-sdk/account-helpers";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
-import { normalizeAccountId, type OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
-// Imessage plugin module implements accounts behavior.
+import {
+  normalizeAccountId,
+  resolveAccountEntry,
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk/account-resolution";
 import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
-import { resolveAccountEntry } from "openclaw/plugin-sdk/routing";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  asOptionalRecord,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { IMessageAccountConfig } from "./account-types.js";
 import {
   expandIMessageUserPath,
@@ -35,19 +40,10 @@ const {
 export const listIMessageAccountIds = listAccountIds;
 export const resolveDefaultIMessageAccountId = resolveDefaultAccountId;
 
-function resolveIMessageAccountConfig(
-  cfg: OpenClawConfig,
-  accountId: string,
-): IMessageAccountConfig | undefined {
-  return resolveAccountEntry(cfg.channels?.imessage?.accounts, accountId);
-}
-
 type IMessageStreamingConfig = NonNullable<IMessageAccountConfig["streaming"]>;
 
 function asStreamingConfigObject(value: unknown): IMessageStreamingConfig | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as IMessageStreamingConfig)
-    : undefined;
+  return asOptionalRecord(value) as IMessageStreamingConfig | undefined;
 }
 
 function mergeIMessageStreamingConfig(
@@ -82,7 +78,7 @@ function mergeIMessageStreamingConfig(
 }
 
 function mergeIMessageAccountConfig(cfg: OpenClawConfig, accountId: string): IMessageAccountConfig {
-  const accountConfig = resolveIMessageAccountConfig(cfg, accountId);
+  const accountConfig = resolveAccountEntry(cfg.channels?.imessage?.accounts, accountId);
   const merged = resolveMergedIMessageAccountConfig(cfg, accountId);
   const streaming = mergeIMessageStreamingConfig(
     (cfg.channels?.imessage as Record<string, unknown> | undefined)?.streaming,

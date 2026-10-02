@@ -1,4 +1,6 @@
-export type ProfileId = "smoke" | "default" | "large";
+import type { ReliabilityWorkerExit } from "./sqlite-reliability-process.js";
+
+type ProfileId = "smoke" | "default" | "large";
 
 export type IndexRepairJournalMode = "delete" | "wal";
 
@@ -31,10 +33,83 @@ export type CliOptions = {
   stateDir: string | null;
 };
 
+export type CompactionPayloadProof = {
+  bytes: number;
+  idSum: number;
+  rows: number;
+};
+
 export type ReliabilityStateProof = {
   batches: number;
   rows: number;
   sha256: string;
+};
+
+export function assertSameReliabilityState(
+  actual: ReliabilityStateProof,
+  expected: ReliabilityStateProof,
+  label: string,
+): void {
+  if (
+    actual.batches !== expected.batches ||
+    actual.rows !== expected.rows ||
+    actual.sha256 !== expected.sha256
+  ) {
+    throw new Error(
+      `${label} changed reliability state: expected batches=${expected.batches} rows=${expected.rows} sha256=${expected.sha256}, got batches=${actual.batches} rows=${actual.rows} sha256=${actual.sha256}`,
+    );
+  }
+}
+
+export function formatReliabilityStderr(stderr: string): string {
+  const text = stderr.trim();
+  return text ? ` stderr=${JSON.stringify(text)}` : "";
+}
+
+export function assertSameCompactionPayload(
+  actual: CompactionPayloadProof,
+  expected: CompactionPayloadProof,
+  label: string,
+): void {
+  if (
+    actual.bytes !== expected.bytes ||
+    actual.idSum !== expected.idSum ||
+    actual.rows !== expected.rows
+  ) {
+    throw new Error(
+      `${label} changed compaction payload: expected rows=${expected.rows} bytes=${expected.bytes} idSum=${expected.idSum}, got rows=${actual.rows} bytes=${actual.bytes} idSum=${actual.idSum}`,
+    );
+  }
+}
+
+type IndexRepairProof = {
+  exit: ReliabilityWorkerExit;
+  journalBytesObserved: number;
+  repairedIndexes: string[];
+  recoveryVerified: true;
+  rowsPreserved: number;
+  walBytesObserved: number;
+};
+
+type RepositoryCrashProof = {
+  exit: ReliabilityWorkerExit;
+  payload: CompactionPayloadProof;
+  repositoryVerified: true;
+  retryCreated: true;
+  sourcePayloadPreserved: true;
+  sourceStatePreserved: true;
+  stagingEntries: number;
+  state: ReliabilityStateProof;
+  visibleSnapshotsAfterCrash: number;
+};
+
+type RestoreCrashProof = {
+  exit: ReliabilityWorkerExit;
+  payloadAfterRecovery: CompactionPayloadProof;
+  recoveryVerified: true;
+  repositoryVerified: true;
+  stagingEntries: number;
+  stateAfterRecovery: ReliabilityStateProof;
 };
 
 export type ReliabilityReport = {
@@ -42,10 +117,7 @@ export type ReliabilityReport = {
   concurrentRestoresVerified: number;
   crashRecoveryProof: {
     committedStatePreserved: true;
-    exit: {
-      code: number | null;
-      signal: NodeJS.Signals | null;
-    };
+    exit: ReliabilityWorkerExit;
     partialVisibleAfterRecovery: false;
     sourceRecovered: true;
     stateAfterRecovery: ReliabilityStateProof;
@@ -54,28 +126,8 @@ export type ReliabilityReport = {
   };
   iterations: number;
   indexRepairInterruptionProof: {
-    rollbackJournal: {
-      exit: {
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      };
-      journalBytesObserved: number;
-      repairedIndexes: string[];
-      recoveryVerified: true;
-      rowsPreserved: number;
-      walBytesObserved: number;
-    };
-    wal: {
-      exit: {
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      };
-      journalBytesObserved: number;
-      repairedIndexes: string[];
-      recoveryVerified: true;
-      rowsPreserved: number;
-      walBytesObserved: number;
-    };
+    rollbackJournal: IndexRepairProof;
+    wal: IndexRepairProof;
   };
   maintenanceProof: {
     bloatBytes: number;
@@ -101,21 +153,10 @@ export type ReliabilityReport = {
     vacuumInterruption: {
       autoVacuumAfterRecovery: number;
       autoVacuumBeforeKill: number;
-      exit: {
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      };
+      exit: ReliabilityWorkerExit;
       journalBytesObserved: number;
-      payloadAfterRecovery: {
-        bytes: number;
-        idSum: number;
-        rows: number;
-      };
-      payloadBeforeKill: {
-        bytes: number;
-        idSum: number;
-        rows: number;
-      };
+      payloadAfterRecovery: CompactionPayloadProof;
+      payloadBeforeKill: CompactionPayloadProof;
       recoveryVerified: true;
       stateAfterRecovery: ReliabilityStateProof;
       stateBeforeKill: ReliabilityStateProof;
@@ -129,106 +170,32 @@ export type ReliabilityReport = {
       state: ReliabilityStateProof;
     };
     repositoryInterruption: {
-      afterCommit: {
+      afterCommit: RepositoryCrashProof & {
         crashSnapshotVerifiedAfterCrash: true;
         crashSnapshotVisibleAfterCrash: true;
-        exit: {
-          code: number | null;
-          signal: NodeJS.Signals | null;
-        };
         incompleteEntries: 0;
-        payload: {
-          bytes: number;
-          idSum: number;
-          rows: number;
-        };
-        repositoryVerified: true;
-        retryCreated: true;
-        sourcePayloadPreserved: true;
-        sourceStatePreserved: true;
-        stagingEntries: number;
-        state: ReliabilityStateProof;
-        visibleSnapshotsAfterCrash: number;
       };
-      beforePending: {
+      beforePending: RepositoryCrashProof & {
         crashSnapshotVerifiedAfterCrash: false;
         crashSnapshotVisibleAfterCrash: false;
-        exit: {
-          code: number | null;
-          signal: NodeJS.Signals | null;
-        };
         incompleteEntries: 1;
-        payload: {
-          bytes: number;
-          idSum: number;
-          rows: number;
-        };
-        repositoryVerified: true;
-        retryCreated: true;
-        sourcePayloadPreserved: true;
-        sourceStatePreserved: true;
-        stagingEntries: number;
-        state: ReliabilityStateProof;
-        visibleSnapshotsAfterCrash: number;
       };
-      pending: {
+      pending: RepositoryCrashProof & {
         crashSnapshotVerifiedAfterCrash: true;
         crashSnapshotVisibleAfterCrash: true;
-        exit: {
-          code: number | null;
-          signal: NodeJS.Signals | null;
-        };
         incompleteEntries: 0;
-        payload: {
-          bytes: number;
-          idSum: number;
-          rows: number;
-        };
-        repositoryVerified: true;
-        retryCreated: true;
-        sourcePayloadPreserved: true;
-        sourceStatePreserved: true;
-        stagingEntries: number;
-        state: ReliabilityStateProof;
-        visibleSnapshotsAfterCrash: number;
       };
     };
     restoreInterruption: {
-      afterPublish: {
+      afterPublish: RestoreCrashProof & {
         existingTargetPreserved: true;
-        exit: {
-          code: number | null;
-          signal: NodeJS.Signals | null;
-        };
-        payloadAfterRecovery: {
-          bytes: number;
-          idSum: number;
-          rows: number;
-        };
-        recoveryVerified: true;
-        repositoryVerified: true;
         retryRestored: false;
-        stagingEntries: number;
-        stateAfterRecovery: ReliabilityStateProof;
         targetVerifiedAfterCrash: true;
         targetVisibleAfterCrash: true;
       };
-      beforePublish: {
+      beforePublish: RestoreCrashProof & {
         existingTargetPreserved: false;
-        exit: {
-          code: number | null;
-          signal: NodeJS.Signals | null;
-        };
-        payloadAfterRecovery: {
-          bytes: number;
-          idSum: number;
-          rows: number;
-        };
-        recoveryVerified: true;
-        repositoryVerified: true;
         retryRestored: true;
-        stagingEntries: number;
-        stateAfterRecovery: ReliabilityStateProof;
         targetVerifiedAfterCrash: false;
         targetVisibleAfterCrash: false;
       };
@@ -247,10 +214,7 @@ export type ReliabilityReport = {
   publicationInterruptionProof: {
     afterPublish: {
       existingTargetPreserved: true;
-      exit: {
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      };
+      exit: ReliabilityWorkerExit;
       recoveryVerified: true;
       sourceStatePreserved: true;
       stagingEntries: number;
@@ -258,10 +222,7 @@ export type ReliabilityReport = {
       targetVisibleAfterCrash: true;
     };
     beforePublish: {
-      exit: {
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      };
+      exit: ReliabilityWorkerExit;
       recoveryVerified: true;
       retryPublished: true;
       sourceStatePreserved: true;
@@ -305,7 +266,9 @@ export type ReliabilityReport = {
 
 export const PROFILES: Record<ProfileId, ProfileConfig> = {
   smoke: {
-    iterations: 4,
+    // One snapshot before the forced writer crash and one after restart prove
+    // both distinct smoke paths; larger profiles retain repeated stress loops.
+    iterations: 2,
     maxWalBytes: 64 * 1024 * 1024,
     payloadBytes: 512,
     retainedBatches: 32,

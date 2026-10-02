@@ -15,15 +15,8 @@ function scopeSchemaSections(
   const include = params.include;
   const exclude = params.exclude;
   const nextProps: Record<string, JsonSchema> = {};
-  for (const key of Object.keys(schema.properties)) {
-    if (include && include.size > 0 && !include.has(key)) {
-      continue;
-    }
-    if (exclude && exclude.size > 0 && exclude.has(key)) {
-      continue;
-    }
-    const property = schema.properties[key];
-    if (property) {
+  for (const [key, property] of Object.entries(schema.properties)) {
+    if (property && (!include?.size || include.has(key)) && !exclude?.has(key)) {
       nextProps[key] = property;
     }
   }
@@ -105,11 +98,11 @@ export function renderUnsupportedPathSummary(paths: string[]) {
     <span class="config-content-callout__text">
       ${prefix}${paths
         .slice(0, 3)
-        .map(
-          (path, index) => html`${index > 0 ? ", " : ""}<code>${path}</code>`,
-        )}${suffix}${paths.length > 3
-        ? html` ${t("configView.formUnsafeMore", { count: String(paths.length - 3) })}`
-        : nothing}
+        .map((path, index) => html`${index > 0 ? ", " : ""}<code>${path}</code>`)}${suffix}${
+        paths.length > 3
+          ? html` ${t("configView.formUnsafeMore", { count: String(paths.length - 3) })}`
+          : nothing
+      }
     </span>
   `;
 }

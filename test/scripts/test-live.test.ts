@@ -1,10 +1,11 @@
 // Test Live tests cover test live script behavior.
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   buildTestLiveEnv,
   buildTestLivePnpmArgs,
@@ -12,8 +13,12 @@ import {
   parseTestLiveArgs,
   resolveTestLiveHeartbeatMs,
 } from "../../scripts/test-live.mts";
+import { createFixtureLifetime } from "../helpers/fixture-lifetime.js";
+import { withinTest } from "../helpers/promise.js";
 
 const posixIt = process.platform === "win32" ? it.skip : it;
+const fixtureLifetime = createFixtureLifetime();
+afterEach(() => fixtureLifetime.cleanup());
 
 describe("scripts/test-live", () => {
   it("parses wrapper flags before live test spawn", () => {
@@ -82,115 +87,110 @@ describe("scripts/test-live", () => {
     });
   });
 
-  posixIt("signals the live pnpm child when the wrapper is terminated", async () => {
-    const root = mkdtempSync(join(tmpdir(), "openclaw-test-live-signal-"));
-    const fakePnpmPath = join(root, "pnpm");
-    const childPidPath = join(root, "child.pid");
-    const descendantPidPath = join(root, "descendant.pid");
-    const signaledPath = join(root, "signaled");
+  posixIt.for(["SIGINT", "SIGTERM"] as const)(
+    "signals the live pnpm child on %s and removes its joined namespace",
+    (stopSignal, { signal }) =>
+      fixtureLifetime.run(async () => {
+        const root = mkdtempSync(join(tmpdir(), "openclaw-test-live-signal-"));
+        const fakePnpmPath = join(root, "pnpm");
+        const signaledPath = join(root, "signaled");
 
-    writeFakePnpm(fakePnpmPath);
-    const runner = spawn(
-      process.execPath,
-      ["--import", "tsx", "scripts/test-live.mts", "--", "fake.live.test.ts"],
-      {
-        env: {
-          ...process.env,
-          OPENCLAW_FAKE_PNPM_PID_PATH: childPidPath,
-          OPENCLAW_FAKE_PNPM_DESCENDANT_PID_PATH: descendantPidPath,
-          OPENCLAW_FAKE_PNPM_SIGNALED_PATH: signaledPath,
-          npm_execpath: fakePnpmPath,
+        writeFakePnpm(fakePnpmPath);
+        const runner = spawn(
+          process.execPath,
+          ["--import", "tsx", "scripts/test-live.mts", "--", "fake.live.test.ts"],
+          {
+            env: {
+              ...process.env,
+              OPENCLAW_FAKE_PNPM_SIGNALED_PATH: signaledPath,
+              npm_execpath: fakePnpmPath,
+            },
+            stdio: ["ignore", "pipe", "ignore"],
+          },
+        );
+        const completion = waitForClose(runner);
+        let childPid = 0;
+        let descendantPid = 0;
+
+        try {
+          ({ childPid, descendantPid } = await waitForFixtureReady(runner, signal));
+
+          expect(runner.pid).toBeGreaterThan(0);
+          process.kill(runner.pid!, stopSignal);
+          const result = await withinTest(completion, signal);
+
+          expect(result).toEqual({ code: null, signal: stopSignal });
+          expect(readFileSync(signaledPath, "utf8")).toBe(stopSignal);
+          await waitForProcessExit(childPid, signal);
+          await waitForProcessExit(descendantPid, signal);
+          expect(existsSync(readFileSync(join(root, "namespace"), "utf8"))).toBe(false);
+        } finally {
+          await stopFixture(runner, completion, [childPid, descendantPid]);
+          rmSync(root, { force: true, recursive: true });
+        }
+      }),
+  );
+
+  posixIt("kills the live pnpm process group after the no-output timeout", ({ signal }) =>
+    fixtureLifetime.run(async () => {
+      const root = mkdtempSync(join(tmpdir(), "openclaw-test-live-timeout-"));
+      const fakePnpmPath = join(root, "pnpm");
+      const stderr: Buffer[] = [];
+
+      writeFakePnpm(fakePnpmPath);
+      // Advance the watchdog only after the real process group is ready; startup
+      // latency must not race the short timeout that this test is exercising.
+      const runner = spawn(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "--eval",
+          [
+            'import { mock } from "node:test";',
+            'import { main } from "./scripts/test-live.mts";',
+            'mock.timers.enable({ apis: ["Date", "setInterval"], now: 0 });',
+            'process.once("message", () => {',
+            "  mock.timers.tick(25);",
+            "  mock.timers.tick(75);",
+            "});",
+            'main(["--", "fake.live.test.ts"]);',
+          ].join("\n"),
+        ],
+        {
+          env: {
+            ...process.env,
+            OPENCLAW_LIVE_WRAPPER_HEARTBEAT_MS: "25",
+            OPENCLAW_VITEST_NO_OUTPUT_TIMEOUT_MS: "100",
+            npm_execpath: fakePnpmPath,
+          },
+          stdio: ["ignore", "pipe", "pipe", "ipc"],
         },
-        stdio: "ignore",
-      },
-    );
-    let childPid = 0;
-    let descendantPid = 0;
-
-    try {
-      await waitFor(() => fileExists(childPidPath), 5_000);
-      await waitFor(() => fileExists(descendantPidPath), 5_000);
-      childPid = Number(readFileSync(childPidPath, "utf8"));
-      descendantPid = Number(readFileSync(descendantPidPath, "utf8"));
-      expect(Number.isInteger(childPid)).toBe(true);
-      expect(Number.isInteger(descendantPid)).toBe(true);
-
-      expect(runner.pid).toBeGreaterThan(0);
-      process.kill(runner.pid!, "SIGTERM");
-      const result = await waitForClose(runner);
-
-      expect(result).toEqual({ code: null, signal: "SIGTERM" });
-      await waitFor(() => fileExists(signaledPath), 5_000);
-      expect(readFileSync(signaledPath, "utf8")).toBe("SIGTERM");
-      await waitFor(() => !isProcessAlive(childPid), 5_000);
-      await waitFor(() => !isProcessAlive(descendantPid), 5_000);
-    } finally {
-      if (runner.pid && isProcessAlive(runner.pid)) {
-        process.kill(runner.pid, "SIGKILL");
-      }
-      if (childPid && isProcessAlive(childPid)) {
-        process.kill(childPid, "SIGKILL");
-      }
-      if (descendantPid && isProcessAlive(descendantPid)) {
-        process.kill(descendantPid, "SIGKILL");
-      }
-      rmSync(root, { force: true, recursive: true });
-    }
-  });
-
-  posixIt("kills the live pnpm process group after the no-output timeout", async () => {
-    const root = mkdtempSync(join(tmpdir(), "openclaw-test-live-timeout-"));
-    const fakePnpmPath = join(root, "pnpm");
-    const childPidPath = join(root, "child.pid");
-    const descendantPidPath = join(root, "descendant.pid");
-    const stderr: Buffer[] = [];
-
-    writeFakePnpm(fakePnpmPath);
-    const runner = spawn(
-      process.execPath,
-      ["--import", "tsx", "scripts/test-live.mts", "--", "fake.live.test.ts"],
-      {
-        env: {
-          ...process.env,
-          OPENCLAW_FAKE_PNPM_PID_PATH: childPidPath,
-          OPENCLAW_FAKE_PNPM_DESCENDANT_PID_PATH: descendantPidPath,
-          OPENCLAW_LIVE_WRAPPER_HEARTBEAT_MS: "25",
-          OPENCLAW_VITEST_NO_OUTPUT_TIMEOUT_MS: "100",
-          npm_execpath: fakePnpmPath,
-        },
-        stdio: ["ignore", "ignore", "pipe"],
-      },
-    );
-    runner.stderr.on("data", (chunk) => stderr.push(chunk));
-    let childPid = 0;
-    let descendantPid = 0;
-
-    try {
-      await waitFor(() => fileExists(childPidPath), 5_000);
-      await waitFor(() => fileExists(descendantPidPath), 5_000);
-      childPid = Number(readFileSync(childPidPath, "utf8"));
-      descendantPid = Number(readFileSync(descendantPidPath, "utf8"));
-
-      expect(await waitForClose(runner)).toEqual({ code: 1, signal: null });
-      expect(Buffer.concat(stderr).toString("utf8")).toContain(
-        "no output for 100ms; terminating stalled Vitest process group",
       );
-      expect(Buffer.concat(stderr).toString("utf8")).toContain("[test:live] still running");
-      await waitFor(() => !isProcessAlive(childPid), 5_000);
-      await waitFor(() => !isProcessAlive(descendantPid), 5_000);
-    } finally {
-      if (runner.pid && isProcessAlive(runner.pid)) {
-        process.kill(runner.pid, "SIGKILL");
+      const completion = waitForClose(runner);
+      runner.stderr?.on("data", (chunk) => stderr.push(chunk));
+      let childPid = 0;
+      let descendantPid = 0;
+
+      try {
+        ({ childPid, descendantPid } = await waitForFixtureReady(runner, signal));
+
+        runner.send("advance-watchdog");
+        expect(await withinTest(completion, signal)).toEqual({ code: 1, signal: null });
+        expect(Buffer.concat(stderr).toString("utf8")).toContain(
+          "no output for 100ms; terminating stalled Vitest process group",
+        );
+        expect(Buffer.concat(stderr).toString("utf8")).toContain("[test:live] still running");
+        await waitForProcessExit(childPid, signal);
+        await waitForProcessExit(descendantPid, signal);
+        expect(existsSync(readFileSync(join(root, "namespace"), "utf8"))).toBe(false);
+      } finally {
+        await stopFixture(runner, completion, [childPid, descendantPid]);
+        rmSync(root, { force: true, recursive: true });
       }
-      if (childPid && isProcessAlive(childPid)) {
-        process.kill(childPid, "SIGKILL");
-      }
-      if (descendantPid && isProcessAlive(descendantPid)) {
-        process.kill(descendantPid, "SIGKILL");
-      }
-      rmSync(root, { force: true, recursive: true });
-    }
-  });
+    }),
+  );
 
   it("rejects loose heartbeat intervals instead of parsing prefixes", () => {
     expect(resolveTestLiveHeartbeatMs({})).toBe(20_000);
@@ -232,18 +232,23 @@ function writeFakePnpm(filePath: string): void {
       "#!/usr/bin/env node",
       'const { spawn } = require("node:child_process");',
       'const fs = require("node:fs");',
-      "if (process.env.OPENCLAW_FAKE_PNPM_DESCENDANT_PID_PATH) {",
-      "  const child = spawn(process.execPath, [",
-      '    "-e",',
-      "    \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\",",
-      "  ], { stdio: 'ignore' });",
-      "  fs.writeFileSync(process.env.OPENCLAW_FAKE_PNPM_DESCENDANT_PID_PATH, String(child.pid));",
-      "}",
-      "fs.writeFileSync(process.env.OPENCLAW_FAKE_PNPM_PID_PATH, String(process.pid));",
-      'process.on("SIGTERM", () => {',
-      '  fs.writeFileSync(process.env.OPENCLAW_FAKE_PNPM_SIGNALED_PATH, "SIGTERM");',
+      'const tmp = require("node:os").tmpdir();',
+      'fs.writeFileSync(require("node:path").join(__dirname, "namespace"), tmp);',
+      'fs.writeFileSync(require("node:path").join(tmp, "owned-marker"), "owned");',
+      'for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => {',
+      "  fs.writeFileSync(process.env.OPENCLAW_FAKE_PNPM_SIGNALED_PATH, signal);",
       "  process.exit(0);",
       "});",
+      "const child = spawn(process.execPath, [",
+      '  "-e",',
+      "  [",
+      "    \"process.on('SIGTERM', () => {});\",",
+      '    "process.send(process.pid);",',
+      '    "setInterval(() => {}, 1000);",',
+      '  ].join("\\n"),',
+      "], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });",
+      // Readiness certifies both signal handlers, not merely spawned processes.
+      'child.once("message", (pid) => process.stdout.write(`${process.pid} ${pid}\\n`));',
       "setInterval(() => {}, 1000);",
       "",
     ].join("\n"),
@@ -255,34 +260,73 @@ function chmodExecutable(filePath: string): void {
   chmodSync(filePath, 0o755);
 }
 
-async function waitFor(condition: () => boolean, timeoutMs = 3_000) {
-  const startedAt = Date.now();
-  while (!condition()) {
-    if (Date.now() - startedAt > timeoutMs) {
-      throw new Error("timed out waiting for condition");
-    }
-    await delay(5);
+async function waitForFixtureReady(runner: ReturnType<typeof spawn>, signal: AbortSignal) {
+  if (!runner.stdout) {
+    throw new Error("fixture readiness requires piped stdout");
   }
-}
-
-async function waitForClose(child: ReturnType<typeof spawn>, timeoutMs = 5_000) {
-  return await Promise.race([
-    new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-      child.once("close", (code, signal) => resolve({ code, signal }));
-    }),
-    delay(timeoutMs, undefined, { ref: false }).then(() => {
-      throw new Error("timed out waiting for child close");
-    }),
-  ]);
-}
-
-function fileExists(filePath: string): boolean {
+  signal.throwIfAborted();
+  const lines = createInterface({ input: runner.stdout, signal });
+  let spawnError: Error | undefined;
+  const onError = (error: Error) => {
+    spawnError = error;
+    lines.close();
+  };
+  runner.once("error", onError);
   try {
-    readFileSync(filePath);
-    return true;
-  } catch {
-    return false;
+    for await (const line of lines) {
+      const [child, descendant] = line.split(" ");
+      const childPid = Number(child);
+      const descendantPid = Number(descendant);
+      expect(Number.isInteger(childPid) && childPid > 0).toBe(true);
+      expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
+      return { childPid, descendantPid };
+    }
+    throw spawnError ?? new Error("fixture closed before reporting readiness");
+  } finally {
+    runner.off("error", onError);
+    lines.close();
   }
+}
+
+async function stopFixture(
+  runner: ReturnType<typeof spawn>,
+  completion: ReturnType<typeof waitForClose>,
+  pids: number[],
+) {
+  try {
+    if (runner.pid && isProcessAlive(runner.pid)) {
+      runner.kill("SIGTERM");
+    }
+    await completion;
+  } finally {
+    for (const pid of [runner.pid, ...pids]) {
+      if (pid && isProcessAlive(pid)) {
+        process.kill(pid, "SIGKILL");
+      }
+    }
+  }
+}
+
+// The wrapper joins live group members, but Linux may still retain a stopped
+// orphan PID until its reaper runs. No child handle exposes that final receipt.
+async function waitForProcessExit(pid: number, signal: AbortSignal) {
+  try {
+    while (isProcessAlive(pid)) {
+      await delay(5, undefined, { signal });
+    }
+  } catch (error) {
+    if (signal.aborted) {
+      throw new Error(`timed out waiting for process ${pid} to exit`, { cause: error });
+    }
+    throw error;
+  }
+}
+
+function waitForClose(child: ReturnType<typeof spawn>) {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once("close", (code, signal) => resolve({ code, signal }));
+    child.once("error", reject);
+  });
 }
 
 function isProcessAlive(pid: number): boolean {

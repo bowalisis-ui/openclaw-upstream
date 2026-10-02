@@ -1,20 +1,27 @@
-import { WORKER_RPC_SET_VERSION } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
-import { verifyWorkerAdmissionHandshake } from "./admission.js";
+import {
+  type WorkerAdmissionHandshake,
+  WORKER_RPC_SET_VERSION,
+} from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
+import { sameWorkerBuild } from "../../worker/worker-build-identity.js";
+import { StaleWorkerBuildError, type ExpectedWorkerBuild } from "./admission.js";
 import type { WorkerInstallationArtifact } from "./bundle.js";
 import {
   createWorkerCredentialMaterial,
+  hashWorkerCredential,
   WORKER_CREDENTIAL_TTL_MS,
   type MintedWorkerCredential,
   type WorkerCredentialBinding,
-  type WorkerCredentialDeliveryClaim,
 } from "./credential.js";
 import type { WorkerLiveEventReceiver } from "./live-events.js";
+import type { WorkerSessionTurnClaim } from "./placement-record.js";
 import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
+import { WorkerSessionAlreadyAttachedError } from "./session-attachment.js";
 import type { WorkerEnvironmentState } from "./state.js";
-import {
-  type WorkerEnvironmentRecord,
-  type WorkerEnvironmentStore,
-  WorkerSessionAlreadyAttachedError,
+import type {
+  PreparedEnvironmentPlacementBinding,
+  WorkerEnvironmentRecord,
+  WorkerEnvironmentStore,
+  WorkerEnvironmentTransitionPatch,
 } from "./store.js";
 import type { WorkerTunnelManager } from "./tunnel.js";
 
@@ -23,33 +30,28 @@ type WorkerCredentialBrokerOptions = {
   prepareInstallation: (
     install: WorkerInstallationArtifact["install"],
   ) => Promise<WorkerInstallationArtifact>;
-  tunnelManager?: WorkerTunnelManager;
+  tunnelManager?: Pick<WorkerTunnelManager, "stop">;
   workerCredentialTtlMs?: number;
   generateWorkerCredential?: (bytes: number) => string;
-  liveEvents?: Pick<WorkerLiveEventReceiver, "bindSession" | "rotateCredential">;
+  liveEvents?: Pick<WorkerLiveEventReceiver, "rotateCredential">;
   placementStore?: WorkerSessionPlacementGate;
   now: () => number;
   isStopping: () => boolean;
-  cancelInferenceEnvironment: (environmentId: string) => void;
+  cancelInferenceEnvironment: (environmentId: string) => Promise<void>;
   inState: (record: WorkerEnvironmentRecord, ...states: WorkerEnvironmentState[]) => boolean;
   move: (
     record: WorkerEnvironmentRecord,
     to: WorkerEnvironmentState,
     patch?: Parameters<WorkerEnvironmentStore["transition"]>[0]["patch"],
-  ) => WorkerEnvironmentRecord;
+    assertCurrent?: () => void,
+  ) => Promise<WorkerEnvironmentRecord>;
   serviceError: (code: "environment_not_found" | "invalid_state", message: string) => Error;
   withLock: <T>(environmentId: string, task: () => Promise<T>) => Promise<T>;
 };
 
 export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOptions) {
-  const { store } = options;
+  const { store, now, inState, move, serviceError, withLock } = options;
   const tunnels = options.tunnelManager;
-  const now = options.now;
-  const inference = { cancelEnvironment: options.cancelInferenceEnvironment };
-  const inState = options.inState;
-  const move = options.move;
-  const serviceError = options.serviceError;
-  const withLock = options.withLock;
   const pendingCredentials = new Map<string, MintedWorkerCredential>();
 
   const credentialExpiry = () => {
@@ -64,11 +66,22 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
     return expiresAtMs;
   };
 
-  const credentialMaterial = () => createWorkerCredentialMaterial(options.generateWorkerCredential);
+  const credentialMaterial = (claim?: WorkerSessionTurnClaim) =>
+    createWorkerCredentialMaterial(options.generateWorkerCredential, claim);
+
+  const validateTurnClaim = (claim: WorkerSessionTurnClaim): boolean =>
+    claim.owner.kind === "worker" && options.placementStore?.validateWorkerTurn(claim) === true;
+
+  const assertTurnClaim = (claim: WorkerSessionTurnClaim) => {
+    if (!validateTurnClaim(claim)) {
+      throw serviceError("invalid_state", "Worker turn credential claim is not authoritative");
+    }
+  };
 
   const grantFrom = (params: {
     credential: string;
     record: ReturnType<WorkerEnvironmentStore["getCredential"]>;
+    claim?: WorkerSessionTurnClaim;
   }): MintedWorkerCredential => {
     const record = params.record;
     if (!record) {
@@ -83,17 +96,19 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
       rpcSetVersion: record.rpcSetVersion,
       ownerEpoch: record.ownerEpoch,
       expiresAtMs: record.expiresAtMs,
+      ...(params.claim ? { turnClaim: params.claim } : {}),
     };
   };
 
-  const mintCredentialLocked = (
+  const mintCredentialLocked = async (
     request: WorkerCredentialBinding,
-  ): { credentialHash: string; grant: MintedWorkerCredential } => {
+    claim?: WorkerSessionTurnClaim,
+  ): Promise<{ credentialHash: string; grant: MintedWorkerCredential }> => {
     const previous = store.getCredential(request.environmentId);
     if (previous) {
-      inference.cancelEnvironment(request.environmentId);
+      await options.cancelInferenceEnvironment(request.environmentId);
     }
-    const material = credentialMaterial();
+    const material = credentialMaterial(claim);
     const credential = {
       environmentId: request.environmentId,
       expectedOwnerEpoch: request.ownerEpoch,
@@ -101,11 +116,13 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
       sessionId: request.sessionId,
       rpcSetVersion: WORKER_RPC_SET_VERSION,
       expiresAtMs: credentialExpiry(),
+      ...(claim ? { assertCurrent: () => assertTurnClaim(claim) } : {}),
     };
-    const record = store.renewCredential(credential);
+    const record = await store.renewCredential(credential);
+    credential.assertCurrent?.();
     return {
       credentialHash: material.credentialHash,
-      grant: grantFrom({ credential: material.credential, record }),
+      grant: grantFrom({ credential: material.credential, record, claim }),
     };
   };
 
@@ -114,19 +131,61 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
     return grant;
   };
 
-  const ensurePendingCredential = (record: WorkerEnvironmentRecord, sessionId: string | null) => {
+  const commitReady = async (
+    record: WorkerEnvironmentRecord,
+    receipt: WorkerAdmissionHandshake & { installKind: "bundle" },
+    patch: WorkerEnvironmentTransitionPatch = {},
+    assertCurrent?: () => void,
+  ) => {
+    const material = credentialMaterial();
+    // Receipt, owner epoch, and credential hash commit together. A failed write leaves the
+    // durable lease retryable without ever admitting a partial identity.
+    const ready = await move(
+      record,
+      "ready",
+      {
+        ...patch,
+        bootstrapReceipt: receipt,
+        credential: {
+          credentialHash: material.credentialHash,
+          sessionId: null,
+          rpcSetVersion: WORKER_RPC_SET_VERSION,
+          expiresAtMs: credentialExpiry(),
+        },
+      },
+      assertCurrent,
+    );
+    stageCredential(
+      grantFrom({
+        credential: material.credential,
+        record: store.getCredential(record.environmentId),
+      }),
+    );
+    return ready;
+  };
+
+  const ensurePendingCredential = async (
+    record: WorkerEnvironmentRecord,
+    sessionId: string | null,
+  ) => {
+    await store.ready();
     const credential = store.getCredential(record.environmentId);
     const pending = pendingCredentials.get(record.environmentId);
+    const turnClaim =
+      sessionId === null
+        ? undefined
+        : options.placementStore?.readWorkerTurnClaim({
+            sessionId,
+            environmentId: record.environmentId,
+            ownerEpoch: record.ownerEpoch,
+          });
     const credentialHasDurableTurn =
       credential?.deliveredAtMs !== null &&
       credential?.ownerEpoch === record.ownerEpoch &&
       credential.sessionId === sessionId &&
       sessionId !== null &&
-      options.placementStore?.hasWorkerTurn({
-        sessionId,
-        environmentId: record.environmentId,
-        ownerEpoch: record.ownerEpoch,
-      }) === true;
+      turnClaim !== undefined &&
+      options.placementStore?.validateWorkerTurn(turnClaim) === true;
     const credentialIsCurrent =
       credential?.ownerEpoch === record.ownerEpoch &&
       credential.sessionId === sessionId &&
@@ -144,7 +203,7 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
       return;
     }
     pendingCredentials.delete(record.environmentId);
-    const minted = mintCredentialLocked({
+    const minted = await mintCredentialLocked({
       environmentId: record.environmentId,
       ownerEpoch: record.ownerEpoch,
       sessionId,
@@ -162,15 +221,17 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
   };
 
   const attachSession = async (
-    request: WorkerCredentialBinding & { sessionId: string },
+    request: WorkerCredentialBinding & {
+      sessionId: string;
+      placementBinding?: PreparedEnvironmentPlacementBinding;
+    },
   ): Promise<MintedWorkerCredential> => {
-    let stopping = options.isStopping();
-    if (stopping) {
+    if (options.isStopping()) {
       throw serviceError("invalid_state", "Worker environment service is stopping");
     }
     return withLock(request.environmentId, async () => {
-      stopping = options.isStopping();
-      if (stopping) {
+      await store.ready();
+      if (options.isStopping()) {
         throw serviceError("invalid_state", "Worker environment service is stopping");
       }
       const current = store.get(request.environmentId);
@@ -183,29 +244,23 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
       if (current.state !== "ready" && current.state !== "idle") {
         throw serviceError("invalid_state", `Cannot attach worker in state: ${current.state}`);
       }
-      let currentBuild: WorkerInstallationArtifact;
+      let currentBuild: ExpectedWorkerBuild;
       try {
         currentBuild = await options.prepareInstallation("bundle");
       } catch {
         throw serviceError("invalid_state", "Current worker build identity is unavailable");
       }
-      if (
-        !current.bootstrapReceipt ||
-        !verifyWorkerAdmissionHandshake(current.bootstrapReceipt, currentBuild)
-      ) {
-        throw serviceError(
-          "invalid_state",
-          "Worker must bootstrap the current build before attach",
-        );
+      if (!current.bootstrapReceipt || !sameWorkerBuild(current.bootstrapReceipt, currentBuild)) {
+        throw new StaleWorkerBuildError();
       }
       const material = credentialMaterial();
-      let attached: WorkerEnvironmentRecord;
       try {
-        attached = store.transition({
+        await store.transition({
           environmentId: request.environmentId,
           from: current.state,
           to: "attached",
           expectedOwnerEpoch: request.ownerEpoch,
+          placementBinding: request.placementBinding,
           patch: {
             attachedSessionIds: [request.sessionId],
             credential: {
@@ -222,24 +277,6 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
         }
         throw error;
       }
-      if (options.liveEvents) {
-        let liveSessionBound: boolean;
-        try {
-          liveSessionBound = options.liveEvents.bindSession({
-            environmentId: attached.environmentId,
-            runEpoch: attached.ownerEpoch,
-            sessionId: request.sessionId,
-          });
-        } catch {
-          liveSessionBound = false;
-        }
-        if (!liveSessionBound) {
-          move(attached, "idle");
-          // Preserve the bounded attachment error after rollback fences the old worker.
-          await tunnels?.stop(request.environmentId, current.ownerEpoch).catch(() => undefined);
-          throw serviceError("invalid_state", "Attached session target is unavailable");
-        }
-      }
       pendingCredentials.delete(request.environmentId);
       await tunnels?.stop(request.environmentId, current.ownerEpoch);
       return stageCredential(
@@ -251,9 +288,11 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
     });
   };
 
-  const readPendingCredential = (binding: WorkerCredentialBinding) => {
-    const stopping = options.isStopping();
-    if (stopping) {
+  const readPendingCredential = (
+    binding: WorkerCredentialBinding,
+    claim?: WorkerSessionTurnClaim,
+  ) => {
+    if (options.isStopping()) {
       return undefined;
     }
     const grant = pendingCredentials.get(binding.environmentId);
@@ -278,16 +317,35 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
       credential.ownerEpoch !== binding.ownerEpoch ||
       credential.sessionId !== binding.sessionId ||
       credential.deliveredAtMs !== null ||
-      credential.expiresAtMs <= checkedAtMs
+      credential.expiresAtMs <= checkedAtMs ||
+      (grant.turnClaim === undefined) !== (claim === undefined) ||
+      (claim !== undefined && hashWorkerCredential(grant.credential, claim) !== credentialHash)
     ) {
       return undefined;
     }
     return { checkedAtMs, credentialHash, grant };
   };
 
-  const acquireTurnCredential = (binding: WorkerCredentialBinding & { sessionId: string }) =>
-    withLock(binding.environmentId, async () => {
-      const pending = readPendingCredential(binding)?.grant;
+  const bindingForClaim = (claim: WorkerSessionTurnClaim) => {
+    if (claim.owner.kind !== "worker") {
+      throw serviceError("invalid_state", "Worker turn credential claim is not worker-owned");
+    }
+    return {
+      environmentId: claim.owner.environmentId,
+      ownerEpoch: claim.owner.ownerEpoch,
+      sessionId: claim.sessionId,
+    };
+  };
+
+  const acquireTurnCredential = (claim: WorkerSessionTurnClaim) => {
+    const binding = bindingForClaim(claim);
+    return withLock(binding.environmentId, async () => {
+      await store.ready();
+      const placementStore = options.placementStore;
+      if (!placementStore || !validateTurnClaim(claim)) {
+        throw serviceError("invalid_state", "Worker turn credential claim is not authoritative");
+      }
+      const pending = readPendingCredential(binding, claim)?.grant;
       if (pending) {
         return pending;
       }
@@ -302,10 +360,15 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
         throw serviceError("invalid_state", "Worker session credential owner is not attached");
       }
       const previous = store.getCredential(binding.environmentId);
-      const minted = mintCredentialLocked(binding);
+      const ackedSeq =
+        previous?.sessionId === binding.sessionId
+          ? placementStore.readWorkerTurnLiveAckCursor(claim)
+          : undefined;
+      const minted = await mintCredentialLocked(binding, claim);
       const grant = stageCredential(minted.grant);
-      if (previous?.sessionId === binding.sessionId) {
+      if (previous && ackedSeq !== undefined) {
         options.liveEvents?.rotateCredential({
+          ackedSeq,
           credentialHash: minted.credentialHash,
           environmentId: binding.environmentId,
           newProcessTurn: true,
@@ -316,19 +379,29 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
       }
       return grant;
     });
+  };
 
-  const acknowledgeCredentialDelivery = (claim: WorkerCredentialDeliveryClaim): boolean => {
-    const pending = readPendingCredential(claim);
-    if (!pending || pending.grant.deliveryId !== claim.deliveryId) {
+  const acknowledgeCredentialDelivery = async (grant: MintedWorkerCredential): Promise<boolean> => {
+    await store.ready();
+    if (grant.turnClaim && !validateTurnClaim(grant.turnClaim)) {
       return false;
     }
-    store.markCredentialDelivered({
-      ...claim,
+    const pending = readPendingCredential(grant, grant.turnClaim);
+    if (!pending || pending.grant.deliveryId !== grant.deliveryId) {
+      return false;
+    }
+    await store.markCredentialDelivered({
+      environmentId: grant.environmentId,
+      ownerEpoch: grant.ownerEpoch,
+      sessionId: grant.sessionId,
       credentialHash: pending.credentialHash,
       deliveredAtMs: pending.checkedAtMs,
+      ...(grant.turnClaim ? { assertCurrent: () => assertTurnClaim(grant.turnClaim!) } : {}),
     });
-    pendingCredentials.delete(claim.environmentId);
-    return true;
+    if (pendingCredentials.get(grant.environmentId)?.deliveryId === grant.deliveryId) {
+      pendingCredentials.delete(grant.environmentId);
+    }
+    return !grant.turnClaim || validateTurnClaim(grant.turnClaim);
   };
 
   return {
@@ -337,12 +410,8 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
     attachSession,
     clear: () => pendingCredentials.clear(),
     clearEnvironment: (environmentId: string) => pendingCredentials.delete(environmentId),
-    credentialExpiry,
-    credentialMaterial,
+    commitReady,
     ensurePendingCredential,
-    grantFrom,
-    readPendingCredential,
-    stageCredential,
     takeMintedCredential: (binding: WorkerCredentialBinding) =>
       readPendingCredential(binding)?.grant,
   };

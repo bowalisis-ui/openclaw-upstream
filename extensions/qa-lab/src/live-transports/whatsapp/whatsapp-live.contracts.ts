@@ -1,10 +1,9 @@
-// QA Lab WhatsApp live domain contracts.
 import type {
   WhatsAppQaDriverObservedMessage,
   WhatsAppQaDriverSession,
 } from "@openclaw/whatsapp/api.js";
-import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
-import type { startQaGatewayChild } from "../../gateway-child.js";
+import type { ChannelApprovalKind } from "openclaw/plugin-sdk/approval-handler-runtime";
+import type { QaGatewayChild } from "../../gateway-child.js";
 
 export type WhatsAppQaRuntimeEnv = {
   driverAuthArchiveBase64: string;
@@ -14,14 +13,9 @@ export type WhatsAppQaRuntimeEnv = {
   groupJid?: string;
 };
 
-export type WhatsAppQaApprovalKind = "exec" | "plugin";
 export type WhatsAppQaApprovalDecision = "allow-once" | "deny";
 type WhatsAppQaApprovalDecisionMode = "reaction" | "rpc";
 type WhatsAppQaScenarioPosture = "direct-gateway" | "native-approval" | "user-path";
-
-export function toWhatsAppQaError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(formatErrorMessage(error));
-}
 
 type WhatsAppQaMessageSendMode =
   | {
@@ -34,12 +28,8 @@ type WhatsAppQaMessageSendMode =
       mediaType: string;
     };
 
-export type WhatsAppQaGateway = Awaited<ReturnType<typeof startQaGatewayChild>>;
-export type WhatsAppQaGatewayRuntime = Pick<
-  WhatsAppQaGateway,
-  "call" | "restart" | "workspaceDir"
-> &
-  Partial<Pick<WhatsAppQaGateway, "logs" | "token" | "wsUrl">>;
+export type WhatsAppQaGatewayRuntime = Pick<QaGatewayChild, "call" | "restart" | "workspaceDir"> &
+  Partial<Pick<QaGatewayChild, "logs" | "token" | "wsUrl">>;
 export type WhatsAppQaGatewayCallContext = {
   gateway: Pick<WhatsAppQaGatewayRuntime, "call">;
   gatewayTarget: string;
@@ -71,7 +61,6 @@ export type WhatsAppQaMessageScenarioContext = {
   sutPhoneE164: string;
   target: string;
   targetKind: "dm" | "group";
-  waitForReady: () => Promise<void>;
 };
 
 type WhatsAppQaResolvedScenarioTarget =
@@ -153,7 +142,7 @@ export type WhatsAppQaMessageScenarioRun = {
 };
 
 export type WhatsAppQaApprovalScenarioRun = {
-  approvalKind: WhatsAppQaApprovalKind;
+  approvalKind: ChannelApprovalKind;
   decision: WhatsAppQaApprovalDecision;
   decisionMode?: WhatsAppQaApprovalDecisionMode;
   kind: "approval";

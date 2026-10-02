@@ -1,6 +1,6 @@
-/** Classifies ACP tool permission requests into auto-approved and prompt-required risk buckets. */
 import { homedir } from "node:os";
 import path from "node:path";
+import { trySafeFileURLToPath } from "@openclaw/fs-safe/advanced";
 import { asOptionalRecord as asRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -30,7 +30,7 @@ const CONTROL_PLANE_TOOL_IDS = new Set([
   "session_status",
 ]);
 
-export type AcpApprovalClass =
+type AcpApprovalClass =
   | "readonly_scoped"
   | "readonly_search"
   | "mutating"
@@ -169,11 +169,10 @@ function resolveAbsoluteScopedPath(value: string, cwd: string): string | undefin
   if (!candidate) {
     return undefined;
   }
-  if (candidate.startsWith("file://")) {
-    try {
-      const parsed = new URL(candidate);
-      candidate = decodeURIComponent(parsed.pathname || "");
-    } catch {
+  // Parse every file-scheme spelling first; alternate URL forms otherwise look cwd-relative.
+  if (/^file:/i.test(candidate)) {
+    candidate = trySafeFileURLToPath(candidate) ?? "";
+    if (!candidate) {
       return undefined;
     }
   }

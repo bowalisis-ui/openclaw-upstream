@@ -1,41 +1,43 @@
-// Payload fallback tests cover fallback prompt payloads for isolated cron runs.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import {
+  runFallbackModelAttempt,
+  runInitialModelFallbackAttempt,
+  type TestModelFallbackRunnerParams,
+} from "../../agents/test-helpers/model-fallback-runner.test-support.js";
+import {
+  SKILL_WORKSHOP_MAINTENANCE_PROMPT,
+  SKILL_WORKSHOP_MAINTENANCE_TOOLS,
+} from "../../skills/workshop/maintenance-prompt.js";
 import { makeIsolatedAgentJobFixture, makeIsolatedAgentParamsFixture } from "./job-fixtures.js";
 import { setupRunCronIsolatedAgentTurnSuite } from "./run.suite-helpers.js";
 import {
-  classifyEmbeddedAgentRunResultForModelFallbackMock,
   isCliProviderMock,
   loadRunCronIsolatedAgentTurn,
-  mergeEmbeddedAgentRunResultForModelFallbackExhaustionMock,
   mockRunCronFallbackPassthrough,
   patchSessionEntryMock,
   resolveAgentConfigMock,
   resolveConfiguredModelRefMock,
-  resolveCliRuntimeExecutionProviderMock,
   resolveEffectiveAgentRuntimeMock,
   resolveAgentModelFallbacksOverrideMock,
   runCliAgentMock,
   runEmbeddedAgentMock,
   runWithModelFallbackMock,
+  pickLastNonEmptyTextFromPayloadsMock,
+  resolveCronPayloadOutcomeMock,
 } from "./run.test-harness.js";
+
+// Payload fallback tests cover fallback prompt payloads for isolated cron runs.
 
 const runCronIsolatedAgentTurn = await loadRunCronIsolatedAgentTurn();
 
 function requireModelFallbackRequest(): {
-  classifyResult?: (params: { provider: string; model: string; result: unknown }) => unknown;
   fallbacksOverride?: string[];
-  mergeExhaustedResult?: (params: { latestResult: unknown; preferredResult: unknown }) => unknown;
   provider?: string;
   model?: string;
 } {
   const request = runWithModelFallbackMock.mock.calls[0]?.[0] as
     | {
-        classifyResult?: (params: { provider: string; model: string; result: unknown }) => unknown;
         fallbacksOverride?: string[];
-        mergeExhaustedResult?: (params: {
-          latestResult: unknown;
-          preferredResult: unknown;
-        }) => unknown;
         provider?: string;
         model?: string;
       }
@@ -73,42 +75,18 @@ describe("runCronIsolatedAgentTurn — payload.fallbacks", () => {
     expect(request?.prompt).not.toContain("[object Object]");
   });
 
-  it.each([
-    {
-      name: "passes payload.fallbacks as fallbacksOverride when defined",
-      payload: {
-        kind: "agentTurn",
-        message: "test",
-        fallbacks: ["anthropic/claude-sonnet-4-6", "openai/gpt-5"],
-      },
-      expectedFallbacks: ["anthropic/claude-sonnet-4-6", "openai/gpt-5"],
-    },
-    {
-      name: "falls back to agent-level fallbacks when payload.fallbacks is undefined",
-      payload: { kind: "agentTurn", message: "test" },
-      agentFallbacks: ["openai/gpt-4o"],
-      expectedFallbacks: ["openai/gpt-4o"],
-    },
-    {
-      name: "payload.fallbacks=[] disables fallbacks even when agent config has them",
-      payload: { kind: "agentTurn", message: "test", fallbacks: [] },
-      agentFallbacks: ["openai/gpt-4o"],
-      expectedFallbacks: [],
-    },
-  ])("$name", async ({ payload, agentFallbacks, expectedFallbacks }) => {
-    if (agentFallbacks) {
-      resolveAgentModelFallbacksOverrideMock.mockReturnValue(agentFallbacks);
-    }
-
+  it("payload.fallbacks=[] disables configured agent fallbacks", async () => {
+    resolveAgentModelFallbacksOverrideMock.mockReturnValue(["openai/gpt-4o"]);
     const result = await runCronIsolatedAgentTurn(
       makeIsolatedAgentParamsFixture({
-        job: makeIsolatedAgentJobFixture({ payload }),
+        job: makeIsolatedAgentJobFixture({
+          payload: { kind: "agentTurn", message: "test", fallbacks: [] },
+        }),
       }),
     );
-
     expect(result.status).toBe("ok");
     expect(runWithModelFallbackMock).toHaveBeenCalledOnce();
-    expect(requireModelFallbackRequest().fallbacksOverride).toEqual(expectedFallbacks);
+    expect(requireModelFallbackRequest().fallbacksOverride).toEqual([]);
   });
 
   it("keeps pre-envelope app-less default caps free of recovery prompt changes", async () => {
@@ -154,43 +132,8 @@ describe("runCronIsolatedAgentTurn — payload.fallbacks", () => {
     );
   });
 
-  it("classifies isolated cron results for model fallback", async () => {
-    const classification = { reason: "format", code: "empty_result" };
-    classifyEmbeddedAgentRunResultForModelFallbackMock.mockReturnValue(classification);
-
-    const result = await runCronIsolatedAgentTurn(
-      makeIsolatedAgentParamsFixture({
-        job: makeIsolatedAgentJobFixture({
-          payload: { kind: "agentTurn", message: "test" },
-        }),
-      }),
-    );
-
-    expect(result.status).toBe("ok");
-    const fallbackRequest = requireModelFallbackRequest();
-    const embeddedResult = { payloads: [], meta: { agentMeta: {} } };
-    expect(
-      fallbackRequest.classifyResult?.({
-        provider: "anthropic",
-        model: "claude-sonnet-4-6",
-        result: embeddedResult,
-      }),
-    ).toBe(classification);
-    expect(classifyEmbeddedAgentRunResultForModelFallbackMock).toHaveBeenCalledWith({
-      provider: "anthropic",
-      model: "claude-sonnet-4-6",
-      result: embeddedResult,
-    });
-    expect(fallbackRequest.mergeExhaustedResult).toBe(
-      mergeEmbeddedAgentRunResultForModelFallbackExhaustionMock,
-    );
-  });
-
   it("plans Anthropic fallbacks canonically while executing compatible attempts through Claude CLI", async () => {
     isCliProviderMock.mockImplementation((provider: string) => provider === "claude-cli");
-    resolveCliRuntimeExecutionProviderMock.mockImplementation(
-      ({ provider }: { provider: string }) => (provider === "anthropic" ? "claude-cli" : undefined),
-    );
     resolveConfiguredModelRefMock.mockReturnValue({
       provider: "anthropic",
       model: "claude-opus-4-6",
@@ -202,9 +145,14 @@ describe("runCronIsolatedAgentTurn — payload.fallbacks", () => {
         meta: { agentMeta: {} },
       };
     });
-    runWithModelFallbackMock.mockImplementation(async ({ provider, model, run }) => {
-      const firstResult = await run(provider, model);
-      const secondResult = await run("anthropic", "claude-sonnet-4-6");
+    runWithModelFallbackMock.mockImplementation(async (params: TestModelFallbackRunnerParams) => {
+      const firstResult = await runInitialModelFallbackAttempt(params);
+      const secondResult = await runFallbackModelAttempt(
+        params,
+        "anthropic",
+        "claude-sonnet-4-6",
+        "unknown",
+      );
       return {
         result: secondResult ?? firstResult,
         provider: "anthropic",
@@ -289,9 +237,9 @@ describe("runCronIsolatedAgentTurn — payload.fallbacks", () => {
       provider === "openai" ? "codex" : "openclaw",
     );
     runEmbeddedAgentMock.mockRejectedValueOnce(new Error("primary failed"));
-    runWithModelFallbackMock.mockImplementation(async ({ provider, model, run }) => {
-      await expect(run(provider, model)).rejects.toThrow("primary failed");
-      return await run("anthropic", "claude-sonnet-4-6");
+    runWithModelFallbackMock.mockImplementation(async (params: TestModelFallbackRunnerParams) => {
+      await expect(runInitialModelFallbackAttempt(params)).rejects.toThrow("primary failed");
+      return await runFallbackModelAttempt(params, "anthropic", "claude-sonnet-4-6", "unknown");
     });
 
     const result = await runCronIsolatedAgentTurn(
@@ -324,41 +272,6 @@ describe("runCronIsolatedAgentTurn — payload.fallbacks", () => {
         expect.objectContaining({ modelProvider: "openai", model: "gpt-5.4" }),
       );
     }
-  });
-
-  it("forwards subagent fallbacks into the embedded runner for internal failover decisions", async () => {
-    mockRunCronFallbackPassthrough();
-
-    const result = await runCronIsolatedAgentTurn(
-      makeIsolatedAgentParamsFixture({
-        cfg: {
-          agents: {
-            defaults: {
-              model: {
-                primary: "anthropic/claude-opus-4-6",
-                fallbacks: ["openai/gpt-5.4"],
-              },
-              subagents: {
-                model: {
-                  primary: "kimi/kimi-code",
-                  fallbacks: ["openai/gpt-5.2", "zai/glm-5"],
-                },
-              },
-            },
-          },
-        },
-      }),
-    );
-
-    expect(result.status).toBe("ok");
-    expect(requireModelFallbackRequest().fallbacksOverride).toEqual([
-      "openai/gpt-5.2",
-      "zai/glm-5",
-    ]);
-    expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
-    expect(runEmbeddedAgentMock.mock.calls[0]?.[0]).toMatchObject({
-      modelFallbacksOverride: ["openai/gpt-5.2", "zai/glm-5"],
-    });
   });
 
   it("uses default subagent fallbacks ahead of a named agent's primary through the run path", async () => {
@@ -405,5 +318,186 @@ describe("runCronIsolatedAgentTurn — payload.fallbacks", () => {
     expect(runEmbeddedAgentMock.mock.calls[0]?.[0]).toMatchObject({
       modelFallbacksOverride: ["openai/gpt-5.2", "zai/glm-5"],
     });
+  });
+});
+
+// Rooted cron reviews preserve their host-selected root and instructions across runtimes.
+
+const executionRoot = "/tmp/workshop-skills";
+
+describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
+  setupRunCronIsolatedAgentTurnSuite();
+
+  it("rejects a rooted turn before an unsupported harness starts", async () => {
+    resolveEffectiveAgentRuntimeMock.mockReturnValue("unsupported-harness");
+    mockRunCronFallbackPassthrough();
+
+    const result = await runCronIsolatedAgentTurn(
+      makeIsolatedAgentParamsFixture({ executionRoot }),
+    );
+
+    expect(result).toMatchObject({
+      status: "error",
+      admissionDisposition: "rejected",
+    });
+    expect(runCliAgentMock).not.toHaveBeenCalled();
+    expect(runEmbeddedAgentMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves rooted host constraints when dispatching a Codex review", async () => {
+    const skillsSnapshot = { prompt: "Explicit safe instructions", skills: [{ name: "safe" }] };
+    resolveEffectiveAgentRuntimeMock.mockReturnValue("codex");
+    isCliProviderMock.mockReturnValue(false);
+    mockRunCronFallbackPassthrough();
+
+    const result = await runCronIsolatedAgentTurn(
+      makeIsolatedAgentParamsFixture({
+        executionRoot,
+        skillsSnapshot,
+        job: {
+          payload: {
+            kind: "agentTurn",
+            message: SKILL_WORKSHOP_MAINTENANCE_PROMPT,
+            toolsAllow: [...SKILL_WORKSHOP_MAINTENANCE_TOOLS],
+          },
+          delivery: { mode: "none" },
+        },
+      }),
+    );
+
+    expect(result.status).toBe("ok");
+    expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
+    expect(runEmbeddedAgentMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceDir: executionRoot,
+        cwd: executionRoot,
+        sessionRoot: executionRoot,
+        requireWorkspaceOnly: true,
+        requireWritableSandbox: true,
+        skillsSnapshot,
+        toolsAllow: [...SKILL_WORKSHOP_MAINTENANCE_TOOLS],
+        trigger: "cron",
+      }),
+    );
+    expect(runCliAgentMock).not.toHaveBeenCalled();
+  });
+
+  it("runs a rooted review with a Claude CLI primary and returns its report", async () => {
+    const helpers = await vi.importActual<typeof import("./helpers.js")>("./helpers.js");
+    pickLastNonEmptyTextFromPayloadsMock.mockImplementation(
+      helpers.pickLastNonEmptyTextFromPayloads,
+    );
+    resolveCronPayloadOutcomeMock.mockImplementation(helpers.resolveCronPayloadOutcome);
+    const skillsSnapshot = { prompt: "", skills: [] };
+    resolveConfiguredModelRefMock.mockReturnValue({
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+    });
+    resolveEffectiveAgentRuntimeMock.mockReturnValue("claude-cli");
+    isCliProviderMock.mockImplementation((provider: string) => provider === "claude-cli");
+    runCliAgentMock.mockImplementation(async (params) => {
+      params.onExecutionStarted?.();
+      return {
+        payloads: [{ text: "Workshop review complete: retained useful procedures." }],
+        meta: { agentMeta: {} },
+      };
+    });
+    mockRunCronFallbackPassthrough();
+    const result = await runCronIsolatedAgentTurn(
+      makeIsolatedAgentParamsFixture({
+        executionRoot,
+        skillsSnapshot,
+        job: {
+          payload: {
+            kind: "agentTurn",
+            message: SKILL_WORKSHOP_MAINTENANCE_PROMPT,
+            toolsAllow: [...SKILL_WORKSHOP_MAINTENANCE_TOOLS],
+          },
+          delivery: { mode: "none" },
+        },
+        cfg: {
+          agents: {
+            defaults: {
+              model: "anthropic/claude-opus-4-6",
+              models: { "anthropic/claude-opus-4-6": { agentRuntime: { id: "claude-cli" } } },
+            },
+          },
+        },
+      }),
+    );
+    expect(result).toMatchObject({
+      status: "ok",
+      outputText: "Workshop review complete: retained useful procedures.",
+    });
+    expect(runCliAgentMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "claude-cli",
+        rootedExecution: { root: executionRoot },
+        workspaceDir: executionRoot,
+        skillsSnapshot,
+        trigger: "cron",
+        toolsAllow: [...SKILL_WORKSHOP_MAINTENANCE_TOOLS],
+      }),
+    );
+    expect(runEmbeddedAgentMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the rooted instruction snapshot while skipping an unsupported fallback", async () => {
+    const onExecutionStarted = vi.fn();
+    const onExecutionPhase = vi.fn();
+    const skillsSnapshot = { prompt: "Explicit safe instructions", skills: [{ name: "safe" }] };
+    resolveEffectiveAgentRuntimeMock.mockImplementation(({ modelId }: { modelId: string }) =>
+      modelId === "gpt-5.4" || modelId === "gpt-5" ? "openclaw" : "unsupported-harness",
+    );
+    isCliProviderMock.mockReturnValue(false);
+    runEmbeddedAgentMock.mockImplementation(
+      async (params: {
+        model?: string;
+        onExecutionStarted?: () => void;
+        onExecutionPhase?: (info: { phase: "runtime_plugins" }) => void;
+      }) => {
+        params.onExecutionStarted?.();
+        params.onExecutionPhase?.({ phase: "runtime_plugins" });
+        if (params.model === "gpt-5.4") {
+          throw new Error("embedded primary failed");
+        }
+        return { payloads: [{ text: "later embedded succeeded" }], meta: { agentMeta: {} } };
+      },
+    );
+    runWithModelFallbackMock.mockImplementation(async (params: TestModelFallbackRunnerParams) => {
+      await expect(runInitialModelFallbackAttempt(params)).rejects.toThrow(
+        "embedded primary failed",
+      );
+      await expect(
+        runFallbackModelAttempt(params, "claude-cli", "claude-opus-4-6", "unknown"),
+      ).rejects.toThrow("collection review requires a runtime that enforces the Workshop root");
+      const result = await runFallbackModelAttempt(params, "openai", "gpt-5", "unknown");
+      return { result, provider: "openai", model: "gpt-5", attempts: [] };
+    });
+
+    const result = await runCronIsolatedAgentTurn(
+      makeIsolatedAgentParamsFixture({
+        executionRoot,
+        skillsSnapshot,
+        onExecutionStarted,
+        onExecutionPhase,
+      }),
+    );
+
+    expect(result.status).toBe("ok");
+    expect(onExecutionStarted).toHaveBeenCalledTimes(2);
+    expect(onExecutionStarted.mock.calls.map(([info]) => info)).toEqual([
+      expect.objectContaining({ provider: "openai", model: "gpt-5.4" }),
+      expect.objectContaining({ provider: "openai", model: "gpt-5", isFallback: true }),
+    ]);
+    expect(onExecutionPhase.mock.calls.map(([info]) => info)).toEqual([
+      expect.objectContaining({ provider: "openai", model: "gpt-5.4" }),
+      expect.objectContaining({ provider: "openai", model: "gpt-5" }),
+    ]);
+    expect(runEmbeddedAgentMock).toHaveBeenCalledTimes(2);
+    expect(runCliAgentMock).not.toHaveBeenCalled();
+    expect(runEmbeddedAgentMock.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ provider: "openai", model: "gpt-5", skillsSnapshot }),
+    );
   });
 });

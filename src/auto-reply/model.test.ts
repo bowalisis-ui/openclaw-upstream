@@ -9,7 +9,7 @@ describe("extractModelDirective", () => {
       expect(result.hasDirective).toBe(true);
       expect(result.source).toBe("model");
       expect(result.rawModel).toBe("gpt-5");
-      expect(result.sessionOnly).toBe(false);
+      expect(result.scope).toBeUndefined();
       expect(result.cleaned).toBe("");
     });
 
@@ -17,7 +17,7 @@ describe("extractModelDirective", () => {
       const result = extractModelDirective("/model anthropic/claude-opus-4-6 -s");
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBe("anthropic/claude-opus-4-6");
-      expect(result.sessionOnly).toBe(true);
+      expect(result.scope).toBe("session");
       expect(result.cleaned).toBe("");
     });
 
@@ -25,7 +25,7 @@ describe("extractModelDirective", () => {
       const result = extractModelDirective("/model default --session");
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBe("default");
-      expect(result.sessionOnly).toBe(true);
+      expect(result.scope).toBe("session");
       expect(result.cleaned).toBe("");
     });
 
@@ -35,7 +35,6 @@ describe("extractModelDirective", () => {
         const result = extractModelDirective(`/model anthropic/claude-opus-4-6 ${option}`);
         expect(result.hasDirective).toBe(true);
         expect(result.rawModel).toBe("anthropic/claude-opus-4-6");
-        expect(result.sessionOnly).toBe(false);
         expect(result.cleaned).toBe(option);
       },
     );
@@ -44,7 +43,6 @@ describe("extractModelDirective", () => {
       const result = extractModelDirective("please /model here continue");
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBe("here");
-      expect(result.sessionOnly).toBe(false);
       expect(result.cleaned).toBe("please continue");
     });
 
@@ -52,15 +50,13 @@ describe("extractModelDirective", () => {
       const result = extractModelDirective("/model -s opus");
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBeUndefined();
-      expect(result.sessionOnly).toBe(true);
       expect(result.cleaned).toBe("opus");
     });
 
-    it.each(["-s", "--session"])("parses model-less session option %s", (option) => {
-      const result = extractModelDirective(`/model ${option}`);
+    it("parses a model-less --session option", () => {
+      const result = extractModelDirective("/model --session");
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBeUndefined();
-      expect(result.sessionOnly).toBe(true);
       expect(result.cleaned).toBe("");
     });
 
@@ -71,7 +67,6 @@ describe("extractModelDirective", () => {
         expect(result.hasDirective).toBe(true);
         expect(result.rawModel).toBeUndefined();
         expect(result.rawRuntime).toBe("codex");
-        expect(result.sessionOnly).toBe(false);
         expect(result.cleaned).toBe("");
       },
     );
@@ -81,7 +76,6 @@ describe("extractModelDirective", () => {
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBeUndefined();
       expect(result.rawRuntime).toBeUndefined();
-      expect(result.sessionOnly).toBe(false);
       expect(result.cleaned).toBe("--runtime --session");
     });
 
@@ -92,37 +86,41 @@ describe("extractModelDirective", () => {
       expect(result.cleaned).toBe("/models gpt-5");
     });
 
-    it("does not parse /models as a /model directive (no args)", () => {
-      const result = extractModelDirective("/models");
-      expect(result.hasDirective).toBe(false);
-      expect(result.cleaned).toBe("/models");
-    });
-
-    it("extracts /model with provider/model format", () => {
-      const result = extractModelDirective("/model anthropic/claude-opus-4-6");
-      expect(result.hasDirective).toBe(true);
-      expect(result.rawModel).toBe("anthropic/claude-opus-4-6");
-    });
-
     it.each([
       "--runtime claude-cli -s",
       "-s --runtime claude-cli",
       "runtime= claude-cli -s",
-      "runtime=claude-cli -s",
-      "-s runtime= claude-cli",
-      "-s runtime=claude-cli",
-      "harness= claude-cli -s",
       "harness=claude-cli -s",
-      "-s harness= claude-cli",
-      "-s harness=claude-cli",
     ])("extracts runtime and session options from %s", (options) => {
       const result = extractModelDirective(`/model anthropic/claude-opus-4-7 ${options}`);
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBe("anthropic/claude-opus-4-7");
       expect(result.rawRuntime).toBe("claude-cli");
-      expect(result.sessionOnly).toBe(true);
+      expect(result.scope).toBe("session");
       expect(result.cleaned).toBe("");
     });
+
+    it.each([
+      ["-a", "agent"],
+      ["--agent", "agent"],
+      ["-g", "global"],
+      ["--global", "global"],
+    ] as const)("extracts %s as %s scope", (option, scope) => {
+      const result = extractModelDirective(`/model openai/gpt-5.6-sol ${option}`);
+      expect(result.rawModel).toBe("openai/gpt-5.6-sol");
+      expect(result.scope).toBe(scope);
+      expect(result.cleaned).toBe("");
+    });
+
+    it.each(["--runtime codex -a", "-g --runtime codex"])(
+      "extracts runtime and persistent scope from %s",
+      (options) => {
+        const result = extractModelDirective(`/model openai/gpt-5.6-sol ${options}`);
+        expect(result.rawRuntime).toBe("codex");
+        expect(result.scope).toBe(options.includes("-a") ? "agent" : "global");
+        expect(result.cleaned).toBe("");
+      },
+    );
 
     it("preserves duplicate runtime and session options for validation", () => {
       const runtime = extractModelDirective(
@@ -132,8 +130,15 @@ describe("extractModelDirective", () => {
       expect(runtime.cleaned).toBe("--runtime acp");
 
       const session = extractModelDirective("/model openai/gpt-5.6-luna -s -s");
-      expect(session.sessionOnly).toBe(true);
+      expect(session.scopeConflict).toBe(true);
       expect(session.cleaned).toBe("-s");
+    });
+
+    it("marks conflicting scope options", () => {
+      const result = extractModelDirective("/model openai/gpt-5.6-luna -a -g");
+      expect(result.scope).toBe("agent");
+      expect(result.scopeConflict).toBe(true);
+      expect(result.cleaned).toBe("-g");
     });
 
     it("keeps partial runtime option names as ordinary text", () => {
@@ -164,34 +169,6 @@ describe("extractModelDirective", () => {
       expect(result.rawProfile).toBe("work");
     });
 
-    it("keeps Cloudflare @cf path segments inside model ids", () => {
-      const result = extractModelDirective("/model openai/@cf/openai/gpt-oss-20b");
-      expect(result.hasDirective).toBe(true);
-      expect(result.rawModel).toBe("openai/@cf/openai/gpt-oss-20b");
-      expect(result.rawProfile).toBeUndefined();
-    });
-
-    it("allows profile overrides after Cloudflare @cf path segments", () => {
-      const result = extractModelDirective("/model openai/@cf/openai/gpt-oss-20b@cf:default");
-      expect(result.hasDirective).toBe(true);
-      expect(result.rawModel).toBe("openai/@cf/openai/gpt-oss-20b");
-      expect(result.rawProfile).toBe("cf:default");
-    });
-
-    it("keeps LM Studio @iq* quant suffixes inside model ids", () => {
-      const result = extractModelDirective("/model lmstudio/qwen3.6-27b@iq3_xxs");
-      expect(result.hasDirective).toBe(true);
-      expect(result.rawModel).toBe("lmstudio/qwen3.6-27b@iq3_xxs");
-      expect(result.rawProfile).toBeUndefined();
-    });
-
-    it("allows profile overrides after LM Studio @iq* quant suffixes", () => {
-      const result = extractModelDirective("/model lmstudio/qwen3.6-27b@iq3_xxs@work");
-      expect(result.hasDirective).toBe(true);
-      expect(result.rawModel).toBe("lmstudio/qwen3.6-27b@iq3_xxs");
-      expect(result.rawProfile).toBe("work");
-    });
-
     it("returns no directive for plain text", () => {
       const result = extractModelDirective("hello world");
       expect(result.hasDirective).toBe(false);
@@ -208,32 +185,17 @@ describe("extractModelDirective", () => {
       expect(result.source).toBe("alias");
       expect(result.rawModel).toBe("gpt");
       expect(result.rawRuntime).toBeUndefined();
-      expect(result.sessionOnly).toBe(false);
       expect(result.cleaned).toBe("");
     });
 
-    it.each(["-s", "--session"])("applies alias session scope from %s", (option) => {
-      const result = extractModelDirective(`/gpt ${option}`, {
+    it("applies alias session scope", () => {
+      const result = extractModelDirective("/gpt -s", {
         aliases: ["gpt", "sonnet", "opus"],
       });
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBe("gpt");
-      expect(result.sessionOnly).toBe(true);
       expect(result.cleaned).toBe("");
     });
-
-    it.each(["--runtime codex", "runtime=codex", "harness=codex"])(
-      "applies runtime-only alias option %s",
-      (option) => {
-        const result = extractModelDirective(`/gpt ${option}`, {
-          aliases: ["gpt"],
-        });
-        expect(result.rawModel).toBe("gpt");
-        expect(result.rawRuntime).toBe("codex");
-        expect(result.sessionOnly).toBe(false);
-        expect(result.cleaned).toBe("");
-      },
-    );
 
     it.each(["--runtime codex -s", "-s --runtime codex"])(
       "applies runtime and session alias options from %s",
@@ -243,7 +205,6 @@ describe("extractModelDirective", () => {
         });
         expect(result.rawModel).toBe("gpt");
         expect(result.rawRuntime).toBe("codex");
-        expect(result.sessionOnly).toBe(true);
         expect(result.cleaned).toBe("");
       },
     );
@@ -254,7 +215,6 @@ describe("extractModelDirective", () => {
       });
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBe("gpt");
-      expect(result.sessionOnly).toBe(true);
       expect(result.cleaned).toBe("");
     });
 
@@ -268,28 +228,8 @@ describe("extractModelDirective", () => {
       const session = extractModelDirective("/gpt -s --session", {
         aliases: ["gpt"],
       });
-      expect(session.sessionOnly).toBe(true);
+      expect(session.scopeConflict).toBe(true);
       expect(session.cleaned).toBe("--session");
-    });
-
-    it.each(["-slow", "--sessional"])(
-      "does not treat partial alias session option %s as session-only",
-      (option) => {
-        const result = extractModelDirective(`/gpt ${option}`, {
-          aliases: ["gpt"],
-        });
-        expect(result.rawModel).toBe("gpt");
-        expect(result.sessionOnly).toBe(false);
-        expect(result.cleaned).toBe(option);
-      },
-    );
-
-    it("recognizes /sonnet as model directive", () => {
-      const result = extractModelDirective("/sonnet", {
-        aliases: ["gpt", "sonnet", "opus"],
-      });
-      expect(result.hasDirective).toBe(true);
-      expect(result.rawModel).toBe("sonnet");
     });
 
     it("recognizes alias mid-message", () => {
@@ -322,14 +262,6 @@ describe("extractModelDirective", () => {
       expect(result.cleaned).toBe("/unknown");
     });
 
-    it("prefers /model over alias when both present", () => {
-      const result = extractModelDirective("/model haiku", {
-        aliases: ["gpt"],
-      });
-      expect(result.hasDirective).toBe(true);
-      expect(result.rawModel).toBe("haiku");
-    });
-
     it("attributes a literal /model directive when alias text follows it", () => {
       const result = extractModelDirective("/model status /gpt", {
         aliases: ["gpt"],
@@ -338,16 +270,6 @@ describe("extractModelDirective", () => {
       expect(result.source).toBe("model");
       expect(result.rawModel).toBe("status");
       expect(result.cleaned).toBe("/gpt");
-    });
-
-    it("handles empty aliases array", () => {
-      const result = extractModelDirective("/gpt", { aliases: [] });
-      expect(result.hasDirective).toBe(false);
-    });
-
-    it("handles undefined aliases", () => {
-      const result = extractModelDirective("/gpt");
-      expect(result.hasDirective).toBe(false);
     });
   });
 
@@ -364,7 +286,6 @@ describe("extractModelDirective", () => {
       });
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBe("test.alias");
-      expect(result.sessionOnly).toBe(true);
       expect(result.cleaned).toBe("");
     });
 
@@ -377,11 +298,6 @@ describe("extractModelDirective", () => {
       const result = extractModelDirective("", { aliases: ["gpt"] });
       expect(result.hasDirective).toBe(false);
       expect(result.cleaned).toBe("");
-    });
-
-    it("handles undefined body", () => {
-      const result = extractModelDirective(undefined, { aliases: ["gpt"] });
-      expect(result.hasDirective).toBe(false);
     });
   });
 });

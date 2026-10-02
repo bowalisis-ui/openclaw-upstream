@@ -1,15 +1,14 @@
 /** Config loader for model commands with command-scoped secret resolution. */
 import { resolveCommandConfigWithSecrets } from "../../cli/command-config-resolution.js";
-import type { RuntimeEnv } from "../../runtime.js";
+import { getModelsCommandSecretTargetIds } from "../../cli/command-secret-targets.js";
 import {
   getRuntimeConfig,
   getRuntimeConfigSourceSnapshot,
   setRuntimeConfigSnapshot,
   type OpenClawConfig,
-  getModelsCommandSecretTargetIds,
-} from "./load-config.runtime.js";
+} from "../../config/config.js";
+import type { RuntimeEnv } from "../../runtime.js";
 
-/** Source and resolved config pair returned by model command config loading. */
 type LoadedModelsConfig = {
   sourceConfig: OpenClawConfig;
   resolvedConfig: OpenClawConfig;
@@ -43,7 +42,6 @@ export async function loadModelsConfigWithSource(params: {
   };
 }
 
-/** Loads the resolved model command config when callers do not need source metadata. */
 export async function loadModelsConfig(params: {
   commandName: string;
   runtime?: RuntimeEnv;

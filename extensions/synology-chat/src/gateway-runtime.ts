@@ -1,7 +1,7 @@
-// Synology Chat plugin module implements gateway runtime behavior.
 import { DEFAULT_ACCOUNT_ID, type OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { registerPluginHttpRoute } from "openclaw/plugin-sdk/webhook-ingress";
 import { listAccountIds, resolveAccount } from "./accounts.js";
+import { resolveSynologyPublicWebhookRouteKey } from "./hosted-media-route.js";
 import { dispatchSynologyChatInboundEvent } from "./inbound-event.js";
 import type { ResolvedSynologyChatAccount } from "./types.js";
 import {
@@ -24,7 +24,8 @@ type SynologyGatewayStartupIssueCode =
   | "empty-allowlist"
   | "empty-open-allowlist"
   | "inherited-shared-webhook-path"
-  | "duplicate-webhook-path";
+  | "duplicate-webhook-path"
+  | "duplicate-webhook-url";
 type SynologyGatewayStartupIssue = {
   code: SynologyGatewayStartupIssueCode;
   logLevel: "info" | "warn";
@@ -39,24 +40,6 @@ function buildStartupIssue(
   logLevel: "info" | "warn" = "warn",
 ): SynologyGatewayStartupIssue {
   return { code, logLevel, message };
-}
-
-function logStartupIssues(
-  log: SynologyGatewayLog | undefined,
-  issues: SynologyGatewayStartupIssue[],
-) {
-  for (const issue of issues) {
-    const message = `Synology Chat ${issue.message}`;
-    if (issue.logLevel === "info") {
-      log?.info?.(message);
-      continue;
-    }
-    log?.warn?.(message);
-  }
-}
-
-function getRouteKey(account: ResolvedSynologyChatAccount): string {
-  return `${account.accountId}:${account.webhookPath}`;
 }
 
 function createUnknownArgsLogAdapter(
@@ -146,13 +129,35 @@ function collectSynologyGatewayStartupIssues(params: {
     );
   }
 
+  const publicRouteKey = resolveSynologyPublicWebhookRouteKey(account.webhookUrl);
+  if (publicRouteKey) {
+    const conflictingPublicAccounts = accountIds.filter((candidateId) => {
+      if (candidateId === accountId) {
+        return false;
+      }
+      const candidate = resolveAccount(cfg, candidateId);
+      return (
+        candidate.enabled &&
+        resolveSynologyPublicWebhookRouteKey(candidate.webhookUrl) === publicRouteKey
+      );
+    });
+    if (conflictingPublicAccounts.length > 0) {
+      issues.push(
+        buildStartupIssue(
+          "duplicate-webhook-url",
+          `account ${accountId} conflicts on webhookUrl with ${conflictingPublicAccounts.join(", ")}; refusing to start ambiguous public route. Set a unique externally reachable callback URL for each account.`,
+        ),
+      );
+    }
+  }
+
   return issues;
 }
 
-export function collectSynologyGatewayRoutingWarnings(params: {
+export function collectSynologyGatewayRoutingFindings(params: {
   cfg: OpenClawConfig;
   account: ResolvedSynologyChatAccount;
-}): string[] {
+}) {
   return collectSynologyGatewayStartupIssues({
     cfg: params.cfg,
     account: params.account,
@@ -160,9 +165,16 @@ export function collectSynologyGatewayRoutingWarnings(params: {
   })
     .filter(
       (issue) =>
-        issue.code === "inherited-shared-webhook-path" || issue.code === "duplicate-webhook-path",
+        issue.code === "inherited-shared-webhook-path" ||
+        issue.code === "duplicate-webhook-path" ||
+        issue.code === "duplicate-webhook-url",
     )
-    .map((issue) => `- Synology Chat: ${issue.message}`);
+    .map((issue) => ({
+      checkId: `channels.synology-chat.routing.${issue.code}`,
+      severity: issue.code === "duplicate-webhook-url" ? ("critical" as const) : ("warn" as const),
+      title: "Synology Chat security warning",
+      detail: `Synology Chat: ${issue.message}`,
+    }));
 }
 
 export function validateSynologyGatewayAccountStartup(params: {
@@ -173,7 +185,9 @@ export function validateSynologyGatewayAccountStartup(params: {
 }): { ok: true } | { ok: false } {
   const issues = collectSynologyGatewayStartupIssues(params);
   if (issues.length > 0) {
-    logStartupIssues(params.log, issues);
+    for (const issue of issues) {
+      params.log?.[issue.logLevel]?.(`Synology Chat ${issue.message}`);
+    }
     return { ok: false };
   }
   return { ok: true };
@@ -187,7 +201,7 @@ export async function registerSynologyWebhookRoute(params: {
   abortSignal?: AbortSignal;
 }): Promise<() => Promise<void>> {
   const { cfg, account, log } = params;
-  const routeKey = getRouteKey(account);
+  const routeKey = `${account.accountId}:${account.webhookPath}`;
   const previousCleanup = activeRouteCleanups.get(routeKey);
   if (previousCleanup) {
     log?.info?.(`Deregistering stale route before re-registering: ${account.webhookPath}`);
@@ -235,7 +249,13 @@ export async function registerSynologyWebhookRoute(params: {
       accountId: account.accountId,
       log: (msg: string) => log?.info?.(msg),
       throwOnFailure: true,
-      handler,
+      handler: async (req, res) => {
+        const { tryHandleSynologyHostedMediaRequest } = await import("./outbound-media.js");
+        if (await tryHandleSynologyHostedMediaRequest(req, res, account)) {
+          return true;
+        }
+        return await handler(req, res);
+      },
     });
   } catch (error) {
     await ingress.stop();

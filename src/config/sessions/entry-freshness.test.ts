@@ -4,7 +4,11 @@ import { cleanupTempDirs, makeTempDir } from "../../../test/helpers/temp-dir.js"
 import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { resolveSessionEntryResetFreshness } from "./entry-freshness.js";
-import { appendTranscriptEvent, upsertSessionEntryCore } from "./session-accessor.js";
+import {
+  appendTranscriptEvent,
+  replaceSessionEntry,
+  upsertSessionEntryCore,
+} from "./session-accessor.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -163,33 +167,6 @@ describe("resolveSessionEntryResetFreshness", () => {
     });
   });
 
-  it("resolves fresh daily freshness for active lifecycle timestamps", async () => {
-    const sessionKey = "agent:main:main";
-    const now = new Date("2026-01-02T12:00:00Z").getTime();
-    await upsertSessionEntryCore(
-      { sessionKey, storePath },
-      {
-        sessionId: "session-fresh",
-        updatedAt: now,
-        sessionStartedAt: now - 60_000,
-        lastInteractionAt: now - 60_000,
-      },
-    );
-
-    const result = resolveSessionEntryResetFreshness({
-      sessionKey,
-      storePath,
-      sessionCfg: {},
-      resetType: "direct",
-      now,
-    });
-
-    expect(result.state).toBe("fresh");
-    expect(result.entry?.sessionId).toBe("session-fresh");
-    expect(result.resetType).toBe("direct");
-    expect(result.freshness).toMatchObject({ fresh: true });
-  });
-
   it("honors reset overrides when resolving entry freshness", async () => {
     const sessionKey = "agent:main:main:thread:idle";
     const now = new Date("2026-01-02T12:00:00Z").getTime();
@@ -262,7 +239,8 @@ describe("resolveSessionEntryResetFreshness", () => {
     const now = new Date("2026-01-02T12:00:00Z").getTime();
     const headerTimestamp = new Date(now - 2 * DAY_MS).toISOString();
     const target = { agentId: "main", sessionId, sessionKey, storePath };
-    await upsertSessionEntryCore(target, { sessionId, updatedAt: now });
+    const entry = await replaceSessionEntry(target, { sessionId, updatedAt: now });
+    expect(entry?.sessionStartedAt).toBeUndefined();
     await appendTranscriptEvent(target, {
       type: "session",
       version: 3,

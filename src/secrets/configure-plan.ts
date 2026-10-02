@@ -21,7 +21,7 @@ export type ConfigureCandidate = {
   path: string;
   pathSegments: string[];
   label: string;
-  configFile: "openclaw.json" | "auth-profiles.json";
+  configFile: "openclaw.json" | "auth-profile-store";
   expectedResolvedValue: "string" | "string-or-object";
   existingRef?: SecretRef;
   isDerived?: boolean;
@@ -42,7 +42,7 @@ type ConfigureProviderChanges = {
   deletes: string[];
 };
 
-function getSecretProviders(config: OpenClawConfig): Record<string, SecretProviderConfig> {
+export function getSecretProviders(config: OpenClawConfig): Record<string, SecretProviderConfig> {
   if (!isRecord(config.secrets?.providers)) {
     return {};
   }
@@ -50,7 +50,7 @@ function getSecretProviders(config: OpenClawConfig): Record<string, SecretProvid
 }
 
 function configureCandidateSortKey(candidate: ConfigureCandidate): string {
-  if (candidate.configFile === "auth-profiles.json") {
+  if (candidate.configFile === "auth-profile-store") {
     const agentId = candidate.agentId ?? "";
     return `auth-profiles:${agentId}:${candidate.path}`;
   }
@@ -84,9 +84,6 @@ export function buildConfigureCandidatesForScope(params: {
 }): ConfigureCandidate[] {
   const authoredConfig = params.authoredOpenClawConfig ?? params.config;
 
-  const hasPathInAuthoredConfig = (pathSegments: string[]): boolean =>
-    hasPath(authoredConfig, pathSegments);
-
   const openclawCandidates = discoverConfigSecretTargets(params.config)
     .filter((entry) => entry.entry.includeInConfigure)
     .map((entry) => {
@@ -95,9 +92,9 @@ export function buildConfigureCandidatesForScope(params: {
         refValue: entry.refValue,
         defaults: params.config.secrets?.defaults,
       });
-      const pathExists = hasPathInAuthoredConfig(entry.pathSegments);
+      const pathExists = hasPath(authoredConfig, entry.pathSegments);
       const refPathExists = entry.refPathSegments
-        ? hasPathInAuthoredConfig(entry.refPathSegments)
+        ? hasPath(authoredConfig, entry.refPathSegments)
         : false;
       // Generated/defaulted target paths are still configurable, but mark them derived so
       // prompts can distinguish authored config from normalized aliases.
@@ -117,16 +114,13 @@ export function buildConfigureCandidatesForScope(params: {
       );
     });
 
+  const authProfiles = params.authProfiles;
   const authCandidates =
-    params.authProfiles === undefined
+    authProfiles === undefined
       ? []
-      : discoverAuthProfileSecretTargets(params.authProfiles.store)
+      : discoverAuthProfileSecretTargets(authProfiles.store)
           .filter((entry) => entry.entry.includeInConfigure)
           .map((entry) => {
-            const authProfiles = params.authProfiles;
-            if (!authProfiles) {
-              throw new Error("Missing auth profile scope for configure candidate discovery.");
-            }
             const authProfileProvider = resolveAuthProfileProvider(
               authProfiles.store,
               entry.pathSegments,
@@ -143,7 +137,7 @@ export function buildConfigureCandidatesForScope(params: {
                 path: entry.path,
                 pathSegments: [...entry.pathSegments],
                 label: `${entry.path} (auth profile, agent ${authProfiles.agentId})`,
-                configFile: `auth-profiles.json` as const,
+                configFile: `auth-profile-store` as const,
                 expectedResolvedValue: entry.entry.expectedResolvedValue,
               },
               resolved.ref ? { existingRef: resolved.ref } : {},

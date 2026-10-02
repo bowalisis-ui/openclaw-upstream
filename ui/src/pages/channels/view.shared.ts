@@ -2,9 +2,11 @@
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { html, nothing } from "lit";
 import type { ChannelAccountSnapshot } from "../../api/types.ts";
-import { renderSettingsSection, renderSettingsStatus } from "../../components/settings-ui.ts";
+import { icons } from "../../components/icons.ts";
+import { renderSettingsRow, renderSettingsStatus } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
 import { channelSnapshotEntryIsActive, resolveChannelAccounts } from "../../lib/channels/index.ts";
+import { formatUiError, formatUiExternalText } from "../../lib/format-error.ts";
 import { formatRelativeTimestamp } from "../../lib/format.ts";
 import type { ChannelKey, ChannelsProps } from "./view.types.ts";
 
@@ -29,7 +31,7 @@ function resolveChannelStatus(
   key: ChannelKey,
   props: ChannelsProps,
 ): Record<string, unknown> | undefined {
-  const channels = props.snapshot?.channels;
+  const channels = props.channels.channelsSnapshot?.channels;
   return channels && Object.hasOwn(channels, key)
     ? (asNullableRecord(channels[key]) ?? undefined)
     : undefined;
@@ -39,8 +41,8 @@ function resolveDefaultChannelAccount(
   key: ChannelKey,
   props: ChannelsProps,
 ): ChannelAccountSnapshot | null {
-  const accounts = resolveChannelAccounts(props.snapshot?.channelAccounts, key);
-  const defaultAccountIds = props.snapshot?.channelDefaultAccountId;
+  const accounts = resolveChannelAccounts(props.channels.channelsSnapshot?.channelAccounts, key);
+  const defaultAccountIds = props.channels.channelsSnapshot?.channelDefaultAccountId;
   const defaultAccountId =
     defaultAccountIds && Object.hasOwn(defaultAccountIds, key) ? defaultAccountIds[key] : undefined;
   return (
@@ -77,7 +79,7 @@ export function resolveChannelDisplayState(
 }
 
 export function channelEnabled(key: ChannelKey, props: ChannelsProps) {
-  return channelSnapshotEntryIsActive(props.snapshot, key);
+  return channelSnapshotEntryIsActive(props.channels.channelsSnapshot, key);
 }
 
 export function resolveChannelConfigured(key: ChannelKey, props: ChannelsProps): boolean | null {
@@ -104,9 +106,11 @@ export function renderChannelFacts(rows: readonly ChannelStatusRow[]) {
         (row) => html`
           <dt>${row.label}</dt>
           <dd>
-            ${row.kind !== undefined
-              ? renderSettingsStatus({ kind: row.kind, label: row.value })
-              : row.value}
+            ${
+              row.kind !== undefined
+                ? renderSettingsStatus({ kind: row.kind, label: row.value })
+                : row.value
+            }
           </dd>
         `,
       )}
@@ -114,40 +118,28 @@ export function renderChannelFacts(rows: readonly ChannelStatusRow[]) {
   `;
 }
 
-/** Error row: danger dot + label, message as description. */
 export function renderChannelErrorRow(message: unknown) {
-  return html`
-    <div class="settings-row">
-      <div class="settings-row__text">
-        <span class="settings-row__title"
-          >${renderSettingsStatus({ kind: "danger", label: t("channels.lastError") })}</span
-        >
-        <span class="settings-row__desc">${message}</span>
-      </div>
-    </div>
-  `;
+  return renderSettingsRow({
+    title: renderSettingsStatus({ kind: "danger", label: t("channels.lastError") }),
+    description: html`${formatUiError(message)}`,
+  });
 }
 
-/** Probe outcome row: ok/danger dot with the raw status/error detail. */
 export function renderChannelProbeRow(probe: {
   ok?: boolean;
   status?: number | string | null;
   error?: string | null;
 }) {
-  const detail = [probe.status ?? "", probe.error ?? ""].filter(Boolean).join(" ");
-  return html`
-    <div class="settings-row">
-      <div class="settings-row__text">
-        <span class="settings-row__title"
-          >${renderSettingsStatus({
-            kind: probe.ok ? "ok" : "danger",
-            label: probe.ok ? t("common.probeOk") : t("common.probeFailed"),
-          })}</span
-        >
-        ${detail ? html`<span class="settings-row__desc">${detail}</span>` : nothing}
-      </div>
-    </div>
-  `;
+  const detail = formatUiExternalText(
+    [probe.status ?? "", probe.error ?? ""].filter(Boolean).join(" "),
+  );
+  return renderSettingsRow({
+    title: renderSettingsStatus({
+      kind: probe.ok ? "ok" : "danger",
+      label: probe.ok ? t("common.probeOk") : t("common.probeFailed"),
+    }),
+    description: detail,
+  });
 }
 
 /** Trailing action row carrying a button cluster in the control slot. */
@@ -157,6 +149,27 @@ export function renderChannelActionRow(actions: unknown) {
       <div class="settings-row__control">${actions}</div>
     </div>
   `;
+}
+
+export function renderChannelRefreshAction(params: {
+  updatedAt?: number | null;
+  disabled: boolean;
+  onRefresh: () => void;
+}) {
+  const updatedLabel = params.updatedAt
+    ? t("channels.hub.updatedAgo", { ago: formatRelativeTimestamp(params.updatedAt) })
+    : t("common.na");
+  return html`<openclaw-tooltip .content=${updatedLabel}>
+    <button
+      type="button"
+      class="btn btn--xs btn--icon"
+      aria-label=${t("common.refresh")}
+      ?disabled=${params.disabled}
+      @click=${params.onRefresh}
+    >
+      ${icons.refresh}
+    </button>
+  </openclaw-tooltip>`;
 }
 
 /** One account inside a multi-account channel group. */
@@ -174,54 +187,24 @@ export function renderChannelAccountRow(params: {
       <div class="settings-row__text">
         <span class="settings-row__title">${params.title}</span>
         <span class="settings-row__desc">${factLine}</span>
-        ${params.lastError
-          ? html`<span class="settings-row__desc">${params.lastError}</span>`
-          : nothing}
+        ${
+          params.lastError
+            ? html`<span class="settings-row__desc"
+                >${formatUiExternalText(params.lastError)}</span
+              >`
+            : nothing
+        }
       </div>
       <div class="settings-row__control">
         ${renderSettingsStatus(params.status)}
         <span class="settings-row__value"
-          >${params.lastInboundAt
-            ? formatRelativeTimestamp(params.lastInboundAt)
-            : t("common.na")}</span
+          >${
+            params.lastInboundAt ? formatRelativeTimestamp(params.lastInboundAt) : t("common.na")
+          }</span
         >
       </div>
     </div>
   `;
-}
-
-/**
- * One channel = one settings section: heading with optional account count,
- * a group holding the status facts, error/probe rows, the config form,
- * extra content, and a trailing action row. Extra content sits directly
- * above the actions so action feedback (e.g. the WhatsApp QR) appears next
- * to the button that triggered it instead of scrolled away above the form.
- */
-export function renderSingleAccountChannelCard(params: {
-  title: string;
-  subtitle: string;
-  accountCount?: number;
-  statusRows: readonly ChannelStatusRow[];
-  lastError?: string | null;
-  secondaryCallout?: unknown;
-  extraContent?: unknown;
-  configSection: unknown;
-  footer?: unknown;
-}) {
-  return renderSettingsSection(
-    {
-      title: params.title,
-      description: params.subtitle,
-      ...(params.accountCount !== undefined ? { count: params.accountCount } : {}),
-    },
-    html`
-      ${renderChannelFacts(params.statusRows)}
-      ${params.lastError ? renderChannelErrorRow(params.lastError) : nothing}
-      ${params.secondaryCallout ?? nothing} ${params.configSection}
-      ${params.extraContent ?? nothing}
-      ${params.footer ? renderChannelActionRow(params.footer) : nothing}
-    `,
-  );
 }
 
 /** Multi-account channels surface the account count next to the heading. */

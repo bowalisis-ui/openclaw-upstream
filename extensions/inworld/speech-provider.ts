@@ -1,4 +1,3 @@
-// Inworld provider module implements model/runtime integration.
 import { normalizeResolvedSecretInputString } from "openclaw/plugin-sdk/secret-input";
 import type {
   SpeechDirectiveTokenParseContext,
@@ -9,9 +8,13 @@ import type {
 import {
   parseSpeechDirectiveNumberOverride,
   resolveSpeechProviderApiKey,
-  trimToUndefined,
-} from "openclaw/plugin-sdk/speech-core";
-import { asFiniteNumberInRange, asOptionalRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+} from "openclaw/plugin-sdk/speech-provider";
+import {
+  asFiniteNumberInRange,
+  asOptionalRecord,
+  filterStringRecord,
+  normalizeOptionalString as trimToUndefined,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   DEFAULT_INWORLD_MODEL_ID,
   DEFAULT_INWORLD_VOICE_ID,
@@ -30,10 +33,13 @@ type InworldProviderConfig = {
   temperature?: number;
 };
 
-type InworldProviderOverrides = {
-  voiceId?: string;
-  modelId?: string;
-  temperature?: number;
+type InworldSynthesisRequest = {
+  text: string;
+  providerConfig: SpeechProviderConfig;
+  providerOverrides?: SpeechProviderOverrides;
+  timeoutMs: number;
+  audioEncoding: InworldAudioEncoding;
+  sampleRateHertz?: number;
 };
 
 function normalizeInworldTemperature(value: unknown): number | undefined {
@@ -56,31 +62,34 @@ function normalizeInworldProviderConfig(rawConfig: Record<string, unknown>): Inw
 }
 
 function readInworldProviderConfig(config: SpeechProviderConfig): InworldProviderConfig {
-  const defaults = normalizeInworldProviderConfig({});
-  return {
-    apiKey: trimToUndefined(config.apiKey) ?? defaults.apiKey,
-    baseUrl: normalizeInworldBaseUrl(trimToUndefined(config.baseUrl) ?? defaults.baseUrl),
-    voiceId: trimToUndefined(config.voiceId) ?? defaults.voiceId,
-    modelId: trimToUndefined(config.modelId) ?? defaults.modelId,
-    temperature: normalizeInworldTemperature(config.temperature) ?? defaults.temperature,
-  };
+  return normalizeInworldProviderConfig({
+    inworld: { ...config, apiKey: trimToUndefined(config.apiKey) },
+  });
 }
 
 function resolveInworldApiKey(primary?: string, fallback?: string): string | undefined {
   return resolveSpeechProviderApiKey(primary, fallback, process.env.INWORLD_API_KEY);
 }
 
-function readInworldOverrides(
-  overrides: SpeechProviderOverrides | undefined,
-): InworldProviderOverrides {
-  if (!overrides) {
-    return {};
+async function synthesizeInworld(req: InworldSynthesisRequest): Promise<Buffer> {
+  const config = readInworldProviderConfig(req.providerConfig);
+  const overrides = req.providerOverrides;
+  const apiKey = resolveInworldApiKey(config.apiKey);
+  if (!apiKey) {
+    throw new Error("Inworld API key missing");
   }
-  return {
-    voiceId: trimToUndefined(overrides.voiceId ?? overrides.voice),
-    modelId: trimToUndefined(overrides.modelId ?? overrides.model),
-    temperature: normalizeInworldTemperature(overrides.temperature),
-  };
+
+  return inworldTTS({
+    text: req.text,
+    apiKey,
+    baseUrl: config.baseUrl,
+    voiceId: trimToUndefined(overrides?.voiceId ?? overrides?.voice) ?? config.voiceId,
+    modelId: trimToUndefined(overrides?.modelId ?? overrides?.model) ?? config.modelId,
+    audioEncoding: req.audioEncoding,
+    ...(req.sampleRateHertz === undefined ? {} : { sampleRateHertz: req.sampleRateHertz }),
+    temperature: normalizeInworldTemperature(overrides?.temperature) ?? config.temperature,
+    timeoutMs: req.timeoutMs,
+  });
 }
 
 function parseDirectiveToken(ctx: SpeechDirectiveTokenParseContext): {
@@ -140,28 +149,24 @@ export function buildInworldSpeechProvider(): SpeechProviderPlugin {
             });
       return {
         ...base,
-        ...(resolvedApiKey === undefined ? {} : { apiKey: resolvedApiKey }),
-        ...(trimToUndefined(talkProviderConfig.baseUrl) == null
-          ? {}
-          : { baseUrl: normalizeInworldBaseUrl(trimToUndefined(talkProviderConfig.baseUrl)) }),
-        ...(trimToUndefined(talkProviderConfig.voiceId) == null
-          ? {}
-          : { voiceId: trimToUndefined(talkProviderConfig.voiceId) }),
-        ...(trimToUndefined(talkProviderConfig.modelId) == null
-          ? {}
-          : { modelId: trimToUndefined(talkProviderConfig.modelId) }),
+        ...filterStringRecord({
+          apiKey: resolvedApiKey,
+          baseUrl: trimToUndefined(talkProviderConfig.baseUrl)
+            ? normalizeInworldBaseUrl(trimToUndefined(talkProviderConfig.baseUrl))
+            : undefined,
+          voiceId: trimToUndefined(talkProviderConfig.voiceId),
+          modelId: trimToUndefined(talkProviderConfig.modelId),
+        }),
         ...(normalizeInworldTemperature(talkProviderConfig.temperature) == null
           ? {}
           : { temperature: normalizeInworldTemperature(talkProviderConfig.temperature) }),
       };
     },
     resolveTalkOverrides: ({ params }) => ({
-      ...(trimToUndefined(params.voiceId) == null
-        ? {}
-        : { voiceId: trimToUndefined(params.voiceId) }),
-      ...(trimToUndefined(params.modelId) == null
-        ? {}
-        : { modelId: trimToUndefined(params.modelId) }),
+      ...filterStringRecord({
+        voiceId: trimToUndefined(params.voiceId),
+        modelId: trimToUndefined(params.modelId),
+      }),
       ...(normalizeInworldTemperature(params.temperature) == null
         ? {}
         : { temperature: normalizeInworldTemperature(params.temperature) }),
@@ -181,25 +186,11 @@ export function buildInworldSpeechProvider(): SpeechProviderPlugin {
     isConfigured: ({ providerConfig }) =>
       Boolean(resolveInworldApiKey(readInworldProviderConfig(providerConfig).apiKey)),
     synthesize: async (req) => {
-      const config = readInworldProviderConfig(req.providerConfig);
-      const overrides = readInworldOverrides(req.providerOverrides);
-      const apiKey = resolveInworldApiKey(config.apiKey);
-      if (!apiKey) {
-        throw new Error("Inworld API key missing");
-      }
-
       const useOpus = req.target === "voice-note";
       const audioEncoding: InworldAudioEncoding = useOpus ? "OGG_OPUS" : "MP3";
-
-      const audioBuffer = await inworldTTS({
-        text: req.text,
-        apiKey,
-        baseUrl: config.baseUrl,
-        voiceId: overrides.voiceId ?? config.voiceId,
-        modelId: overrides.modelId ?? config.modelId,
+      const audioBuffer = await synthesizeInworld({
+        ...req,
         audioEncoding,
-        temperature: overrides.temperature ?? config.temperature,
-        timeoutMs: req.timeoutMs,
       });
 
       return {
@@ -210,24 +201,11 @@ export function buildInworldSpeechProvider(): SpeechProviderPlugin {
       };
     },
     synthesizeTelephony: async (req) => {
-      const config = readInworldProviderConfig(req.providerConfig);
-      const overrides = readInworldOverrides(req.providerOverrides);
-      const apiKey = resolveInworldApiKey(config.apiKey);
-      if (!apiKey) {
-        throw new Error("Inworld API key missing");
-      }
-
       const sampleRate = 22_050;
-      const audioBuffer = await inworldTTS({
-        text: req.text,
-        apiKey,
-        baseUrl: config.baseUrl,
-        voiceId: overrides.voiceId ?? config.voiceId,
-        modelId: overrides.modelId ?? config.modelId,
+      const audioBuffer = await synthesizeInworld({
+        ...req,
         audioEncoding: "PCM",
         sampleRateHertz: sampleRate,
-        temperature: overrides.temperature ?? config.temperature,
-        timeoutMs: req.timeoutMs,
       });
 
       return { audioBuffer, outputFormat: "pcm", sampleRate };

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { commitMainSessionRecovery } from "../../agents/main-session-recovery/main-session-recovery-store.js";
 import { loadSessionEntry, replaceSessionEntry } from "../../config/sessions/session-accessor.js";
 import type { InternalSessionEntry } from "../../config/sessions/types.js";
+import { cleanupSessionStateForTest } from "../../test-utils/session-state-cleanup.js";
 import { rejectDurableDelivery, settlePendingFinalDelivery } from "./delivery-completion.js";
 
 const recoveryMocks = vi.hoisted(() => ({
@@ -56,6 +57,7 @@ describe("pending-final delivery completion", () => {
   });
 
   afterEach(async () => {
+    await cleanupSessionStateForTest({ stateDir: tmpDir });
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -136,7 +138,7 @@ describe("pending-final delivery completion", () => {
 
   it("does not owe a notice for the pre-dispatch claim or terminal outcomes", async () => {
     await installContextOnPendingFinal();
-    // prepared -> unknown is the pre-I/O claim on every healthy send.
+    await settlePendingFinalDelivery(completion, "queued", ["prepared"]);
     await settlePendingFinalDelivery(completion, "unknown", ["prepared", "queued"]);
     await settlePendingFinalDelivery(completion, "delivered");
 
@@ -177,6 +179,45 @@ describe("pending-final delivery completion", () => {
     });
   });
 
+  it.each(["owed", "unresolved", "acknowledged"] as const)(
+    "preserves %s notice history while another delivery remains unknown",
+    async (noticeState) => {
+      await installContextOnPendingFinal();
+      const entry = loadSessionEntry({ sessionKey, storePath })!;
+      await replaceSessionEntry(
+        { sessionKey, storePath },
+        {
+          ...entry,
+          pendingFinalDelivery: {
+            ...entry.pendingFinalDelivery!,
+            deliveries: [
+              { id: completion.deliveryId, state: "unknown" },
+              { id: "delivery-2", state: "queued" },
+            ],
+          },
+          pendingDeliveryNotice: {
+            createdAt: entry.pendingFinalDelivery!.createdAt,
+            context: noticeContext,
+            intentId: completion.intentId,
+            state: noticeState,
+          },
+        },
+      );
+      await settlePendingFinalDelivery({ ...completion, deliveryId: "delivery-2" }, "delivered");
+      expect(loadSessionEntry({ sessionKey, storePath })?.pendingDeliveryNotice?.state).toBe(
+        noticeState,
+      );
+      await settlePendingFinalDelivery(completion, "unknown");
+      expect(loadSessionEntry({ sessionKey, storePath })?.pendingDeliveryNotice?.state).toBe(
+        noticeState,
+      );
+      await settlePendingFinalDelivery(completion, "delivered");
+      expect(loadSessionEntry({ sessionKey, storePath })?.pendingDeliveryNotice?.state).toBe(
+        noticeState === "acknowledged" ? "acknowledged" : undefined,
+      );
+    },
+  );
+
   it("carries the custom queue root when a terminal sibling wakes recovery", async () => {
     const entry = loadSessionEntry({ sessionKey, storePath })!;
     await replaceSessionEntry(
@@ -194,7 +235,7 @@ describe("pending-final delivery completion", () => {
     );
 
     await expect(
-      settlePendingFinalDelivery(completion, "delivered", undefined, tmpDir),
+      settlePendingFinalDelivery(completion, "delivered", undefined, { stateDir: tmpDir }),
     ).resolves.toEqual({ state: "delivered" });
 
     expect(recoveryMocks.scheduleMainSessionRecoveryPendingTarget).toHaveBeenCalledWith({

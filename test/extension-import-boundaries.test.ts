@@ -2,13 +2,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  createExtensionPluginSdkBoundaryChecker,
-  main as extensionPluginSdkMain,
-} from "../scripts/check-extension-plugin-sdk-boundary.mts";
+import { createExtensionPluginSdkBoundaryChecker } from "../scripts/check-extension-plugin-sdk-boundary.mts";
 import { main as sdkPackageMain } from "../scripts/check-sdk-package-extension-import-boundary.mts";
 import { main as srcExtensionMain } from "../scripts/check-src-extension-import-boundary.mts";
-import { collectModuleReferencesFromSource } from "../scripts/lib/guard-inventory-utils.mjs";
 import { createCapturedIo } from "./helpers/captured-io.js";
 import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 
@@ -29,43 +25,7 @@ const boundaryInventoryCases: Array<{
     name: "sdk/package extension import boundary",
     output: getJsonOutput(sdkPackageMain, ["--json"]),
   },
-  {
-    name: "extension src outside plugin-sdk boundary",
-    output: getJsonOutput(extensionPluginSdkMain, ["--mode=src-outside-plugin-sdk", "--json"]),
-  },
-  {
-    name: "extension plugin-sdk-internal boundary",
-    output: getJsonOutput(extensionPluginSdkMain, ["--mode=plugin-sdk-internal", "--json"]),
-  },
-  {
-    name: "extension relative-outside-package boundary",
-    output: getJsonOutput(extensionPluginSdkMain, ["--mode=relative-outside-package", "--json"]),
-  },
-  {
-    name: "extension normalization-core bypass boundary",
-    output: getJsonOutput(extensionPluginSdkMain, ["--mode=normalization-core-bypass", "--json"]),
-  },
 ];
-
-describe("fast module reference scanner", () => {
-  it("collects code references without matching comments or strings", () => {
-    expect(
-      collectModuleReferencesFromSource(`
-// import "./commented";
-const text = 'import("./string")';
-import "./side-effect";
-import type { Example } from "./types";
-export { Example } from "./public";
-await import("./runtime");
-`),
-    ).toEqual([
-      { kind: "import", line: 4, specifier: "./side-effect" },
-      { kind: "import", line: 5, specifier: "./types" },
-      { kind: "export", line: 6, specifier: "./public" },
-      { kind: "dynamic-import", line: 7, specifier: "./runtime" },
-    ]);
-  });
-});
 
 describe("extension import boundary inventories", () => {
   it.each(boundaryInventoryCases)("$name JSON output stays empty", async ({ output }) => {
@@ -97,6 +57,57 @@ function createBoundaryFixture(fixture: BoundaryFixture) {
   );
   return createExtensionPluginSdkBoundaryChecker({ repoRoot });
 }
+
+describe("aggregate extension plugin SDK boundaries", () => {
+  const modes = ["src-outside-plugin-sdk", "normalization-core-bypass", "relative-outside-package"];
+
+  it.each([
+    { name: "clean", source: 'import "./local.js";', expectedCode: 0 },
+    { name: "core escape", source: 'import "../../../src/private.js";', expectedCode: 1 },
+    { name: "normalization", source: 'import "@openclaw/normalization-core";', expectedCode: 1 },
+    { name: "relative escape", source: 'import "../../other/api.js";', expectedCode: 1 },
+    {
+      name: "overlapping modes",
+      source: 'import "../../../src/utils/boolean.js";',
+      expectedCode: 1,
+    },
+  ])("preserves all mode reports for $name", async ({ source, expectedCode }) => {
+    const fixture = { source };
+    const expected = createCapturedIo();
+    for (const mode of modes) {
+      await createBoundaryFixture(fixture).main([`--mode=${mode}`], expected.io);
+    }
+    const actual = createCapturedIo();
+    const code = await createBoundaryFixture(fixture).main(["--all"], actual.io);
+    expect(code).toBe(expectedCode);
+    expect(actual.readStdout()).toBe(expected.readStdout());
+    expect(actual.readStderr()).toBe(expected.readStderr());
+  });
+
+  it("reports inventory failure for every mode and fails the aggregate", async () => {
+    const checker = createBoundaryFixture({ source: " ".repeat(2 * 1024 * 1024 + 1) });
+    const actual = createCapturedIo();
+    expect(await checker.main(["--all"], actual.io)).toBe(1);
+    expect(actual.readStdout()).toBe("");
+    const errors = actual.readStderr();
+    expect(errors.match(/exceeds 2097152 byte limit/gu)).toHaveLength(3);
+    expect(errors).toContain("must not import src/**");
+    expect(errors).toContain("must not import normalization-core directly");
+    expect(errors).toContain("relative imports that escape");
+  });
+
+  it.each([
+    ["--all", "--json"],
+    ["--all", "--mode=src-outside-plugin-sdk"],
+  ])("rejects conflicting aggregate arguments %j", async (...argv) => {
+    const actual = createCapturedIo();
+    await expect(createBoundaryFixture({ source: "" }).main(argv, actual.io)).rejects.toThrow(
+      "--all cannot be combined with --json or --mode",
+    );
+    expect(actual.readStdout()).toBe("");
+    expect(actual.readStderr()).toBe("");
+  });
+});
 
 describe("production plugin normalization ownership boundary", () => {
   it.each([
@@ -167,7 +178,7 @@ describe("production plugin normalization ownership boundary", () => {
       facade: "openclaw/plugin-sdk/error-runtime",
     },
   ])(
-    "rejects $name with a specific public facade when known",
+    "rejects $name with a specific SDK facade when known",
     async ({ source, file, kind, specifier, resolvedPath, facade }) => {
       const checker = createBoundaryFixture({ source, file });
       const captured = createCapturedIo();
@@ -187,7 +198,10 @@ describe("production plugin normalization ownership boundary", () => {
         specifier,
         resolvedPath,
       });
-      expect(entries[0]?.reason).toContain(facade ?? "matching public openclaw/plugin-sdk facade");
+      expect(entries[0]?.reason).toContain(facade ?? "matching openclaw/plugin-sdk facade");
+      if (facade === "openclaw/plugin-sdk/number-runtime") {
+        expect(entries[0]?.reason).toContain("bundled/private-local");
+      }
     },
   );
 
@@ -223,22 +237,6 @@ describe("production plugin normalization ownership boundary", () => {
       },
       source: 'import "@openclaw/normalization-core/record-coerce";',
     },
-    {
-      name: "comments and string literals",
-      source: [
-        '// import "@openclaw/normalization-core/record-coerce";',
-        'const text = "import(\\\"@openclaw/normalization-core/error-coercion\\\")";',
-      ].join("\n"),
-    },
-    {
-      name: "serialized local guard",
-      source: [
-        "function isRecord(value: unknown) {",
-        '  return value !== null && typeof value === "object" && !Array.isArray(value);',
-        "}",
-        "export const serialized = isRecord.toString();",
-      ].join("\n"),
-    },
   ])("allows $name", async ({ source, file, packageJson }) => {
     const checker = createBoundaryFixture({ source, file, packageJson });
     const captured = createCapturedIo();
@@ -264,7 +262,18 @@ describe("production plugin normalization ownership boundary", () => {
     expect(captured.readStdout()).toContain("re-exports");
     expect(captured.readStdout()).toContain("@openclaw/normalization-core/error-coercion");
     expect(captured.readStdout()).toContain("openclaw/plugin-sdk/error-runtime");
-    expect(captured.readStderr()).toContain("this strict mode has no baseline");
+    expect(captured.readStderr()).toContain("violations found (1)");
+  });
+
+  it("rejects plugin-sdk-internal through the strict src-outside-plugin-sdk rule", async () => {
+    const checker = createBoundaryFixture({
+      source: 'import "../../../src/plugin-sdk-internal/private.js";',
+    });
+    const captured = createCapturedIo();
+
+    expect(await checker.main(["--mode=src-outside-plugin-sdk"], captured.io)).toBe(1);
+    expect(captured.readStdout()).toContain("src/plugin-sdk-internal/private.js");
+    expect(captured.readStderr()).toContain("violations found (1)");
   });
 });
 

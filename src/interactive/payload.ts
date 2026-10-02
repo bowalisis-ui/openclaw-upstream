@@ -1,10 +1,10 @@
-// Interactive payload helpers normalize structured interactive UI payloads.
 import { asOptionalRecord as toRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { isWellFormedApprovalId } from "../../packages/gateway-protocol/src/schema/approval-id.js";
+import type { ChannelApprovalKind } from "../infra/approval-types.js";
 
 const PRESENTATION_FALLBACK_CONTINUATION = Symbol.for(
   "openclaw.presentation.fallback-continuation",
@@ -18,50 +18,52 @@ export type MessagePresentationTone = "info" | "success" | "warning" | "danger" 
 /** Button style hint for renderers that support styled actions. */
 export type MessagePresentationButtonStyle = InteractiveButtonStyle;
 
+type QuestionPresentationAction =
+  | {
+      /** Resolve one declared choice. */
+      type: "question";
+      questionId: string;
+      optionValue: string;
+    }
+  | {
+      /** Switch this question to its free-text answer path. */
+      type: "question";
+      questionId: string;
+      intent: "custom-input";
+    };
+
 /** Core-owned model-picker action; channels serialize it only inside private envelopes. */
 export type ModelPickerAction = (
   | {
-      type: "model-picker";
-      version: 1;
-      snapshotToken: string;
       intent: "show-providers";
       cursor?: string;
     }
   | {
-      type: "model-picker";
-      version: 1;
-      snapshotToken: string;
       intent: "show-models";
       providerToken: string;
       cursor?: string;
     }
   | {
-      type: "model-picker";
-      version: 1;
-      snapshotToken: string;
       intent: "show-recents";
       cursor?: string;
     }
   | {
-      type: "model-picker";
-      version: 1;
-      snapshotToken: string;
       intent: "choose-model";
       providerToken: string;
       modelToken: string;
     }
   | {
-      type: "model-picker";
-      version: 1;
-      snapshotToken: string;
       intent: "choose-runtime";
       providerToken: string;
       modelToken: string;
       runtimeToken: string;
     }
-  | { type: "model-picker"; version: 1; snapshotToken: string; intent: "reset" }
-  | { type: "model-picker"; version: 1; snapshotToken: string; intent: "cancel" }
+  | { intent: "reset" }
+  | { intent: "cancel" }
 ) & {
+  type: "model-picker";
+  version: 1;
+  snapshotToken: string;
   /** Legacy command/callback payload fields are deliberately unavailable on picker actions. */
   readonly command?: never;
   readonly value?: never;
@@ -84,15 +86,10 @@ export type MessagePresentationAction =
       /** Resolve one durable operator approval without exposing transport callback data. */
       type: "approval";
       approvalId: string;
-      approvalKind: "exec" | "plugin";
+      approvalKind: ChannelApprovalKind;
       decision: "allow-once" | "allow-always" | "deny";
     }
-  | {
-      /** Resolve one runtime-authored operator question choice. */
-      type: "question";
-      questionId: string;
-      optionValue: string;
-    }
+  | QuestionPresentationAction
   | {
       /** Open a normal external link. */
       type: "url";
@@ -532,7 +529,7 @@ function normalizePresentationAction(raw: unknown): MessagePresentationAction | 
     if (
       typeof approvalId !== "string" ||
       !isWellFormedApprovalId(approvalId) ||
-      (approvalKind !== "exec" && approvalKind !== "plugin") ||
+      (approvalKind !== "exec" && approvalKind !== "plugin" && approvalKind !== "system-agent") ||
       (decision !== "allow-once" && decision !== "allow-always" && decision !== "deny")
     ) {
       return undefined;
@@ -545,15 +542,19 @@ function normalizePresentationAction(raw: unknown): MessagePresentationAction | 
     }
     const questionId = record.questionId;
     const optionValue = record.optionValue;
-    if (
-      typeof questionId !== "string" ||
-      !isWellFormedApprovalId(questionId) ||
-      typeof optionValue !== "string" ||
-      !optionValue.trim()
-    ) {
+    if (typeof questionId !== "string" || !isWellFormedApprovalId(questionId)) {
       return undefined;
     }
-    return { type: "question", questionId, optionValue };
+    const intent = record.intent;
+    if (intent === undefined) {
+      return typeof optionValue === "string" && optionValue.trim()
+        ? { type: "question", questionId, optionValue }
+        : undefined;
+    }
+    if (intent === "custom-input") {
+      return { type: "question", questionId, intent };
+    }
+    return undefined;
   }
   if (type === "url") {
     const url = normalizeOptionalString(record.url);
@@ -646,6 +647,13 @@ function normalizeInteractiveBlock(raw: unknown): InteractiveReplyBlock | undefi
     const text = normalizeOptionalString(record.text);
     return text ? { type: "text", text } : undefined;
   }
+  return normalizeInteractiveControls(record, type);
+}
+
+function normalizeInteractiveControls(
+  record: Record<string, unknown>,
+  type: string | undefined,
+): MessagePresentationInteractiveBlock | undefined {
   if (type === "buttons") {
     const buttons = normalizeList(record.buttons, normalizeButton);
     return buttons.length > 0 ? { type: "buttons", buttons } : undefined;
@@ -682,16 +690,15 @@ function normalizeChartSegments(value: unknown): MessagePresentationChartSegment
     : undefined;
 }
 
-function normalizeChartCategories(value: unknown): string[] | undefined {
+function normalizeUniqueLabels(value: unknown): string[] | undefined {
   if (!Array.isArray(value) || value.length === 0) {
     return undefined;
   }
-  const categories = value.map((entry) => normalizeOptionalString(entry));
-  if (categories.some((entry) => !entry)) {
+  const labels = value.map((entry) => normalizeOptionalString(entry));
+  if (!labels.every((entry): entry is string => Boolean(entry))) {
     return undefined;
   }
-  const normalized = categories as string[];
-  return new Set(normalized).size === normalized.length ? normalized : undefined;
+  return new Set(labels).size === labels.length ? labels : undefined;
 }
 
 function normalizeChartSeries(params: {
@@ -739,7 +746,7 @@ function normalizeChartBlock(
   if (chartType !== "bar" && chartType !== "area" && chartType !== "line") {
     return undefined;
   }
-  const categories = normalizeChartCategories(record.categories);
+  const categories = normalizeUniqueLabels(record.categories);
   if (!categories) {
     return undefined;
   }
@@ -764,16 +771,8 @@ function normalizeTableBlock(
   record: Record<string, unknown>,
 ): MessagePresentationTableBlock | undefined {
   const caption = normalizeOptionalString(record.caption);
-  if (!caption || !Array.isArray(record.headers) || record.headers.length === 0) {
-    return undefined;
-  }
-  const headers = record.headers.map((header) => normalizeOptionalString(header));
-  if (
-    !headers.every((header): header is string => Boolean(header)) ||
-    new Set(headers).size !== headers.length ||
-    !Array.isArray(record.rows) ||
-    record.rows.length === 0
-  ) {
+  const headers = normalizeUniqueLabels(record.headers);
+  if (!caption || !headers || !Array.isArray(record.rows) || record.rows.length === 0) {
     return undefined;
   }
   const rows = record.rows.map((row) => {
@@ -824,32 +823,39 @@ export function normalizeLegacyInteractiveReply(raw: unknown): LegacyInteractive
 /** @deprecated Use normalizeMessagePresentation. */
 export const normalizeInteractiveReply = normalizeLegacyInteractiveReply;
 
-function normalizePresentationBlock(raw: unknown): MessagePresentationBlock | undefined {
+function isPresentationContinuation(raw: unknown): boolean {
+  const record = toRecord(raw);
+  return Boolean(
+    record &&
+    Object.getOwnPropertyDescriptor(record, PRESENTATION_FALLBACK_CONTINUATION)?.value === true,
+  );
+}
+
+function normalizePresentationBlock(
+  raw: unknown,
+  followedByContinuation: boolean,
+): MessagePresentationBlock | undefined {
   const record = toRecord(raw);
   if (!record) {
     return undefined;
   }
   const type = normalizeOptionalLowercaseString(record.type);
   if (type === "text" || type === "context") {
-    const text = normalizeOptionalString(record.text);
-    return text ? { type, text } : undefined;
+    const continuation = isPresentationContinuation(record);
+    // Adapted fragments share one authored paragraph; trimming either side loses
+    // whitespace at the split, and dropping the marker changes fallback layout.
+    const text =
+      (continuation || followedByContinuation) && typeof record.text === "string"
+        ? record.text
+        : normalizeOptionalString(record.text);
+    const block: MessagePresentationBlock | undefined = text ? { type, text } : undefined;
+    if (block && continuation) {
+      Object.defineProperty(block, PRESENTATION_FALLBACK_CONTINUATION, { value: true });
+    }
+    return block;
   }
   if (type === "divider") {
     return { type: "divider" };
-  }
-  if (type === "buttons") {
-    const buttons = normalizeList(record.buttons, normalizeButton);
-    return buttons.length > 0 ? { type: "buttons", buttons } : undefined;
-  }
-  if (type === "select") {
-    const options = normalizeList(record.options, normalizeOption);
-    return options.length > 0
-      ? {
-          type: "select",
-          placeholder: normalizeOptionalString(record.placeholder),
-          options,
-        }
-      : undefined;
   }
   if (type === "chart") {
     return normalizeChartBlock(record);
@@ -857,7 +863,7 @@ function normalizePresentationBlock(raw: unknown): MessagePresentationBlock | un
   if (type === "table") {
     return normalizeTableBlock(record);
   }
-  return undefined;
+  return normalizeInteractiveControls(record, type);
 }
 
 export function normalizeMessagePresentation(raw: unknown): MessagePresentation | undefined {
@@ -865,8 +871,18 @@ export function normalizeMessagePresentation(raw: unknown): MessagePresentation 
   if (!record) {
     return undefined;
   }
-  const blocks = normalizeList(record.blocks, normalizePresentationBlock);
-  const title = normalizeOptionalString(record.title);
+  const rawBlocks: unknown[] = Array.isArray(record.blocks) ? record.blocks : [];
+  const blocks = rawBlocks.flatMap((block, index) => {
+    const normalized = normalizePresentationBlock(
+      block,
+      isPresentationContinuation(rawBlocks[index + 1]),
+    );
+    return normalized ? [normalized] : [];
+  });
+  const title =
+    isPresentationContinuation(rawBlocks[0]) && typeof record.title === "string"
+      ? record.title
+      : normalizeOptionalString(record.title);
   if (!title && blocks.length === 0) {
     return undefined;
   }
@@ -1128,11 +1144,7 @@ export function renderMessagePresentationFallbackText(params: {
   for (const block of presentation.blocks) {
     if (block.type === "text" || block.type === "context") {
       // Generated continuation blocks are bounded native fragments, not new paragraphs.
-      if (
-        Object.getOwnPropertyDescriptor(block, PRESENTATION_FALLBACK_CONTINUATION)?.value ===
-          true &&
-        lines.length
-      ) {
+      if (isPresentationContinuation(block) && lines.length) {
         lines[lines.length - 1] += block.text;
       } else {
         lines.push(block.text);
