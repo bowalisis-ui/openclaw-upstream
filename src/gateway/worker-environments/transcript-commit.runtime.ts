@@ -17,6 +17,7 @@ import { redactTranscriptMessageForStorage } from "../../config/sessions/session
 import { restoreSessionColdTranscript } from "../../config/sessions/session-cold-storage.js";
 import { startSessionTranscriptIndexReconcile } from "../../config/sessions/session-transcript-reconcile.js";
 import { withSessionHistoryWorkerDatabase } from "../../config/sessions/session-transcript-worker-runtime.js";
+import { applyAssistantDeliveryDirectives } from "../../config/sessions/transcript-assistant-delivery.js";
 import { captureSessionTranscriptTargetBinding } from "../../config/sessions/transcript-target-binding.js";
 import {
   captureOwnedTranscriptWriteAssertion,
@@ -127,6 +128,7 @@ async function applyWorkerTranscriptCommit(params: {
     return messages.map((message) => {
       if (message.role === "assistant") {
         Object.assign(message, prepareWorkerTurnTranscriptMessage(params.identity, message));
+        applyAssistantDeliveryDirectives(message);
       }
       return redactTranscriptMessageForStorage(message, { config: params.config });
     });

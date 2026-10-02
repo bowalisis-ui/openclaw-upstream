@@ -473,3 +473,74 @@ it.each(["persistent", "detached"] as const)(
     });
   },
 );
+
+it("does not publish a committed session name into a manager retargeted before continuation", async () => {
+  await withOpenClawTestState({ label: "session-name-retargeted" }, async (state) => {
+    const target = {
+      agentId: "main",
+      sessionId: "name-original",
+      sessionKey: "agent:main:name-original",
+      storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
+    };
+    const replacement = {
+      ...target,
+      sessionId: "name-replacement",
+      sessionKey: "agent:main:name-replacement",
+    };
+    await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+    await replaceSessionEntry(replacement, { sessionId: replacement.sessionId, updatedAt: 1 });
+    const replacementManager = await SessionManager.openAsync(replacement, state.workspaceDir);
+    await replacementManager.appendSessionInfoAsync("Replacement name");
+    const replacementBefore = await loadTranscriptEvents(replacement);
+    const manager = await SessionManager.openAsync(target, state.workspaceDir);
+    const { session } = await createPersistenceExtensionSession(
+      manager,
+      state.workspaceDir,
+      state.agentDir("main"),
+    );
+    const committed = createDeferredCore<string>();
+    const release = createDeferredCore();
+    const append = manager.appendSessionInfoAsync.bind(manager);
+    const intercepted = vi
+      .spyOn(manager, "appendSessionInfoAsync")
+      .mockImplementation(async (name) => {
+        const id = await append(name);
+        committed.resolve(id);
+        await release.promise;
+        return id;
+      });
+    const names: Array<string | undefined> = [];
+    const unsubscribe = session.subscribe((event) => {
+      if (event.type === "session_info_changed") {
+        names.push(event.name);
+      }
+    });
+    const renamed = session.setSessionNameAsync("Committed original name");
+    try {
+      const id = await Promise.race([
+        committed.promise,
+        renamed.then(() => {
+          throw new Error("Session rename returned before the committed append was released");
+        }),
+      ]);
+      await manager.setSessionTargetAsync(replacement);
+      expect(session.sessionManager).toBe(manager);
+      expect(manager.getSessionName()).toBe("Replacement name");
+      release.resolve();
+      await expect
+        .soft(renamed)
+        .rejects.toThrow("Session changed before publishing its display name");
+      expect(names).toEqual([]);
+      expect(await loadTranscriptEvents(target)).toContainEqual(
+        expect.objectContaining({ id, type: "session_info", name: "Committed original name" }),
+      );
+      expect(await loadTranscriptEvents(replacement)).toEqual(replacementBefore);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([renamed]);
+      intercepted.mockRestore();
+      unsubscribe();
+      session.dispose();
+    }
+  });
+});

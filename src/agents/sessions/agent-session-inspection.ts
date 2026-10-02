@@ -1,4 +1,5 @@
 import { isCompactionReplayCheckpoint } from "@openclaw/ai/transports";
+import { sameSessionTranscriptTargetBinding } from "../../config/sessions/transcript-target-binding.js";
 import { captureOwnedTranscriptWriteAssertion } from "../../config/sessions/transcript-write-context.js";
 import { calculateContextTokens, estimateContextTokens } from "../runtime/index.js";
 import { AgentSessionModels } from "./agent-session-models.js";
@@ -23,10 +24,15 @@ export abstract class AgentSessionInspection extends AgentSessionModels {
   async setSessionNameAsync(name: string): Promise<void> {
     const manager = this.sessionManager;
     const target = manager.getSessionTarget();
+    const sessionId = manager.getSessionId();
     const assertCurrent = target ? captureOwnedTranscriptWriteAssertion(target) : undefined;
     await manager.appendSessionInfoAsync(name);
     assertCurrent?.();
-    if (this.sessionManager !== manager) {
+    if (
+      this.sessionManager !== manager ||
+      manager.getSessionId() !== sessionId ||
+      !sameSessionTranscriptTargetBinding(target, manager.getSessionTarget())
+    ) {
       throw new Error("Session changed before publishing its display name");
     }
     this.emit({ type: "session_info_changed", name: manager.getSessionName() });

@@ -974,16 +974,26 @@ describe("worker transcript commit application", () => {
     });
   });
 
-  it("persists run ownership on worker output while only the terminal envelope completes it", async () => {
+  it("persists run and delivery facts while only the terminal envelope completes it", async () => {
     const updates: Parameters<Parameters<typeof onSessionTranscriptUpdate>[0]>[0][] = [];
     unsubscribe = onSessionTranscriptUpdate((update) => updates.push(update));
-    const first = await committer.commit({ ...ADMITTED_OWNER, request: createRequest() });
+    const literalUserText = "Keep [[reply_to_current]] as user text";
+    const first = await committer.commit({
+      ...ADMITTED_OWNER,
+      request: createRequest({ messages: createTurnMessages(literalUserText) }),
+    });
     if (!first.ok) {
       throw new Error(`expected initial transcript commit success, received ${first.reason}`);
     }
     const nextMessage: WorkerTranscriptMessage = {
       role: "assistant",
-      content: [{ type: "text", text: "Finished." }],
+      content: [
+        {
+          type: "text",
+          text: "[[reply_to:message-7]][[audio_as_voice]][[tts:provider=mock voiceId=voice-7]]Finished.[[tts:text]]Spoken answer[[/tts:text]]",
+        },
+        { type: "text", text: "Use `[[reply_to_current]]` literally." },
+      ],
       api: "openai-responses",
       provider: "openai",
       model: "gpt-5.5",
@@ -992,49 +1002,59 @@ describe("worker transcript commit application", () => {
       timestamp: 400,
     };
 
-    const second = await committer.commit({
-      ...ADMITTED_OWNER,
-      request: createRequest({
-        baseLeafId: first.result.newLeafId,
-        messages: [nextMessage],
-        seq: 2,
-      }),
+    const secondRequest = createRequest({
+      baseLeafId: first.result.newLeafId,
+      messages: [nextMessage],
+      seq: 2,
     });
+    const originalRequest = structuredClone(secondRequest);
+    const second = await committer.commit({ ...ADMITTED_OWNER, request: secondRequest });
+    await expect(committer.commit({ ...ADMITTED_OWNER, request: secondRequest })).resolves.toEqual(
+      second,
+    );
+    expect(secondRequest).toEqual(originalRequest);
 
-    expect(second.ok).toBe(true);
     if (!second.ok) {
       throw new Error(`expected sequential transcript commit success, received ${second.reason}`);
     }
-    expect(second.result.entryIds).toHaveLength(1);
-    expect(second.result.newLeafId).toBe(second.result.entryIds[0]);
+    expect(second.result.entryIds).toEqual([second.result.newLeafId]);
     expect(second.result.newLeafId).not.toBe(first.result.newLeafId);
     const reopened = await SessionManager.openAsync(sessionTarget);
-    expect(
-      reopened
-        .getEntries()
-        .filter((entry) => entry.type === "message")
-        .map((entry) => entry.message),
-    ).toMatchObject([
-      { role: "user" },
-      { role: "assistant", __openclaw: { runId: IDENTITY.runId } },
-      { role: "toolResult", __openclaw: { runId: IDENTITY.runId } },
-      { role: "assistant", __openclaw: { runId: IDENTITY.runId } },
+    const deliveredMessage = {
+      role: "assistant",
+      __openclaw: { runId: IDENTITY.runId },
+      content: [
+        { type: "text", text: "Finished." },
+        { type: "text", text: "Use `[[reply_to_current]]` literally." },
+      ],
+      openclawDelivery: {
+        audioAsVoice: true,
+        replyToId: "message-7",
+        tts: {
+          tagged: true,
+          text: "Spoken answer",
+          directives: [{ provider: "mock", values: { voiceid: "voice-7" } }],
+        },
+      },
+    };
+    expect(reopened.getEntries()).toMatchObject([
+      { message: { role: "user", content: [{ type: "text", text: literalUserText }] } },
+      { message: { role: "assistant", __openclaw: { runId: IDENTITY.runId } } },
+      { message: { role: "toolResult", __openclaw: { runId: IDENTITY.runId } } },
+      { id: second.result.newLeafId, parentId: first.result.newLeafId, message: deliveredMessage },
     ]);
-    expect(reopened.getEntries().at(-1)).toMatchObject({
-      id: second.result.newLeafId,
-      parentId: first.result.newLeafId,
-      message: expect.objectContaining({ role: "assistant" }),
-    });
+    expect(reopened.getEntries()[0]).not.toHaveProperty("message.openclawDelivery");
     expect(reopened.getLeafId()).toBe(second.result.newLeafId);
     expect(updates).toHaveLength(4);
     for (const update of updates.slice(0, 3)) {
       expect(update).not.toHaveProperty("runId");
     }
     expect(updates[3]).toMatchObject({
-      message: { role: "assistant" },
+      message: deliveredMessage,
       messageId: second.result.newLeafId,
       messageSeq: 4,
       runId: IDENTITY.runId,
     });
+    expect(updates[0]?.message).not.toHaveProperty("openclawDelivery");
   });
 });
