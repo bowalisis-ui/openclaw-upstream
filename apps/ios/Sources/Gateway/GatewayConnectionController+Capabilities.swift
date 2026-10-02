@@ -60,13 +60,12 @@ extension GatewayConnectionController {
     }
 
     func makeConnectOptions(
-        stableID: String?,
         deviceAuthGatewayID: String?,
         allowStoredDeviceAuth: Bool = true) async -> GatewayConnectOptions
     {
         let defaults = UserDefaults.standard
         let displayName = self.resolvedDisplayName(defaults: defaults)
-        let resolvedClientId = self.resolvedClientId(defaults: defaults, stableID: stableID)
+        let resolvedClientId = self.resolvedClientId(defaults: defaults)
         let permissions = await self.currentPermissions()
         let caps = self.currentCaps()
 
@@ -83,12 +82,7 @@ extension GatewayConnectionController {
             deviceAuthGatewayID: GatewayStableIdentifier.exact(deviceAuthGatewayID))
     }
 
-    private func resolvedClientId(defaults: UserDefaults, stableID: String?) -> String {
-        if let stableID,
-           let override = GatewaySettingsStore.loadGatewayClientIdOverride(stableID: stableID)
-        {
-            return override
-        }
+    private func resolvedClientId(defaults: UserDefaults) -> String {
         let manualClientId = defaults.string(forKey: "gateway.manual.clientId")?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if manualClientId?.isEmpty == false {
