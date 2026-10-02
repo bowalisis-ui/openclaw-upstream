@@ -2555,12 +2555,12 @@ describe("gateway session utils", () => {
         agents: {
           defaults: {
             model: {
-              primary: "clawrouter/openai/gpt-5.6",
+              primary: "projected-model",
               fallbacks: ["openai/gpt-5.6-luna"],
             },
             models: {
               "openai/gpt-5.6-sol": {
-                alias: "clawrouter/openai/gpt-5.6",
+                alias: "projected-model",
                 agentRuntime: { id: "codex" },
               },
             },
