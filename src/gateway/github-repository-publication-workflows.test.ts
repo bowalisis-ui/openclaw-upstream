@@ -1,15 +1,17 @@
-import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { getSessionRepositoryWorkspaceStore } from "../state/session-repository-workspaces.js";
-import { setCanonicalUserProfileRole } from "../state/user-profile-writes.js";
-import { GitHubPublicationRequesterUnavailableError } from "./github-publication-failure.js";
-import { captureGitHubPublicationRequester } from "./github-publication-requester.js";
-import { createRequesterPublicationFixture } from "./github-publication-requester.test-support.js";
+// Install shared transport mocks before publication owners enter the module cache.
+// oxfmt-ignore
 import {
   SESSION_ID,
   SESSION_KEY,
   githubPublicationTestMocks,
   installGitHubPublicationTestHarness,
 } from "./github-publication.test-support.js";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { getSessionRepositoryWorkspaceStore } from "../state/session-repository-workspaces.js";
+import { setCanonicalUserProfileRole } from "../state/user-profile-writes.js";
+import { GitHubPublicationRequesterUnavailableError } from "./github-publication-failure.js";
+import { captureGitHubPublicationRequester } from "./github-publication-requester.js";
+import { createRequesterPublicationFixture } from "./github-publication-requester.test-support.js";
 import * as repositoryPublicationExecutor from "./github-repository-publication-executor.js";
 import { invalidateOperatorRolePolicy } from "./operator-role-policy.js";
 
