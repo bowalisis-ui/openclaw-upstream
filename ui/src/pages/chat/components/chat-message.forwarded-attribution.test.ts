@@ -88,6 +88,7 @@ describe("forwarded message attribution", () => {
       );
       const link = expectDefined(
         container.querySelector<HTMLAnchorElement>("a.markdown-file-link"),
+        "forwarded file link",
       );
       if (key === "click") {
         link.click();
@@ -147,7 +148,7 @@ describe("forwarded message attribution", () => {
               parts: [group],
             },
             {
-              streamOptions: { showReasoning: true },
+              streamOptions: {},
               renderGroupOptions: () => options,
               isWorkExpanded: () => true,
               onToggleWork: () => {},
@@ -207,7 +208,7 @@ describe("forwarded message attribution", () => {
     }
     render(
       renderAgentRunFrame(frame, {
-        streamOptions: { showReasoning: true },
+        streamOptions: {},
         renderGroupOptions: () => ({ showReasoning: true }),
         isWorkExpanded: () => true,
         onToggleWork: () => {},
@@ -218,6 +219,7 @@ describe("forwarded message attribution", () => {
     container.addEventListener("click", (event) => opened(markdownFileLinkFromEvent(event)));
     const link = expectDefined(
       container.querySelector<HTMLAnchorElement>('a[data-file-path="reports/index.html"]'),
+      "narrated file link",
     );
     link.click();
     expect(opened).toHaveBeenCalledExactlyOnceWith({

@@ -9,6 +9,7 @@ import {
   computeInlineScriptHashes,
 } from "../../../src/gateway/control-ui-csp.js";
 import { createSandboxHostHttpServer } from "../../../src/gateway/mcp-app-sandbox-http.js";
+import { prepareHtmlPreviewAssets } from "../pages/chat/components/chat-html-preview-assets.ts";
 import {
   createControlUiMockBootstrapConfig,
   defaultControlUiFeatureMethods,
@@ -51,6 +52,45 @@ async function listen(server: Server): Promise<number> {
 }
 
 suite.define(() => {
+  it("runs deferred file scripts after the body while keeping blocking scripts in the head", async () => {
+    const scripts: Record<string, string> = {
+      "blocking.js":
+        'document.documentElement.dataset.blockingSawApp = String(Boolean(document.querySelector("#app")));',
+      "first.js":
+        'const app = document.querySelector("#app"); if (app) app.textContent = "initialized";',
+      "second.js":
+        'const output = document.querySelector("#app"); if (output) output.textContent += " in order";',
+    };
+    const prepared = await prepareHtmlPreviewAssets(
+      '<!doctype html><html><head><script src="blocking.js"></script><script defer src="first.js"></script><script defer src="second.js"></script></head><body><div id="app">waiting</div></body></html>',
+      true,
+      async (refs) => ({
+        assets: refs.map((ref) => ({
+          ref,
+          mimeType: "text/javascript",
+          content: Buffer.from(scripts[ref]!).toString("base64"),
+        })),
+      }),
+    );
+    await suite.withPage({}, async ({ page }) => {
+      const result = await page.evaluate(async (html) => {
+        const frame = document.createElement("iframe");
+        const loaded = new Promise<void>((resolve) => {
+          frame.addEventListener("load", () => resolve(), { once: true });
+        });
+        frame.srcdoc = html;
+        document.body.append(frame);
+        await loaded;
+        const preview = frame.contentDocument!;
+        return {
+          blockingSawApp: preview.documentElement.dataset.blockingSawApp,
+          appText: preview.querySelector("#app")?.textContent,
+        };
+      }, prepared.html);
+      expect(result).toEqual({ blockingSawApp: "false", appText: "initialized in order" });
+    });
+  });
+
   for (const mode of ["scripts", "strict"] as const) {
     it(`renders HTML with ${mode} and retains Source in the same file tab`, async (test) => {
       let sandbox: Server | undefined;

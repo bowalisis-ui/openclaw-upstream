@@ -94,25 +94,6 @@ export async function authorizeGatewayRequestPreDispatch(params: {
     if (scopeAuthorization.error) {
       return { error: scopeAuthorization.error };
     }
-    const currentAuthorizationError = (): ErrorShape | null => {
-      const currentAuthorization = authorizeMethod();
-      const currentError = currentAuthorization.error ?? startupError();
-      if (currentError) {
-        return currentError;
-      }
-      try {
-        params.expectedProfileBinding?.assertCurrent();
-        params.assertInvocationCurrent?.();
-      } catch (error) {
-        if (error instanceof SessionMutationAuthorizationChangedError) {
-          return error.error;
-        }
-        throw error;
-      }
-      return currentAuthorization.sessionScope === scopeAuthorization.sessionScope
-        ? null
-        : errorShape(ErrorCodes.FORBIDDEN, "Gateway requester authority changed");
-    };
     const uploadError = gatewayRouterUploadPolicyError(params, params.methodRegistry);
     if (uploadError) {
       return { error: uploadError };
@@ -168,18 +149,8 @@ export async function authorizeGatewayRequestPreDispatch(params: {
       (params.consumeSessionTurn || !isGatewayAdmin(params.client))
         ? getSessionRowProjection(params.context)
         : undefined;
-    const authorizeSession = (sessionRowRead?: SessionRowReadView) => {
-      if (params.consumeSessionTurn) {
-        // Transient incognito rows must be consumed before their prepared view closes.
-        // Never fall back to the legacy synchronous store reader for this read path.
-        const error = currentAuthorizationError();
-        if (error || !sessionRowRead) {
-          return {
-            error: error ?? errorShape(ErrorCodes.UNAVAILABLE, "Session facts are unavailable"),
-          };
-        }
-      }
-      const result = sessionPolicy
+    const authorizeSession = (sessionRowRead?: SessionRowReadView) =>
+      sessionPolicy
         ? { error: null }
         : resolveSessionMutationAuthorization({
             client: params.client ?? null,
@@ -189,32 +160,60 @@ export async function authorizeGatewayRequestPreDispatch(params: {
             sessionRowRead,
             sessionScope: scopeAuthorization.sessionScope,
           });
-      if (!result.error && params.consumeSessionTurn && sessionRowRead) {
-        const { target, consume } = params.consumeSessionTurn;
-        const admitted = result.authorization?.admittedTarget;
-        const row =
-          admitted &&
-          sessionRowRead.describe({
-            key: admitted.sessionKey,
-            agentId: admitted.agentId,
-          });
-        if (
-          !admitted ||
-          admitted.sessionId !== target.sessionId ||
-          admitted.sessionKey !== target.sessionKey ||
-          (target.agentId !== undefined && admitted.agentId !== target.agentId) ||
-          row?.storedEntry?.sessionId !== target.sessionId
-        ) {
-          return { error: errorShape(ErrorCodes.FORBIDDEN, "Session changed before file read") };
+    const authorizeSessionAndConsume = params.consumeSessionTurn
+      ? (sessionRowRead?: SessionRowReadView) => {
+          // Consume transient incognito rows before their prepared view closes.
+          const currentAuthorization = authorizeMethod();
+          const currentError = currentAuthorization.error ?? startupError();
+          if (currentError) {
+            return { error: currentError };
+          }
+          try {
+            params.expectedProfileBinding?.assertCurrent();
+            params.assertInvocationCurrent?.();
+          } catch (error) {
+            if (error instanceof SessionMutationAuthorizationChangedError) {
+              return { error: error.error };
+            }
+            throw error;
+          }
+          if (currentAuthorization.sessionScope !== scopeAuthorization.sessionScope) {
+            return {
+              error: errorShape(ErrorCodes.FORBIDDEN, "Gateway requester authority changed"),
+            };
+          }
+          if (!sessionRowRead) {
+            return { error: errorShape(ErrorCodes.UNAVAILABLE, "Session facts are unavailable") };
+          }
+          const result = authorizeSession(sessionRowRead);
+          if (result.error) {
+            return result;
+          }
+          const { target, consume } = params.consumeSessionTurn!;
+          const admitted = result.authorization?.admittedTarget;
+          const row =
+            admitted &&
+            sessionRowRead.describe({
+              key: admitted.sessionKey,
+              agentId: admitted.agentId,
+            });
+          if (
+            !admitted ||
+            admitted.sessionId !== target.sessionId ||
+            admitted.sessionKey !== target.sessionKey ||
+            (target.agentId !== undefined && admitted.agentId !== target.agentId) ||
+            row?.storedEntry?.sessionId !== target.sessionId
+          ) {
+            return { error: errorShape(ErrorCodes.FORBIDDEN, "Session changed before file read") };
+          }
+          const value = consume(row.storedEntry);
+          if (isPromiseLike(value)) {
+            void Promise.resolve(value).catch(() => {});
+            throw new Error("Session turn authority consumers must remain synchronous");
+          }
+          return result;
         }
-        const value = consume(row.storedEntry);
-        if (isPromiseLike(value)) {
-          void Promise.resolve(value).catch(() => {});
-          throw new Error("Session turn authority consumers must remain synchronous");
-        }
-      }
-      return result;
-    };
+      : authorizeSession;
     const subscriptionAccessOnly =
       params.method === "sessions.messages.subscribe" &&
       resolveDirectIncognitoTargets(params.method, params.requestParams).length === 0;
@@ -241,9 +240,9 @@ export async function authorizeGatewayRequestPreDispatch(params: {
                 );
                 return agent.ok ? [{ key: target.sessionKey, agentId: agent.agentId }] : [];
               }),
-            authorizeSession,
+            authorizeSessionAndConsume,
           )
-        : withCanonicalSessionValidationDeferral(() => authorizeSession());
+        : withCanonicalSessionValidationDeferral(() => authorizeSessionAndConsume());
     params.markSessionSubscribePhase?.("accessFacts");
     if (preparedSessionMutation.kind === "pending") {
       const { certifySessionCanonicalValidationPending } =
@@ -294,16 +293,24 @@ export async function authorizeGatewayRequestPreDispatch(params: {
         }),
       };
     }
-    let currentError: ErrorShape | null;
-    try {
-      currentError = currentAuthorizationError();
-    } catch (error) {
-      sessionAccessAuthority?.release();
-      throw error;
-    }
+    const currentAuthorization = authorizeMethod();
+    const currentError = currentAuthorization.error ?? startupError();
     if (currentError) {
       sessionAccessAuthority?.release();
       return { error: currentError };
+    }
+    try {
+      params.expectedProfileBinding?.assertCurrent();
+    } catch (error) {
+      sessionAccessAuthority?.release();
+      if (error instanceof SessionMutationAuthorizationChangedError) {
+        return { error: error.error };
+      }
+      throw error;
+    }
+    if (currentAuthorization.sessionScope !== scopeAuthorization.sessionScope) {
+      sessionAccessAuthority?.release();
+      return { error: errorShape(ErrorCodes.FORBIDDEN, "Gateway requester authority changed") };
     }
     return {
       error: null,

@@ -341,6 +341,7 @@ export async function prepareHtmlPreviewAssets(
       text: `<style${attrs}>${content}</style>`,
     });
   }
+  const deferredScripts: { start: number; text: string }[] = [];
   for (const { node, ref } of scripts) {
     const asset = loaded.get(ref);
     const loc = node.sourceCodeLocation;
@@ -348,7 +349,28 @@ export async function prepareHtmlPreviewAssets(
     if (!asset || !src || !loc?.startTag || !loc.endTag) {
       continue;
     }
-    const attrs = retainedAttributes(source, node, ["src", "integrity", "crossorigin"]);
+    const deferred =
+      node.attrs.some((attr) => attr.name === "defer") &&
+      !node.attrs.some(
+        (attr) =>
+          attr.name === "async" || (attr.name === "type" && attr.value.toLowerCase() === "module"),
+      );
+    const attrs = retainedAttributes(source, node, [
+      "src",
+      "integrity",
+      "crossorigin",
+      ...(deferred ? ["defer"] : []),
+    ]);
+    const content = decodeText(asset).replace(/<\/script/gi, "<\\/script");
+    if (deferred) {
+      // Inline classic scripts ignore defer, so run them after all authored document content.
+      deferredScripts.push({
+        start: loc.startOffset,
+        text: `<script${attrs}>${content}</script>`,
+      });
+      edits.push({ start: loc.startOffset, end: loc.endOffset, text: "" });
+      continue;
+    }
     edits.push({
       start: loc.startTag.startOffset,
       end: loc.startTag.endOffset,
@@ -357,8 +379,16 @@ export async function prepareHtmlPreviewAssets(
     edits.push({
       start: loc.startTag.endOffset,
       end: loc.endTag.startOffset,
-      text: decodeText(asset).replace(/<\/script/gi, "<\\/script"),
+      text: content,
     });
   }
-  return { html: applyEdits(source, edits), omitted: omitted.size };
+  return {
+    html:
+      applyEdits(source, edits) +
+      deferredScripts
+        .toSorted((a, b) => a.start - b.start)
+        .map((script) => script.text)
+        .join(""),
+    omitted: omitted.size,
+  };
 }

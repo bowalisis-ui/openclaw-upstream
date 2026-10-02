@@ -55,6 +55,25 @@ describe("session file HTML assets", () => {
     });
   });
 
+  it("appends deferred classic scripts in source order while keeping other scripts in place", async () => {
+    const source =
+      '<!doctype html><html><head><script defer src="first.js" nonce="preview" integrity="hash" crossorigin="anonymous" data-label="first"></script><script type="module" defer src="module.js"></script><script async src="async.js"></script><script async defer src="async-defer.js"></script><script src="blocking.js"></script></head><body><p>App</p><script defer src="second.js"></script></body></html><!-- authored tail -->';
+    const refs = [
+      "first.js",
+      "module.js",
+      "async.js",
+      "async-defer.js",
+      "blocking.js",
+      "second.js",
+    ];
+    const fetch = reader(refs.map((ref) => asset(ref, "text/javascript", `run("${ref}");`)));
+
+    expect(await prepareHtmlPreviewAssets(source, true, fetch)).toEqual({
+      html: '<!doctype html><html><head><script type="module" defer>run("module.js");</script><script async>run("async.js");</script><script async defer>run("async-defer.js");</script><script>run("blocking.js");</script></head><body><p>App</p></body></html><!-- authored tail --><script nonce="preview" data-label="first">run("first.js");</script><script>run("second.js");</script>',
+      omitted: 0,
+    });
+  });
+
   it("handles media srcsets and inline CSS while preserving remote URLs, fonts, CSS strings and comments", async () => {
     const source =
       '<style>/* url(fake.png) */p::after{content:"url(fake.png)"}p{background:url("a.png")} @font-face{src:url(font)}</style><img srcset="a.png 1x, data:image/png;base64,Yg== 2x, b.png 3x"><source src="a.png" srcset="b.png 2x"><video src="clip.mp4" poster="a.png"></video><audio src="sound.mp3"></audio><input type="IMAGE" src="a.png"><p style="background:url(a.png)"></p><img src="//example.test/a.png"><img src="https://example.test/a.png"><img src="#image"><img src="/absolute.png">';

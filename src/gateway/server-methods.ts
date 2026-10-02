@@ -38,6 +38,7 @@ import { prepareGatewayRequestHandler } from "./server-methods/lazy-core-handler
 import { authorizeGatewayRequestPreDispatch } from "./server-methods/request-authorization.js";
 import { isTargetedNonSafeGatewayRestartRequest } from "./server-methods/restart-request.js";
 import {
+  assertGatewayRequestReadAuthorityCurrent,
   bindGatewayRequestHandlerMutationAuthority,
   captureGatewayRequestOperatorGuard,
   readGatewayRequestMutationAuthority,
@@ -294,6 +295,13 @@ export async function handleGatewayRequest(
   if (runtimeParticipant === null) {
     return;
   }
+  const isSessionFileRead =
+    req.method === "sessions.files.get" ||
+    req.method === "sessions.files.list" ||
+    req.method === "sessions.files.assets";
+  const assertFileReadCurrent = isSessionFileRead
+    ? () => assertGatewayRequestReadAuthorityCurrent(opts)
+    : undefined;
   const profileBinding =
     opts.expectedProfileBinding ??
     (req.expectedProfileId === undefined
@@ -301,7 +309,7 @@ export async function handleGatewayRequest(
       : await createExpectedProfileBinding(
           req.expectedProfileId,
           client,
-          readGatewayRequestMutationAuthority(opts).assertLifetimeCurrent,
+          assertFileReadCurrent ?? readGatewayRequestMutationAuthority(opts).assertLifetimeCurrent,
         ));
   // WS publication already owns the shared guard, including policy-close responses.
   const profileRespond =
@@ -316,14 +324,15 @@ export async function handleGatewayRequest(
         profileRespond(ok, ...response);
       }
     : profileRespond;
+  const requestCommitGuard = assertFileReadCurrent ?? opts.sessionMutationCommitGuard;
   const sessionMutationCommitGuard =
     profileBinding || runtimeParticipant
       ? () => {
           profileBinding?.assertCurrent();
           runtimeParticipant?.assertCurrent();
-          opts.sessionMutationCommitGuard?.();
+          requestCommitGuard?.();
         }
-      : opts.sessionMutationCommitGuard;
+      : requestCommitGuard;
   const entry = opts.requestEntry ?? context.requestEntryLifetime?.enter(opts);
   const releaseForegroundWork = retainSessionListForegroundWork();
   let sessionAccessAuthority: GatewaySessionAccessAuthority | undefined;
@@ -384,7 +393,7 @@ export async function handleGatewayRequest(
         assertInvocationCurrent: () => {
           runtimeParticipant?.assertCurrent();
           assertOperatorCurrent();
-          requestMutationAuthority.assertCurrent();
+          assertGatewayRequestReadAuthorityCurrent(opts);
         },
         consumeSessionTurn: {
           target: { ...target },
@@ -408,7 +417,7 @@ export async function handleGatewayRequest(
       () => {
         runtimeParticipant?.assertCurrent();
         assertOperatorCurrent();
-        requestMutationAuthority.assertCurrent();
+        (assertFileReadCurrent ?? requestMutationAuthority.assertCurrent)();
       },
       profileBinding?.assertCurrent,
       requestMutationAuthority.assertAdmittedInputCurrent
