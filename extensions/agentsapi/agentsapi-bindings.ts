@@ -8,7 +8,7 @@ import { z } from "zod";
 import {
   agentsApiExecutorBindingSchema,
   type AgentsApiExecutorBinding,
-} from "./agentsapi-environment.js";
+} from "./agentsapi-executor-binding.js";
 
 export type AgentsApiBinding = {
   sessionId: string;

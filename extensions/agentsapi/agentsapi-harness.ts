@@ -176,7 +176,8 @@ export function createAgentsApiHarness(runtime: PluginRuntime): AgentHarnessV2 {
               target,
               () => runtime.config.current().plugins?.entries?.agentsapi?.config,
               promptHistories,
-              (binding, apiKey) => prepareNativeCleanup(params.sessionId, binding, apiKey),
+              (nativeBinding, apiKey) =>
+                prepareNativeCleanup(params.sessionId, nativeBinding, apiKey),
             );
           },
         );
