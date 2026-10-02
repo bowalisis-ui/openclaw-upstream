@@ -196,9 +196,9 @@ export async function open(options: OpenOptions): Promise<MessageBody> {
   }
 }
 
-export async function openClaimed(options: OpenOptions): Promise<ClaimedOpenResult> {
-  const envelope = validateEnvelope(options.envelope);
-  if (!options.senderSigningPublicKey) {
+export function verifySignedEnvelope(value: unknown, senderSigningPublicKey?: string) {
+  const envelope = validateEnvelope(value);
+  if (!senderSigningPublicKey) {
     throw new NotPinnedError();
   }
   const { sig, ...unsigned } = envelope;
@@ -207,7 +207,7 @@ export async function openClaimed(options: OpenOptions): Promise<ClaimedOpenResu
     validSignature = ed25519.verify(
       fromBase64(sig),
       canonicalBytes(unsigned),
-      decodeKey(options.senderSigningPublicKey),
+      decodeKey(senderSigningPublicKey),
     );
   } catch {}
   if (!validSignature) {
@@ -217,6 +217,11 @@ export async function openClaimed(options: OpenOptions): Promise<ClaimedOpenResu
     throw new MalformedError();
   }
   validateEnvelopeMetadata(envelope.id, envelope.from, envelope.to, envelope.ts);
+  return envelope;
+}
+
+export async function openClaimed(options: OpenOptions): Promise<ClaimedOpenResult> {
+  const envelope = verifySignedEnvelope(options.envelope, options.senderSigningPublicKey);
   if (envelope.to !== options.self) {
     throw new WrongRecipientError();
   }

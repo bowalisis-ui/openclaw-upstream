@@ -293,13 +293,20 @@ export type PluginDoctorChannelIngressAccessOptions = {
 
 export function createPluginDoctorStateMigrationContext(params: {
   pluginId: string;
+  migrationId?: string;
   env: NodeJS.ProcessEnv;
   config: OpenClawConfig;
   repairAuthority?: PluginDoctorRepairAuthority;
+  stateImportAuthority?: PluginDoctorRepairAuthority;
   trustedForDurableStores?: boolean;
   channelIngress?: PluginDoctorChannelIngressAccessOptions;
 }): PluginDoctorStateMigrationContext {
   const { pluginId, env } = params;
+  const stateImportAuthority = params.stateImportAuthority ?? params.repairAuthority;
+  const rejectMutation = (): never => {
+    throw new Error("Plugin Doctor state mutation requires an active migration callback.");
+  };
+  const rejectAsyncMutation = async (): Promise<never> => rejectMutation();
   const cache: SessionStoreTargetsReadCache = new Map();
   const targetsByAgent = new Map<string, readonly DoctorSessionStoreTarget[] | null>();
   const context: PluginDoctorStateMigrationContext = {
@@ -311,10 +318,51 @@ export function createPluginDoctorStateMigrationContext(params: {
     },
     getPluginStateCapacity: () => getPluginStateCapacity(pluginId, env),
     importPluginStateEntries(options, entries) {
+      if (!stateImportAuthority) {
+        return rejectMutation();
+      }
+      stateImportAuthority.assertCurrent();
       importPluginStateEntriesForDoctor(pluginId, { ...options, env: options.env ?? env }, entries);
     },
     openPluginStateKeyedStore<T>(options: OpenKeyedStoreOptions) {
-      return createPluginStateKeyedStore<T>(pluginId, { ...options, env: options.env ?? env });
+      stateImportAuthority?.assertCurrent();
+      const store = createPluginStateKeyedStore<T>(pluginId, {
+        ...options,
+        env: options.env ?? env,
+      });
+      if (stateImportAuthority) {
+        const assertCurrent = () => stateImportAuthority.assertCurrent();
+        return {
+          ...store.withCurrent({ assertCurrent }),
+          withCurrent: (authority: Parameters<typeof store.withCurrent>[0]) =>
+            store.withCurrent({
+              ...authority,
+              assertCurrent: () => {
+                assertCurrent();
+                authority.assertCurrent();
+              },
+            }),
+        };
+      }
+      return {
+        lookup: store.lookup,
+        lookupMany: store.lookupMany,
+        entries: store.entries,
+        entriesInKeyRange: store.entriesInKeyRange,
+        count: store.count,
+        observe: rejectAsyncMutation,
+        compareAndApply: rejectAsyncMutation,
+        register: rejectAsyncMutation,
+        registerIfAbsent: rejectAsyncMutation,
+        update: rejectAsyncMutation,
+        deleteIf: rejectAsyncMutation,
+        deleteIfEqual: rejectAsyncMutation,
+        consume: rejectAsyncMutation,
+        delete: rejectAsyncMutation,
+        moveEntriesFrom: rejectAsyncMutation,
+        clear: rejectAsyncMutation,
+        withCurrent: rejectMutation,
+      };
     },
     readPluginStateEntriesInKeyRange(namespace, range) {
       params.repairAuthority?.assertCurrent();
@@ -342,6 +390,26 @@ export function createPluginDoctorStateMigrationContext(params: {
     context.channelIngressQueues = buildChannelIngressQueueAccess(params.channelIngress);
   }
   if (params.trustedForDurableStores) {
+    if (params.migrationId) {
+      const scope = { pluginId, migrationId: params.migrationId, env };
+      context.inspectImportedPluginStateSources = async (sources) => {
+        const { inspectImportedPluginStateSources } =
+          await import("../plugin-state/plugin-state-doctor-import.js");
+        params.repairAuthority?.assertCurrent();
+        return inspectImportedPluginStateSources(scope, sources);
+      };
+      if (stateImportAuthority) {
+        const authority = stateImportAuthority;
+        context.importPluginStateRows = async (rows) => {
+          authority.assertCurrent();
+          const plan = structuredClone(rows);
+          const { importPluginStateRowsForDoctor } =
+            await import("../plugin-state/plugin-state-doctor-import.js");
+          authority.assertCurrent();
+          return importPluginStateRowsForDoctor(scope, authority, plan);
+        };
+      }
+    }
     context.inspectCronJobs = async () => {
       params.repairAuthority?.assertCurrent();
       const { inspectCronJobsForDoctor } = await import("../commands/doctor/cron/store-repair.js");

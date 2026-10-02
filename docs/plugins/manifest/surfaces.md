@@ -84,6 +84,21 @@ rebuildable artifact. This applies only to cleanup failures after import succeed
 Read, import, and verification failures still refuse the migration. Every plan
 consuming a shared source must opt in before its cleanup failures become advisory.
 
+For a supported SQLite row format, trusted plugin Doctor migrations can use
+`context.importPluginStateRows` with exact observed source rows, any dependent
+rows, and canonical targets in their own keyed namespaces. The host binds the
+plugin and migration identity, saves a verified SQLite backup, rechecks the source
+and target in one transaction, and commits each target with a durable migration
+receipt. Conflicting targets or changed sources refuse the whole batch. Source
+rows remain untouched, and imported rows preserve their requested creation and
+expiry times. `context.inspectImportedPluginStateSources` reads those receipts
+without creating a database. A receipt survives consumption or pruning of the
+target, preventing later Doctor runs from replaying it. The import capability is
+available only during active offline repair; older hosts may omit it.
+Use an explicit `target: null` to record a handled source without creating or
+changing a canonical row, such as an expired delivery. The same backup,
+source comparisons, authority checks, and durable receipt apply.
+
 The Codex plugin sets `doctorHealthChecks: true` when its public API exports
 health-check registration. Doctor checks the selected plugin's trust before
 loading this surface. Older installed versions without the declaration skip

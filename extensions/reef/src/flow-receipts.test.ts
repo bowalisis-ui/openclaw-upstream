@@ -5,7 +5,6 @@ import {
   generateIdentity,
   sha256Hex,
   signReceipt,
-  type AuditEntry,
 } from "../protocol/index.js";
 import { MemoryAuditStore, MemoryReplayStore } from "../protocol/memory-stores.test-support.js";
 import { ReefMessageFlow } from "./flow.js";
@@ -23,10 +22,6 @@ import {
 import { reefPeerIdentity } from "./friend-types.js";
 import { processReefInboxEntriesInOrder, ReefReceiptNotifier } from "./owner-notice.js";
 import type { ReefTransportClient } from "./transport.js";
-import {
-  REEF_OUTBOUND_DELIVERY_MAX_ENTRIES,
-  REEF_OUTBOUND_DELIVERY_TTL_MS,
-} from "./trust-store.js";
 import type { InboxEntry } from "./types.js";
 
 beforeEach(resetFlowStoresForTests);
@@ -108,7 +103,7 @@ describe("ReefMessageFlow delivery receipts", () => {
     expect(entries).not.toHaveBeenCalled();
   });
 
-  it("confirms a recent pre-binding accepted receipt only once", async () => {
+  it("quarantines an unimported pre-binding receipt without reconstructing audit state", async () => {
     const alice = generateIdentity();
     const bob = reefKeys();
     const trusted = trust({ alice: peerTrust(alice) });
@@ -127,6 +122,7 @@ describe("ReefMessageFlow delivery receipts", () => {
       policyVersion: "v1",
     });
     const flow = createFlow({ alice, bob, audit, trusted });
+    const auditReads = vi.spyOn(audit, "entries");
     const receipt = signedReceipt(alice, {
       auditHead: "a".repeat(64),
       id,
@@ -138,169 +134,29 @@ describe("ReefMessageFlow delivery receipts", () => {
     await expect(flow.processEntries([entry])).resolves.toEqual([]);
     await expect(flow.processEntries([{ ...entry, seq: 2 }])).resolves.toEqual([]);
 
+    expect(auditReads).not.toHaveBeenCalled();
     const events = (await audit.entries()).map((item) => item.event.type);
-    expect(events.filter((type) => type === "confirm_delivery")).toHaveLength(1);
-    expect(events.filter((type) => type === "invalid_delivery_receipt")).toHaveLength(1);
+    expect(events.filter((type) => type === "confirm_delivery")).toHaveLength(0);
+    expect(events.filter((type) => type === "invalid_delivery_receipt")).toHaveLength(2);
     expect(trusted.deliveries.has(`alice:${id}`)).toBe(false);
   });
 
-  it("does not let abandoned proposals evict sealed legacy deliveries", async () => {
-    const alice = generateIdentity();
-    const bob = reefKeys();
-    const audit = new MemoryAuditStore(new Uint8Array(32).fill(18));
-    const id = "01JZ0000000000000000000132";
-    const bodyHash = "a".repeat(64);
-    const ts = Math.floor(Date.now() / 1_000);
-    const entries: AuditEntry[] = [
-      {
-        event: { seq: 1, ts, type: "proposal", payload: { id, to: "alice#1", bodyHash } },
-        prevHash: "",
-        entryHash: "",
-      },
-      {
-        event: {
-          seq: 2,
-          ts,
-          type: "proposal",
-          payload: { id: "abandoned-0", to: "alice#1", bodyHash },
-        },
-        prevHash: "",
-        entryHash: "",
-      },
-      ...Array.from({ length: REEF_OUTBOUND_DELIVERY_MAX_ENTRIES - 1 }, (_, index) => ({
-        event: {
-          seq: index + 3,
-          ts,
-          type: "proposal",
-          payload: { id: `abandoned-${index + 1}`, to: "alice#1", bodyHash },
-        },
-        prevHash: "",
-        entryHash: "",
-      })),
-      {
-        event: {
-          seq: REEF_OUTBOUND_DELIVERY_MAX_ENTRIES + 2,
-          ts,
-          type: "envelope",
-          payload: { id },
-        },
-        prevHash: "",
-        entryHash: "",
-      },
-    ];
-    vi.spyOn(audit, "entries").mockResolvedValueOnce(entries);
-    const flow = createFlow({ alice, bob, audit });
-    const receipt = signedReceipt(alice, {
-      id,
-      bodyHash,
-      status: "accepted",
-    });
-
-    await expect(flow.processEntries([receiptEntry(receipt)])).resolves.toEqual([]);
-    expect(
-      (await audit.entries()).filter((entry) => entry.event.type === "confirm_delivery"),
-    ).toHaveLength(1);
-  });
-
-  it("anchors legacy recovery retention to envelope sealing", async () => {
-    const alice = generateIdentity();
-    const bob = reefKeys();
-    const audit = new MemoryAuditStore(new Uint8Array(32).fill(20));
-    const id = "01JZ0000000000000000000135";
-    const bodyHash = "a".repeat(64);
-    const sealedAt = Math.floor(Date.now() / 1_000);
-    const proposedAt = sealedAt - Math.ceil(REEF_OUTBOUND_DELIVERY_TTL_MS / 1_000) - 1;
-    const entries: AuditEntry[] = [
-      {
-        event: {
-          seq: 1,
-          ts: proposedAt,
-          type: "proposal",
-          payload: { id, to: "alice#1", bodyHash },
-        },
-        prevHash: "",
-        entryHash: "",
-      },
-      {
-        event: { seq: 2, ts: sealedAt, type: "envelope", payload: { id } },
-        prevHash: "",
-        entryHash: "",
-      },
-    ];
-    vi.spyOn(audit, "entries").mockResolvedValueOnce(entries);
-    const flow = createFlow({ alice, bob, audit });
-    const receipt = signedReceipt(alice, {
-      id,
-      bodyHash,
-      status: "accepted",
-    });
-
-    await flow.processEntries([receiptEntry(receipt, 1, sealedAt)]);
-
-    expect(
-      (await audit.entries()).filter((entry) => entry.event.type === "confirm_delivery"),
-    ).toHaveLength(1);
-  });
-
-  it("expires candidates after a cached legacy index ages out", async () => {
-    const alice = generateIdentity();
-    const bob = reefKeys();
-    const trusted = trust({ alice: peerTrust(alice) });
-    const audit = new MemoryAuditStore(new Uint8Array(32).fill(19));
-    const id = "01JZ0000000000000000000133";
-    const missId = "01JZ0000000000000000000134";
-    const bodyHash = "a".repeat(64);
-    const now = Date.now();
-    const ts = Math.floor(now / 1_000);
-    const entries: AuditEntry[] = [
-      {
-        event: { seq: 1, ts, type: "proposal", payload: { id, to: "alice#1", bodyHash } },
-        prevHash: "",
-        entryHash: "",
-      },
-      {
-        event: { seq: 2, ts, type: "envelope", payload: { id } },
-        prevHash: "",
-        entryHash: "",
-      },
-    ];
-    const auditEntries = vi.spyOn(audit, "entries").mockResolvedValueOnce(entries);
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
-    const flow = createFlow({ alice, bob, audit, trusted });
-    const miss = signedReceipt(alice, {
-      id: missId,
-      bodyHash,
-      status: "accepted",
-    });
-    const receipt = signedReceipt(alice, {
-      auditHead: "c".repeat(64),
-      id,
-      bodyHash,
-      status: "accepted",
-    });
-
-    try {
-      await flow.processEntries([receiptEntry(miss)]);
-      nowSpy.mockReturnValue(now + REEF_OUTBOUND_DELIVERY_TTL_MS + 1_000);
-      await flow.processEntries([receiptEntry(receipt, 2)]);
-    } finally {
-      nowSpy.mockRestore();
-    }
-
-    expect(auditEntries).toHaveBeenCalledOnce();
-    expect(
-      (await audit.entries()).filter((entry) => entry.event.type === "confirm_delivery"),
-    ).toHaveLength(0);
-    expect(trusted.deliveries.has(`alice:${id}`)).toBe(false);
-  });
-
-  it("surfaces a recent pre-binding rejection as durable stop-only guidance", async () => {
+  it("surfaces an imported pre-binding rejection as durable stop-only guidance", async () => {
     const alice = generateIdentity();
     const bob = reefKeys();
     const trusted = trust({ alice: peerTrust(alice) });
     const audit = new MemoryAuditStore(new Uint8Array(32).fill(16));
     const id = "01JZ0000000000000000000128";
     const text = "queued rejection before delivery bindings";
+    trusted.store.recordOutboundDelivery(
+      "alice",
+      id,
+      {
+        bodyHash: sha256Hex(canonicalBytes({ text })),
+        recipient: reefPeerIdentity(peerTrust(alice)),
+      },
+      { resendDisabled: true },
+    );
     await composeOutbound({
       id,
       from: "bob#1",
@@ -434,7 +290,6 @@ describe("ReefMessageFlow delivery receipts", () => {
     const bob = reefKeys();
     const trusted = trust({ alice: peerTrust(alice) });
     const audit = new MemoryAuditStore(new Uint8Array(32).fill(12));
-    const auditEntries = vi.spyOn(audit, "entries");
     const flow = createFlow({ alice, bob, audit, trusted });
     const id = "01JZ0000000000000000000113";
     const receipt = signedReceipt(alice, {
@@ -460,7 +315,6 @@ describe("ReefMessageFlow delivery receipts", () => {
       category: "guard_deny",
     });
     await expect(flow.processEntries([receiptEntry(otherReceipt, 2)])).resolves.toEqual([]);
-    expect(auditEntries).toHaveBeenCalledOnce();
     const events = (await audit.entries()).map((entry) => entry.event.type);
     expect(events).toContain("invalid_delivery_receipt");
     expect(events).not.toContain("confirm_delivery");

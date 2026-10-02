@@ -8,6 +8,10 @@ import type { LegacyConfigRule } from "../config/legacy.shared.js";
 import type { SessionAcpMeta, SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.js";
 import type {
+  PluginDoctorStateRowImport,
+  PluginDoctorStateSourceKey,
+} from "../plugin-state/plugin-state-doctor-import.js";
+import type {
   OpenKeyedStoreOptions,
   PluginDoctorRawStateEntry,
   PluginStateKeyedStore,
@@ -40,6 +44,14 @@ export type PluginDoctorCronChange = {
 };
 
 export type PluginDoctorStateMigrationContext = {
+  /** Read-only receipts for this plugin and migration, retained after target consumption. */
+  inspectImportedPluginStateSources?: (
+    sources: readonly PluginDoctorStateSourceKey[],
+  ) => Promise<PluginDoctorStateSourceKey[]>;
+  /** Offline repair: verified backup, exact source comparison, and rows plus receipts in one commit. */
+  importPluginStateRows?: (
+    rows: readonly PluginDoctorStateRowImport[],
+  ) => Promise<{ imported: number; skipped: number; backupPath?: string }>;
   /** Trusted plugins only; non-creating inspection includes inactive cron partitions. */
   inspectCronJobs?: () => Promise<PluginDoctorCronInventory>;
   /** Offline repair only. Backs up first, then compares inspected rows before one commit. */

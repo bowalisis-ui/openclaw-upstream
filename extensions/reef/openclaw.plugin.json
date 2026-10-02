@@ -8,7 +8,8 @@
       { "id": "reef-registration-json-to-plugin-state" },
       { "id": "reef-audit-jsonl-to-plugin-state" },
       { "id": "reef-runtime-files-to-plugin-state" },
-      { "id": "reef-config-trust-to-plugin-state" }
+      { "id": "reef-config-trust-to-plugin-state" },
+      { "id": "reef-audit-to-outbound-bindings" }
     ]
   },
   "name": "Reef",

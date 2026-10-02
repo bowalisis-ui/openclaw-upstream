@@ -32,7 +32,8 @@ export const REEF_KEYS_MIGRATION_KEY = "keys-json";
 export const REEF_KEYS_MIGRATION_MAX_ENTRIES = 1;
 export const REEF_DURABLE_MIGRATION_NAMESPACE = "durable-migration";
 export const REEF_DURABLE_MIGRATION_KEY = "legacy-files";
-export const REEF_DURABLE_MIGRATION_MAX_ENTRIES = 1;
+export const REEF_OUTBOUND_MIGRATION_KEY = "outbound-deliveries";
+export const REEF_DURABLE_MIGRATION_MAX_ENTRIES = 2;
 export const REEF_REVIEWS_NAMESPACE = "reviews";
 export const REEF_REVIEWS_MAX_ENTRIES = 2_000;
 export const REEF_DELIVERED_NAMESPACE = "delivered";
@@ -87,6 +88,11 @@ function assertReefIdentityMigrationComplete(runtime: PluginRuntime): void {
   if (durableMigration.lookup(REEF_DURABLE_MIGRATION_KEY)) {
     throw new Error(
       "Reef durable state migration is incomplete; repair the legacy state files and rerun openclaw doctor --fix",
+    );
+  }
+  if (durableMigration.lookup(REEF_OUTBOUND_MIGRATION_KEY)) {
+    throw new Error(
+      "Reef outbound delivery migration is incomplete; run openclaw doctor --fix before starting Reef so delayed receipts remain available for recovery",
     );
   }
   const migration = runtime.state.openSyncKeyedStore<ReefIdentityMigrationRecord>({

@@ -13,6 +13,7 @@ import {
   normalizeReefTarget,
 } from "./src/config-schema.js";
 import { reefAuditStateMigration, reefRuntimeStateMigration } from "./src/doctor-durable-state.js";
+import { reefOutboundDeliveryMigration } from "./src/doctor-outbound-deliveries.js";
 import {
   collectLegacyReefStateBackupResources,
   legacyReefFileExists,
@@ -568,4 +569,5 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
       };
     },
   },
+  reefOutboundDeliveryMigration,
 ];

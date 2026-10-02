@@ -50,6 +50,7 @@ describe("resumed Codex session binding migration", () => {
         }
         const context = createPluginDoctorStateMigrationContext({
           pluginId: "codex",
+          stateImportAuthority: { assertCurrent() {}, assertOwnedInTransaction() {} },
           config: cfg,
           env: state.env,
         });
@@ -160,6 +161,7 @@ describe("resumed Codex session binding migration", () => {
         ).toBe(true);
         const context = createPluginDoctorStateMigrationContext({
           pluginId: "codex",
+          stateImportAuthority: { assertCurrent() {}, assertOwnedInTransaction() {} },
           config: cfg,
           env: state.env,
         });
@@ -216,6 +218,7 @@ describe("resumed Codex session binding migration", () => {
           ).toBe("unrelated");
           const context = createPluginDoctorStateMigrationContext({
             pluginId: "codex",
+            stateImportAuthority: { assertCurrent() {}, assertOwnedInTransaction() {} },
             config,
             env: state.env,
           });

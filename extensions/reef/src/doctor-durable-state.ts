@@ -72,7 +72,7 @@ async function readLegacyReefAudit(filePath: string): Promise<AuditEntry[]> {
   return entries;
 }
 
-async function readStoredReefAudit(
+export async function readStoredReefAudit(
   store: PluginStateKeyedStore<ReefAuditStateRecord>,
   headStore: PluginStateKeyedStore<ReefAuditHeadRecord>,
 ): Promise<AuditEntry[]> {
@@ -81,6 +81,9 @@ async function readStoredReefAudit(
     return [];
   }
   const head = parseReefAuditHead(headValue);
+  if (head.seq === 0) {
+    return [];
+  }
   const reversed: AuditEntry[] = [];
   let hash = head.hash;
   for (let seq = head.seq; seq > 0 && reversed.length < REEF_AUDIT_MAX_ENTRIES; seq--) {

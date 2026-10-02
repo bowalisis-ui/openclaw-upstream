@@ -293,7 +293,15 @@ describe("plugin doctor session identity evidence", () => {
         await expect(
           context.readSessionIdentityEvidenceBatch?.([{ agentId: "main", sessionId: "gone" }]),
         ).rejects.toThrow("repair owner expired");
-        await expect(store.lookup("binding:retained")).resolves.toEqual({ sessionId: "gone" });
+        await expect(store.lookup("binding:retained")).rejects.toThrow("repair owner expired");
+        const reader = createPluginDoctorStateMigrationContext({
+          pluginId: "codex",
+          env,
+          config: {},
+        });
+        await expect(
+          reader.openPluginStateKeyedStore(options).lookup("binding:retained"),
+        ).resolves.toEqual({ sessionId: "gone" });
       },
     );
   });

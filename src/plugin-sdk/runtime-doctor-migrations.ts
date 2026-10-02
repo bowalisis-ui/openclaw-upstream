@@ -54,6 +54,11 @@ export type {
   PluginStateKeyedStore,
 } from "../plugin-state/plugin-state-store.js";
 export type {
+  PluginDoctorStateRowImport,
+  PluginDoctorStateSourceKey,
+  PluginDoctorStateSourceRow,
+} from "../plugin-state/plugin-state-doctor-import.js";
+export type {
   PluginDoctorCronChange,
   PluginDoctorCronInventory,
   PluginDoctorCronJob,

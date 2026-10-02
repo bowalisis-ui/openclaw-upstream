@@ -34,6 +34,10 @@ import {
   generateAndStoreKeys,
   loadKeys,
   openStores,
+  REEF_DURABLE_MIGRATION_NAMESPACE,
+  REEF_DURABLE_MIGRATION_MAX_ENTRIES,
+  REEF_DURABLE_MIGRATION_KEY,
+  REEF_OUTBOUND_MIGRATION_KEY,
   REEF_AUDIT_MIGRATION_KEY,
   REEF_AUDIT_MIGRATION_MAX_ENTRIES,
   REEF_AUDIT_MIGRATION_NAMESPACE,
@@ -299,6 +303,55 @@ describe("Reef doctor contract", () => {
     expect(fs.existsSync(homeKeysPath)).toBe(false);
     expect(fs.existsSync(`${homeKeysPath}.migrated`)).toBe(true);
   });
+
+  it.each(["absent", "zero-entry"] as const)(
+    "keeps outbound recovery admission blocked until its owner completes with %s audit state",
+    async (auditState) => {
+      const context = createDoctorContext(env);
+      if (auditState === "zero-entry") {
+        await context
+          .openPluginStateKeyedStore<ReefAuditHeadRecord>({
+            namespace: REEF_AUDIT_HEAD_NAMESPACE,
+            maxEntries: REEF_AUDIT_HEAD_MAX_ENTRIES,
+          })
+          .register(REEF_AUDIT_HEAD_KEY, {
+            kind: "head",
+            hash: "",
+            seq: 0,
+            oldestHash: "",
+            pending: { owner: "interrupted-first-append", expiresAt: 1 },
+          });
+      }
+      const keys = reefKeys();
+      await context
+        .openPluginStateKeyedStore({
+          namespace: REEF_KEYS_NAMESPACE,
+          maxEntries: REEF_KEYS_MAX_ENTRIES,
+        })
+        .register(REEF_KEYS_KEY, keys);
+      const readiness = context.openPluginStateKeyedStore({
+        namespace: REEF_DURABLE_MIGRATION_NAMESPACE,
+        maxEntries: REEF_DURABLE_MIGRATION_MAX_ENTRIES,
+      });
+      await readiness.register(REEF_DURABLE_MIGRATION_KEY, { pending: true });
+      await readiness.register(REEF_OUTBOUND_MIGRATION_KEY, { pending: true });
+      await migrationById("reef-runtime-files-to-plugin-state").migrateLegacyState(
+        migrationParams({}, context),
+      );
+      expect(await readiness.lookup(REEF_DURABLE_MIGRATION_KEY)).toBeUndefined();
+      expect(await readiness.lookup(REEF_OUTBOUND_MIGRATION_KEY)).toEqual({ pending: true });
+      await expect(loadKeys(createRuntime(env))).rejects.toThrow(
+        "outbound delivery migration is incomplete",
+      );
+      expect(() => openStores(createRuntime(env), keys)).toThrow(
+        "outbound delivery migration is incomplete",
+      );
+      await migrationById("reef-audit-to-outbound-bindings").migrateLegacyState(
+        migrationParams({}, context),
+      );
+      await expect(loadKeys(createRuntime(env))).resolves.toEqual(keys);
+    },
+  );
 
   it("blocks identity regeneration after a failed keys.json import", async () => {
     const legacyDir = createLegacyDir();

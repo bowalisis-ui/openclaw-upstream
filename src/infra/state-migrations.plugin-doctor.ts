@@ -14,6 +14,7 @@ import { preparePluginDoctorMigrationResources } from "../plugins/doctor-migrati
 import { withPluginLifecycleLease } from "../plugins/plugin-lifecycle-lease.js";
 import { withAgentDatabaseMaintenanceLease } from "../state/openclaw-agent-db.js";
 import { prepareOpenClawStateDatabaseSchema } from "../state/openclaw-state-db.js";
+import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { formatErrorMessage } from "./errors.js";
 import { acquireGatewayLock } from "./gateway-lock.js";
 import { formatStartupMigrationFailure } from "./state-migrations.messages.js";
@@ -199,9 +200,9 @@ export async function collectPluginDoctorStateMigrationPlans(
           resolveDefaultAgentWorkspaceDir(env),
         context: createPluginDoctorStateMigrationContext({
           pluginId: entry.pluginId,
+          migrationId: entry.migration.id,
           env,
           config,
-          repairAuthority: params.repairAuthority,
           trustedForDurableStores: entry.trustedForDurableStores ?? true,
           // Detection runs before exclusive state ownership, so it is handed
           // inspection-only ingress access and no mutation gate. Untrusted owners get
@@ -288,32 +289,38 @@ async function migratePluginDoctorStatePlans(
   const notices: string[] = [];
   const completedPluginIds = new Set(plans.map((plan) => plan.pluginId));
   let hasRefusal = false;
+  let lock: Awaited<ReturnType<typeof acquireGatewayLock>>;
   if (plans.length === 0) {
     return { changes, warnings };
   }
 
-  // Mutable ingress access lives and dies with this call. Handles a migration keeps
-  // past its own return re-check this gate and fail rather than writing outside the
-  // section that owns the state.
-  let ingressMutationActive = false;
-  const assertIngressMutationCurrent = () => {
-    if (!ingressMutationActive) {
-      throw new Error("Plugin Doctor ingress queue access has expired.");
-    }
-    repairAuthority?.assertCurrent();
-  };
-
   const migrate = async () => {
-    ingressMutationActive = true;
-    try {
-      return await migrateWithIngressAuthority();
-    } finally {
-      ingressMutationActive = false;
-    }
-  };
-
-  const migrateWithIngressAuthority = async () => {
     for (const plan of plans) {
+      // Retained handles expire with this callback, even while the next migration awaits.
+      let callbackActive = true;
+      const assertStateMutationCurrent = () => {
+        if (!callbackActive) {
+          throw new Error("Plugin Doctor state migration access has expired.");
+        }
+        if (repairAuthority) {
+          repairAuthority.assertCurrent();
+        } else if (lock) {
+          lock.assertCurrent();
+        } else {
+          throw new Error("Plugin Doctor state import requires exclusive state ownership.");
+        }
+      };
+      const stateImportAuthority: PluginDoctorRepairAuthority = {
+        assertCurrent: assertStateMutationCurrent,
+        assertOwnedInTransaction(database) {
+          assertStateMutationCurrent();
+          if (repairAuthority) {
+            repairAuthority.assertOwnedInTransaction(database);
+          } else {
+            lock!.assertDatabaseAccess(resolveOpenClawStateSqlitePath(input.env));
+          }
+        },
+      };
       try {
         repairAuthority?.assertCurrent();
         assertResourceScope?.();
@@ -324,16 +331,18 @@ async function migratePluginDoctorStatePlans(
             resolveDefaultAgentWorkspaceDir(input.env),
           context: createPluginDoctorStateMigrationContext({
             pluginId: plan.pluginId,
+            migrationId: plan.migration.id,
             env: input.env,
             config: input.config,
-            repairAuthority,
+            repairAuthority: repairAuthority ? stateImportAuthority : undefined,
+            stateImportAuthority,
             trustedForDurableStores: plan.trustedForDurableStores ?? true,
             ...((plan.trustedForDurableStores ?? true)
               ? {
                   channelIngress: {
                     channelIds: plan.channelIds ?? [],
                     stateDir: input.stateDir,
-                    mutation: { assertCurrent: assertIngressMutationCurrent },
+                    mutation: { assertCurrent: assertStateMutationCurrent },
                   },
                 }
               : {}),
@@ -353,6 +362,8 @@ async function migratePluginDoctorStatePlans(
         completedPluginIds.delete(plan.pluginId);
         hasRefusal = true;
         warnings.push(`Failed migrating ${plan.migration.label}: ${String(err)}`);
+      } finally {
+        callbackActive = false;
       }
     }
     return {
@@ -368,7 +379,6 @@ async function migratePluginDoctorStatePlans(
     return migrate();
   }
 
-  let lock: Awaited<ReturnType<typeof acquireGatewayLock>>;
   try {
     lock = await acquireGatewayLock({
       allowInTests: true,
