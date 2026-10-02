@@ -7,7 +7,6 @@ import {
   validateSessionSuggestionsResolveParams,
   validateSessionTypingParams,
   type SessionSuggestion,
-  type SessionSuggestionResolution,
   type SessionTypingEvent,
 } from "../../../packages/gateway-protocol/src/index.js";
 import {
@@ -98,110 +97,97 @@ function respondSuggestionDispatchError(respond: RespondFn, error: unknown): voi
 }
 
 export const sessionSuggestionHandlers: GatewayRequestHandlers = {
-  "session.suggestions.add": async ({
-    params,
-    respond,
-    client,
-    context,
-    signal,
-    sessionMutationAuthorization,
-  }) => {
-    if (
-      !assertValidParams(
-        params,
-        validateSessionSuggestionsAddParams,
-        "session.suggestions.add",
-        respond,
-      )
-    ) {
-      return;
-    }
-    const cfg = context.getCommittedRuntimeConfig?.() ?? context.getRuntimeConfig();
-    const target = requireSuggestionTarget({ client, context, ...params, respond });
-    const author = gatewayClientSessionCreator(client);
-    if (
-      !target ||
-      !authorizeSessionSuggestionMutation(
-        { client, cfg, sessionKey: params.sessionKey, target, respond },
-        "add",
-      )
-    ) {
-      return;
-    }
-    if (!author) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "identified suggestion author required"),
-      );
-      return;
-    }
-    const text = params.text;
-    if (!text.trim()) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "suggestion text is required"),
-      );
-      return;
-    }
-    const expectedSessionId = target.entry.sessionId;
-    const expectedEntry = {
-      ...sharingExpectedEntry(target),
-      lifecycleRevision: target.entry.lifecycleRevision,
-    };
-    const mutation = await createSessionSuggestionMutation({
-      target,
-      context,
-      client,
-      respond,
-      sessionKey: params.sessionKey,
-      signal,
-      assertCurrent: sessionMutationAuthorization?.assertCurrent,
-    });
-    try {
-      const added = await mutation.run({
-        kind: "start",
-        action: "add",
-        mutate: async (scope, assertCurrent) => {
-          const suggestion = await addSessionSuggestionInWorker(
-            scope,
-            {
-              authorId: author.id,
-              authorLabel: author.label,
-              text,
-              expectedSessionId,
-              expectedEntry,
-            },
-            assertCurrent,
-          );
-          mutation.readCurrent();
-          const projected = protocolSuggestion(target, suggestion);
-          publishSuggestion(context, target, params.sessionKey, {
-            action: "added",
-            suggestion: projected,
-          });
-          return projected;
-        },
-      });
-      if (added.ok) {
-        respond(true, { suggestion: added.value });
-      } else {
-        respond(false, undefined, added.error);
+  "session.suggestions.add": defineValidatedGatewayHandler(
+    "session.suggestions.add",
+    validateSessionSuggestionsAddParams,
+    async ({ params, respond, client, context, signal, sessionMutationAuthorization }) => {
+      const cfg = context.getCommittedRuntimeConfig?.() ?? context.getRuntimeConfig();
+      const target = requireSuggestionTarget({ client, context, ...params, respond });
+      const author = gatewayClientSessionCreator(client);
+      if (
+        !target ||
+        !authorizeSessionSuggestionMutation(
+          { client, cfg, sessionKey: params.sessionKey, target, respond },
+          "add",
+        )
+      ) {
+        return;
       }
-    } catch (error) {
-      respond(
-        false,
-        undefined,
-        errorShape(
-          ErrorCodes.INVALID_REQUEST,
-          error instanceof Error ? error.message : "suggestion could not be stored",
-        ),
-      );
-    } finally {
-      mutation.release();
-    }
-  },
+      if (!author) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "identified suggestion author required"),
+        );
+        return;
+      }
+      const text = params.text;
+      if (!text.trim()) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "suggestion text is required"),
+        );
+        return;
+      }
+      const expectedSessionId = target.entry.sessionId;
+      const expectedEntry = {
+        ...sharingExpectedEntry(target),
+        lifecycleRevision: target.entry.lifecycleRevision,
+      };
+      const mutation = await createSessionSuggestionMutation({
+        target,
+        context,
+        client,
+        respond,
+        sessionKey: params.sessionKey,
+        signal,
+        assertCurrent: sessionMutationAuthorization?.assertCurrent,
+      });
+      try {
+        const added = await mutation.run({
+          kind: "start",
+          action: "add",
+          mutate: async (scope, assertCurrent) => {
+            const suggestion = await addSessionSuggestionInWorker(
+              scope,
+              {
+                authorId: author.id,
+                authorLabel: author.label,
+                text,
+                expectedSessionId,
+                expectedEntry,
+              },
+              assertCurrent,
+            );
+            mutation.readCurrent();
+            const projected = protocolSuggestion(target, suggestion);
+            publishSuggestion(context, target, params.sessionKey, {
+              action: "added",
+              suggestion: projected,
+            });
+            return projected;
+          },
+        });
+        if (added.ok) {
+          respond(true, { suggestion: added.value });
+        } else {
+          respond(false, undefined, added.error);
+        }
+      } catch (error) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            error instanceof Error ? error.message : "suggestion could not be stored",
+          ),
+        );
+      } finally {
+        mutation.release();
+      }
+    },
+  ),
 
   "session.suggestions.list": defineValidatedGatewayHandler(
     "session.suggestions.list",
@@ -239,221 +225,218 @@ export const sessionSuggestionHandlers: GatewayRequestHandlers = {
     },
   ),
 
-  "session.suggestions.resolve": async ({
-    params,
-    respond,
-    client,
-    context,
-    req,
-    isWebchatConnect,
-    signal,
-    sessionMutationAuthorization,
-  }) => {
-    if (
-      !assertValidParams(
-        params,
-        validateSessionSuggestionsResolveParams,
-        "session.suggestions.resolve",
-        respond,
-      )
-    ) {
-      return;
-    }
-    const cfg = context.getCommittedRuntimeConfig?.() ?? context.getRuntimeConfig();
-    const target = requireSuggestionTarget({ client, context, ...params, respond });
-    if (!target) {
-      return;
-    }
-    const resolution = params.resolution as SessionSuggestionResolution;
-    const dispatching = resolution === "send" || resolution === "queue";
-    if (
-      !authorizeSessionSuggestionMutation(
-        { client, cfg, sessionKey: params.sessionKey, target, respond },
-        resolution,
-      )
-    ) {
-      return;
-    }
-    if (dispatching && !client) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "connected client required for suggestion dispatch"),
-      );
-      return;
-    }
-    const expectedSessionId = target.entry.sessionId;
-    const expectedEntry = {
-      ...sharingExpectedEntry(target),
-      lifecycleRevision: target.entry.lifecycleRevision,
-    };
-    const mutation = await createSessionSuggestionMutation({
-      target,
-      context,
-      client,
+  "session.suggestions.resolve": defineValidatedGatewayHandler(
+    "session.suggestions.resolve",
+    validateSessionSuggestionsResolveParams,
+    async ({
+      params,
       respond,
-      sessionKey: params.sessionKey,
+      client,
+      context,
+      req,
+      isWebchatConnect,
       signal,
-      assertCurrent: sessionMutationAuthorization?.assertCurrent,
-    });
-    try {
-      const claimResult = await mutation.run({
-        kind: "start",
-        action: resolution,
-        mutate: (scope, assertCurrent) =>
-          claimSessionSuggestionDispatchInWorker(
-            scope,
-            {
-              id: params.id,
-              resolution,
-              expectedSessionId,
-              expectedEntry,
-            },
-            assertCurrent,
-          ),
-      });
-      if (!claimResult.ok) {
-        respond(false, undefined, claimResult.error);
+      sessionMutationAuthorization,
+    }) => {
+      const cfg = context.getCommittedRuntimeConfig?.() ?? context.getRuntimeConfig();
+      const target = requireSuggestionTarget({ client, context, ...params, respond });
+      if (!target) {
         return;
       }
-      const claim = claimResult.value;
-      if (!claim) {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.INVALID_REQUEST, "pending suggestion not found"),
-        );
+      const resolution = params.resolution;
+      const dispatching = resolution === "send" || resolution === "queue";
+      if (
+        !authorizeSessionSuggestionMutation(
+          { client, cfg, sessionKey: params.sessionKey, target, respond },
+          resolution,
+        )
+      ) {
         return;
       }
-      if (claim.kind === "busy") {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.UNAVAILABLE, "suggestion resolution is already in progress", {
-            retryable: true,
-            retryAfterMs: SESSION_SUGGESTION_DISPATCH_CLAIM_TTL_MS,
-          }),
-        );
-        return;
-      }
-      if (claim.kind === "mismatch") {
+      if (dispatching && !client) {
         respond(
           false,
           undefined,
           errorShape(
             ErrorCodes.INVALID_REQUEST,
-            `suggestion dispatch recovery must retry the original ${claim.resolution} action`,
+            "connected client required for suggestion dispatch",
           ),
         );
         return;
       }
-      const releaseClaim = async (): Promise<boolean> => {
-        try {
-          const released = await mutation.run({
-            kind: "settle",
-            mutate: (scope, assertCurrent) =>
-              releaseSessionSuggestionDispatchInWorker(
-                scope,
-                { id: claim.suggestion.id, token: claim.token, expectedSessionId },
-                assertCurrent,
-              ),
-          });
-          if (!released.ok) {
-            respond(false, undefined, released.error);
-            return false;
-          }
-          return true;
-        } catch (error) {
-          respondSuggestionDispatchError(respond, error);
-          return false;
-        }
+      const expectedSessionId = target.entry.sessionId;
+      const expectedEntry = {
+        ...sharingExpectedEntry(target),
+        lifecycleRevision: target.entry.lifecycleRevision,
       };
-      if (dispatching && client) {
-        let dispatched: Awaited<ReturnType<typeof dispatchSuggestion>>;
-        try {
-          dispatched = await dispatchSuggestion({
-            context,
-            client,
-            req,
-            isWebchatConnect,
-            target,
-            suggestion: claim.suggestion,
-            resolution,
-            expectedSessionId,
-            readCurrent: mutation.readCurrent,
-            signal,
-            sessionMutationAuthorization,
-          });
-        } catch (error) {
-          respondSuggestionDispatchError(respond, error);
+      const mutation = await createSessionSuggestionMutation({
+        target,
+        context,
+        client,
+        respond,
+        sessionKey: params.sessionKey,
+        signal,
+        assertCurrent: sessionMutationAuthorization?.assertCurrent,
+      });
+      try {
+        const claimResult = await mutation.run({
+          kind: "start",
+          action: resolution,
+          mutate: (scope, assertCurrent) =>
+            claimSessionSuggestionDispatchInWorker(
+              scope,
+              {
+                id: params.id,
+                resolution,
+                expectedSessionId,
+                expectedEntry,
+              },
+              assertCurrent,
+            ),
+        });
+        if (!claimResult.ok) {
+          respond(false, undefined, claimResult.error);
           return;
         }
-        if (!dispatched.ok) {
-          if (!(await releaseClaim())) {
-            return;
-          }
+        const claim = claimResult.value;
+        if (!claim) {
           respond(
             false,
             undefined,
-            dispatched.error ??
-              errorShape(ErrorCodes.INVALID_REQUEST, "suggestion dispatch failed"),
+            errorShape(ErrorCodes.INVALID_REQUEST, "pending suggestion not found"),
           );
           return;
         }
-      }
-      const finalizeResult = await mutation.run({
-        ...(dispatching
-          ? { kind: "settle" as const }
-          : { kind: "start" as const, action: resolution }),
-        mutate: async (scope, assertCurrent) => {
-          const suggestion = await finalizeSessionSuggestionClaimInWorker(
-            scope,
-            {
-              id: claim.suggestion.id,
-              token: claim.token,
-              state: resolution === "dismiss" ? "dismissed" : "accepted",
-              expectedSessionId,
-              ...(!dispatching ? { expectedEntry } : {}),
-            },
-            assertCurrent,
+        if (claim.kind === "busy") {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.UNAVAILABLE, "suggestion resolution is already in progress", {
+              retryable: true,
+              retryAfterMs: SESSION_SUGGESTION_DISPATCH_CLAIM_TTL_MS,
+            }),
           );
-          mutation.readCurrent();
-          if (!suggestion) {
-            return null;
+          return;
+        }
+        if (claim.kind === "mismatch") {
+          respond(
+            false,
+            undefined,
+            errorShape(
+              ErrorCodes.INVALID_REQUEST,
+              `suggestion dispatch recovery must retry the original ${claim.resolution} action`,
+            ),
+          );
+          return;
+        }
+        const releaseClaim = async (): Promise<boolean> => {
+          try {
+            const released = await mutation.run({
+              kind: "settle",
+              mutate: (scope, assertCurrent) =>
+                releaseSessionSuggestionDispatchInWorker(
+                  scope,
+                  { id: claim.suggestion.id, token: claim.token, expectedSessionId },
+                  assertCurrent,
+                ),
+            });
+            if (!released.ok) {
+              respond(false, undefined, released.error);
+              return false;
+            }
+            return true;
+          } catch (error) {
+            respondSuggestionDispatchError(respond, error);
+            return false;
           }
-          const projected = protocolSuggestion(target, suggestion);
-          publishSuggestion(context, target, params.sessionKey, {
-            action: "resolved",
-            suggestion: projected,
-          });
-          return projected;
-        },
-      });
-      if (!finalizeResult.ok) {
-        // No input custody was transferred for edit/dismiss. Release only this
-        // definite rejection; an unknown worker outcome must retain the claim.
-        if (!dispatching && !(await releaseClaim())) {
+        };
+        if (dispatching && client) {
+          let dispatched: Awaited<ReturnType<typeof dispatchSuggestion>>;
+          try {
+            dispatched = await dispatchSuggestion({
+              context,
+              client,
+              req,
+              isWebchatConnect,
+              target,
+              suggestion: claim.suggestion,
+              resolution,
+              expectedSessionId,
+              readCurrent: mutation.readCurrent,
+              signal,
+              sessionMutationAuthorization,
+            });
+          } catch (error) {
+            respondSuggestionDispatchError(respond, error);
+            return;
+          }
+          if (!dispatched.ok) {
+            if (!(await releaseClaim())) {
+              return;
+            }
+            respond(
+              false,
+              undefined,
+              dispatched.error ??
+                errorShape(ErrorCodes.INVALID_REQUEST, "suggestion dispatch failed"),
+            );
+            return;
+          }
+        }
+        const finalizeResult = await mutation.run({
+          ...(dispatching
+            ? { kind: "settle" as const }
+            : { kind: "start" as const, action: resolution }),
+          mutate: async (scope, assertCurrent) => {
+            const suggestion = await finalizeSessionSuggestionClaimInWorker(
+              scope,
+              {
+                id: claim.suggestion.id,
+                token: claim.token,
+                state: resolution === "dismiss" ? "dismissed" : "accepted",
+                expectedSessionId,
+                ...(!dispatching ? { expectedEntry } : {}),
+              },
+              assertCurrent,
+            );
+            mutation.readCurrent();
+            if (!suggestion) {
+              return null;
+            }
+            const projected = protocolSuggestion(target, suggestion);
+            publishSuggestion(context, target, params.sessionKey, {
+              action: "resolved",
+              suggestion: projected,
+            });
+            return projected;
+          },
+        });
+        if (!finalizeResult.ok) {
+          // No input custody was transferred for edit/dismiss. Release only this
+          // definite rejection; an unknown worker outcome must retain the claim.
+          if (!dispatching && !(await releaseClaim())) {
+            return;
+          }
+          respond(false, undefined, finalizeResult.error);
           return;
         }
-        respond(false, undefined, finalizeResult.error);
-        return;
+        const suggestion = finalizeResult.value;
+        if (!suggestion) {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.UNAVAILABLE, "suggestion resolution could not be finalized", {
+              retryable: true,
+            }),
+          );
+          return;
+        }
+        respond(true, { suggestion });
+      } finally {
+        mutation.release();
       }
-      const suggestion = finalizeResult.value;
-      if (!suggestion) {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.UNAVAILABLE, "suggestion resolution could not be finalized", {
-            retryable: true,
-          }),
-        );
-        return;
-      }
-      respond(true, { suggestion });
-    } finally {
-      mutation.release();
-    }
-  },
+    },
+  ),
 
   "session.typing": async ({
     params: requestParams,

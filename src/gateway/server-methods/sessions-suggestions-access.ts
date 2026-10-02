@@ -203,7 +203,7 @@ type SessionSuggestionMutation<T> = {
   mutate: (scope: SuggestionWriteScope, assertCurrent: () => void) => Promise<T>;
 } & ({ kind: "start"; action: "add" | SessionSuggestionResolution } | { kind: "settle" });
 
-export function resolveCurrentSuggestionTarget(
+function resolveCurrentSuggestionTarget(
   target: SessionSharingTarget,
   expectedSessionId: string | undefined,
   current: SessionSharingTarget | null,
@@ -241,6 +241,9 @@ export async function createSessionSuggestionMutation(params: {
   const readCurrent = () => {
     const cfg = params.context.getRuntimeConfig();
     const current = facts.readCurrent(cfg);
+    if (!current.sourcePath) {
+      throw new SessionMutationFactsUnavailableError();
+    }
     const target = resolveCurrentSuggestionTarget(params.target, expectedSessionId, current.target);
     const policyConfig = params.context.getCommittedRuntimeConfig?.() ?? cfg;
     const sharing = prepareProjectedSessionSharing({
@@ -248,7 +251,7 @@ export async function createSessionSuggestionMutation(params: {
       client: params.client,
       isMember: (_target, identityId) => current.membership.has(identityId),
     });
-    return { target, cfg: policyConfig, sharing };
+    return { target, physicalStorePath: current.sourcePath, cfg: policyConfig, sharing };
   };
   const run = async <T>(
     operation: SessionSuggestionMutation<T>,

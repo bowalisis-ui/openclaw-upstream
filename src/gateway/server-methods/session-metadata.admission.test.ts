@@ -1,4 +1,5 @@
 import { existsSync, renameSync } from "node:fs";
+import { backup } from "node:sqlite";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { replaceSessionEntrySync } from "../../config/sessions/session-accessor.entry.js";
@@ -61,8 +62,8 @@ const handlers: GatewayRequestHandlers = {
 afterEach(() => flushPendingSessionsChangedEvents());
 
 async function seedMetadata(state: OpenClawTestState) {
-  const owner = await ensureProfileForEmail("metadata-owner@example.test");
-  const other = await ensureProfileForEmail("metadata-other@example.test");
+  const owner = ensureProfileForEmail("metadata-owner@example.test");
+  const other = ensureProfileForEmail("metadata-other@example.test");
   const scope = { agentId: "main", env: state.env, sessionKey: "agent:main:metadata" };
   await upsertSessionEntryCore(scope, {
     sessionId: "metadata",
@@ -150,11 +151,13 @@ describe("session metadata writer admission", () => {
     "rejects %s before recreating its retired store after admission waits",
     async (method) => {
       await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-        const { scope, owner, other, options } = await seedMetadata(state);
+        const { scope, owner, other, database, options } = await seedMetadata(state);
         const replacement = { ...scope, storePath: state.path("replacement-store.sqlite") };
         const retired = { ...scope, storePath: state.path("retired-store.sqlite") };
-        await upsertSessionEntryCore(replacement, { ...loadSessionEntry(scope)! });
-        let cfg: OpenClawConfig = {};
+        const originalEntry = loadSessionEntry(scope)!;
+        // A future store exists on disk, but joins discovery only after the config switch.
+        await backup(database.db, replacement.storePath);
+        let cfg: OpenClawConfig = { session: { store: options.path } };
         const context = sessionSharingTestContext(vi.fn());
         context.getRuntimeConfig = () => cfg;
         await initializeSessionReadContext(context);
@@ -186,7 +189,7 @@ describe("session metadata writer admission", () => {
           );
           expect(existsSync(options.path)).toBe(false);
           for (const target of [retired, replacement]) {
-            expect(loadSessionEntry(target)?.owner).toBeUndefined();
+            expect(loadSessionEntry(target)).toEqual(originalEntry);
             expect(listSessionMembers(target)).toEqual([]);
             expect(listSessionSuggestions(target)).toEqual([]);
           }

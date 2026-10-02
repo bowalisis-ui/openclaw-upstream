@@ -12,8 +12,13 @@ import {
   listSessionSuggestions,
   SESSION_SUGGESTION_DISPATCH_CLAIM_TTL_MS,
 } from "../../config/sessions/session-suggestion-store.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import { buildPersistedUserTurnMessage } from "../../sessions/user-turn-transcript.js";
-import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import type { DB } from "../../state/openclaw-agent-db.generated.js";
+import {
+  openOpenClawAgentDatabase,
+  runOpenClawAgentWriteTransaction,
+} from "../../state/openclaw-agent-db.js";
 import { runOpenClawAgentWorkerWrite } from "../../state/openclaw-agent-write-admission.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import {
@@ -716,9 +721,7 @@ describe("session suggestion handlers", () => {
   });
 
   it("keeps an uncertain dispatch claimed until retry reconciliation", async () => {
-    await withOpenClawTestState({ scenario: "minimal" }, async () => {
-      let now = 1_000;
-      vi.spyOn(Date, "now").mockImplementation(() => now);
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       await upsertDefaultSuggestionSession();
       const id = await addSuggestion("retry me");
       mocks.handleChatSend.mockRejectedValueOnce(new Error("dispatch exploded"));
@@ -745,7 +748,23 @@ describe("session suggestion handlers", () => {
       expect(alternate.responses[0]?.[0]).toBe(false);
       expect(alternate.responses[0]?.[2]?.message).toMatch(/already in progress/);
 
-      now += SESSION_SUGGESTION_DISPATCH_CLAIM_TTL_MS;
+      // All requests have settled; expire this durable claim in its owning store.
+      const expired = runOpenClawAgentWriteTransaction(
+        ({ db }) =>
+          executeSqliteQuerySync(
+            db,
+            getNodeSqliteKysely<Pick<DB, "session_suggestions">>(db)
+              .updateTable("session_suggestions")
+              .set({ dispatch_started_at: 0 })
+              .where("session_key", "=", sessionKey)
+              .where("id", "=", id)
+              .where("state", "=", "pending")
+              .where("dispatch_token", "is not", null)
+              .where("dispatch_resolution", "=", "send"),
+          ),
+        { agentId: "main", env: state.env },
+      );
+      expect(expired.numAffectedRows).toBe(1n);
       const mismatchedRetry = await call(
         "session.suggestions.resolve",
         { sessionKey, id, resolution: "queue" },
@@ -759,6 +778,18 @@ describe("session suggestion handlers", () => {
         client("owner", "Owner"),
       );
       expect(reconciled.responses[0]?.[0]).toBe(true);
+      expect(mocks.handleChatSend).toHaveBeenCalledTimes(2);
+      for (const attempt of [1, 2]) {
+        expect(mocks.handleChatSend).toHaveBeenNthCalledWith(
+          attempt,
+          expect.objectContaining({
+            params: expect.objectContaining({
+              idempotencyKey: `session-suggestion:${id}`,
+              queueMode: "steer",
+            }),
+          }),
+        );
+      }
     });
   });
 

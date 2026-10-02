@@ -36,8 +36,8 @@ describe("suggestion dispatch through real chat input custody", () => {
       persistDuringDispatch: true,
     });
     const email = "suggestion-custody@example.test";
-    const profile = await ensureProfileForEmail(email);
-    const mergedProfile = await ensureProfileForEmail("suggestion-custody-merged@example.test");
+    const profile = ensureProfileForEmail(email);
+    const mergedProfile = ensureProfileForEmail("suggestion-custody-merged@example.test");
     fixture.client.authenticatedUserProfile = {
       profileId: profile.id,
       displayName: null,
@@ -120,7 +120,7 @@ describe("suggestion dispatch through real chat input custody", () => {
       expect(loadTranscriptEventsSync(fixture.scope)).toEqual(fixture.activeTranscript);
       const recorder = await fixture.dispatchedRecorder;
       const acceptedResponse = structuredClone(response.mock.calls);
-      await linkEmail(email, mergedProfile.id);
+      linkEmail(email, mergedProfile.id);
       if (change === "host after custody") {
         hostCurrent = false;
       }

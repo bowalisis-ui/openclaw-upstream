@@ -33,7 +33,7 @@ describe("SQLite session owner assignment", () => {
         sessionId: "incognito-owner",
         updatedAt: 1,
         lifecycleRevision: "original-generation",
-        incognito: true,
+        incognito: true as const,
         createdActor: { type: "human" as const, source: "profile" as const, id: "creator" },
       };
       await upsertSessionEntryCore(scope, entry);
