@@ -359,7 +359,7 @@ describe("runtime-config replacement during a turn", () => {
         };
         const refreshCatalog = async (rich: boolean) => {
           const requestsBefore = catalogRequests.length;
-          const committed = createDeferred<void>();
+          const committed = createDeferred();
           const checkReady = () => {
             const owner = getPreparedModelCatalogOwnerSnapshot({ config: getRuntimeConfig() });
             const catalog = owner?.readFullModelCatalog?.() ?? owner?.modelCatalog;

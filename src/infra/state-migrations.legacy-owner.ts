@@ -43,23 +43,12 @@ export function resolveLegacyStateMigrationOwner(params: {
         }
       : installedTarget;
   const migrationAgentId = migrationTarget?.owner;
-  const sessionMigrationAgentId = tryResolveDoctorSessionMigrationAgentId(
-    locatorConfig,
-    migrationAgentId,
-  );
-  return { installAgentDir, migrationTarget, migrationAgentId, sessionMigrationAgentId };
-}
-
-export function tryResolveDoctorSessionMigrationAgentId(
-  cfg: OpenClawConfig,
-  migrationAgentId: string | undefined,
-): string | undefined {
-  return (
+  const sessionMigrationAgentId =
     migrationAgentId ??
-    (!isPerAgentSessionStoreConfig(cfg.session?.store)
-      ? resolveSessionStoreCompatibilityAgentId(cfg)
-      : undefined)
-  );
+    (!isPerAgentSessionStoreConfig(locatorConfig.session?.store)
+      ? resolveSessionStoreCompatibilityAgentId(locatorConfig)
+      : undefined);
+  return { installAgentDir, migrationTarget, migrationAgentId, sessionMigrationAgentId };
 }
 
 /** A migration destination is not proof that runtime consumes the source. */
