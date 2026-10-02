@@ -7,7 +7,6 @@ docker-compose.sandbox.yml
 dist
 dist-runtime/
 dist-sea/
-pnpm-lock.yaml
 bun.lock
 bun.lockb
 coverage
@@ -19,6 +18,7 @@ __pycache__/
 .worktrees/
 .DS_Store
 **/.DS_Store
+desktop.ini
 ui/src/ui/__screenshots__/
 ui/playwright-report/
 ui/test-results/
@@ -48,7 +48,7 @@ apps/shared/OpenClawKit/Package.resolved
 # every resolve; swabble's only runtime dep is exact-pinned in Package.swift.
 apps/swabble/Package.resolved
 **/ModuleCache/
-bin/
+/bin/
 bin/clawdbot-mac
 apps/macos/.build-local/
 apps/macos/.swiftpm/
@@ -119,8 +119,16 @@ USER.md
 *.tgz
 *.tar.gz
 *.zip
+!test/fixtures/hooks-install/npm-pack-hooks.tgz
+!test/fixtures/hooks-install/zip-hooks.zip
+!test/fixtures/hooks-install/zip-traversal.zip
+!test/fixtures/plugins-install/voice-call-0.0.1.tgz
+!test/fixtures/plugins-install/voice-call-0.0.2.tgz
+!test/fixtures/plugins-install/zipper-0.0.1.zip
 .idea
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
 
 # local tooling
 .antigravitycli/
@@ -145,6 +153,7 @@ USER.md
 /client_secret_*.json
 package-lock.json
 !.github/release/clawhub-cli/package-lock.json
+!.github/release/vercel-cli/package-lock.json
 !src/commands/copilot-sdk-install-manifest/package-lock.json
 .claude/*
 # Track the shared Claude Code project config (worktree auto-install hook) and the
