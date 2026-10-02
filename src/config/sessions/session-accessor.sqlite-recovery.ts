@@ -2,10 +2,8 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { SqliteWorkerError } from "../../infra/sqlite-worker-contract.js";
 import type { SqliteWorkerOperationAdmission } from "../../infra/sqlite-worker-operation-admission.js";
 import type { RetainedWorkerTransactionAdmission } from "../../infra/sqlite-worker-operation-settlement.js";
-import {
-  retainSessionEntryWorkerPublication,
-  type SessionEntryReplacementPublication,
-} from "./session-accessor.sqlite-entry-cache.js";
+import { retainSessionEntryWorkerPublication } from "./session-accessor.sqlite-entry-cache.js";
+import type { SessionEntryReplacementPublication } from "./session-accessor.sqlite-entry-cache.types.js";
 import { publishCommittedSessionIdentity } from "./session-accessor.sqlite-identity.js";
 import type {
   RestartTombstoneRecoveryParams,

@@ -1,6 +1,6 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contract.js";
-import type { SessionEntryReplacementPublication } from "./session-accessor.sqlite-entry-cache.js";
+import type { SessionEntryReplacementPublication } from "./session-accessor.sqlite-entry-cache.types.js";
 import {
   normalizeLifecycleTarget,
   readSessionIdentitySnapshot,
