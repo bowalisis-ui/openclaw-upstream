@@ -13,6 +13,7 @@ import {
 export type AgentsApiBinding = {
   sessionId: string;
   configFingerprint: string;
+  executorControllerPluginId?: string;
   executor?: AgentsApiExecutorBinding;
 };
 
@@ -209,21 +210,44 @@ const bindingSchema = z
   .object({
     sessionId: z.string().min(1),
     configFingerprint: z.string().min(1),
+    executorControllerPluginId: z.string().min(1).optional(),
     executor: agentsApiExecutorBindingSchema.optional(),
   })
-  .refine((row) => !row.executor || row.executor.nativeSessionId === row.sessionId);
+  .refine(
+    (row) =>
+      !row.executor ||
+      (row.executor.nativeSessionId === row.sessionId &&
+        row.executorControllerPluginId !== undefined),
+  );
 const storedBindingSchema = z
   .object({
     sessionId: z.string().min(1).optional(),
     configFingerprint: z.string().min(1).optional(),
+    executorControllerPluginId: z.string().min(1).optional(),
     executor: agentsApiExecutorBindingSchema.optional(),
     lease: z.object({ token: z.string().min(1), expiresAt: z.number().finite() }).optional(),
   })
   .refine((row) => (row.sessionId === undefined) === (row.configFingerprint === undefined))
-  .refine((row) => !row.executor || row.executor.nativeSessionId === row.sessionId);
+  .refine(
+    (row) =>
+      !row.executor ||
+      (row.executor.nativeSessionId === row.sessionId &&
+        row.executorControllerPluginId !== undefined),
+  );
 type StoredBinding = z.infer<typeof storedBindingSchema>;
 
 function readRecord(raw: unknown): StoredBinding | undefined {
+  if (
+    raw &&
+    typeof raw === "object" &&
+    "executor" in raw &&
+    raw.executor &&
+    !("executorControllerPluginId" in raw)
+  ) {
+    throw new Error(
+      "Agents API executor binding predates plugin ownership; retire this session with the previous version before upgrading",
+    );
+  }
   const result = storedBindingSchema.safeParse(raw);
   return result.success ? result.data : undefined;
 }
@@ -233,6 +257,7 @@ function nativeBinding(row: StoredBinding | undefined): AgentsApiBinding | undef
     ? {
         sessionId: row.sessionId,
         configFingerprint: row.configFingerprint,
+        executorControllerPluginId: row.executorControllerPluginId,
         executor: row.executor,
       }
     : undefined;
