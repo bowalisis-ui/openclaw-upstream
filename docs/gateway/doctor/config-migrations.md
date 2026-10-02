@@ -41,6 +41,14 @@ silently discard persisted data.
 Legacy normalization belongs to Doctor and migration owners, with the existing
 backup and verification flow. Runtime readers consume canonical state.
 
+OAuth credential sidecars under `credentials/auth-profiles/` are retired. Their
+last writer shipped in `2026.5.16-beta.3` on May 16, 2026; `2026.5.16-beta.4`
+removed that writer. Doctor detects these files without reading credentials or
+accessing encryption keys. Upgrade through `2026.9.7` and run
+`openclaw doctor --fix` on the original host before retrying. The supported
+`auth.json`, `auth-profiles.json`, SQLite credential, and migration-recovery
+contracts remain unchanged.
+
 OpenClaw `v2026.9.7` can still write ownerless and mode-less cron jobs, and its
 migration/import writers can preserve null, `deliver`, or mixed-case delivery
 modes. Those cron repairs remain supported; this change retires no cron format.
