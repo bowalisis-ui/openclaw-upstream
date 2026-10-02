@@ -31,11 +31,11 @@ import {
   loadPublishedGatewayReplyDispatchRuntime,
   markPreparedModelRuntimeSnapshotsStale,
   prepareModelRuntimeSnapshot,
-  publishPreparedModelRuntimeSnapshot,
   refreshPreparedModelRuntimeSnapshots,
   type PreparedModelRuntimeInput,
 } from "./prepared-model-runtime.js";
 import { ownPreparedPluginGeneration } from "./prepared-model-runtime.plugin-lifetime.js";
+import { publishPreparedModelRuntimeSnapshot } from "./prepared-model-runtime.test-support.js";
 
 const fixture = usePreparedModelRuntimeHarness({ label: "prepared-runtime-plugin-drain" });
 
