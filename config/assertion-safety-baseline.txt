@@ -1922,7 +1922,6 @@ src/commands/doctor/channel-capabilities.ts	1
 src/commands/doctor/cron/index.ts	3
 src/commands/doctor/cron/legacy-quarantine-migration.ts	1
 src/commands/doctor/cron/legacy-repair.ts	5
-src/commands/doctor/cron/legacy-store-migration.ts	10
 src/commands/doctor/cron/store-migration.ts	2
 src/commands/doctor/cron/warnings.ts	1
 src/commands/doctor/shared/allowfrom-fallback-migration.ts	1
