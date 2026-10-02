@@ -6,10 +6,8 @@ import {
 } from "../../sessions/session-lifecycle-events.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contract.js";
 import { readOpenClawAgentDatabaseIdentity } from "../../state/openclaw-agent-db-identity.js";
-import {
-  bindPreparedSessionEntryPublication,
-  type PreparedSessionEntryChanges,
-} from "./session-accessor.sqlite-entry-cache-publication.js";
+import { bindPreparedSessionEntryPublication } from "./session-accessor.sqlite-entry-cache-publication.js";
+import type { PreparedSessionEntryChanges } from "./session-accessor.sqlite-entry-cache.types.js";
 import type {
   ProjectedLifecycleMutation,
   SessionEntryRemovalPlan,

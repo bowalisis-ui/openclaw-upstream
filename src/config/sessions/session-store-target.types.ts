@@ -53,6 +53,10 @@ export type SessionStoreTargetInventoryRequest = {
   env: NodeJS.ProcessEnv;
   paths: CapturedSessionStorePaths;
   candidates: SessionStoreReadCandidate[];
+  registryDiscovery?: {
+    agentIds: string[];
+    roots: Array<{ path: string; physicalPath: string }>;
+  };
   registeredDatabases: SessionStoreRegistryRead;
 };
 
