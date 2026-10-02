@@ -8,20 +8,22 @@ import {
   resolveHistoryAnchorPageRange,
   type TranscriptAnchorPageOptions,
 } from "../../sessions/transcript-anchor-page.js";
-import type { TranscriptEvent } from "./session-accessor.sqlite-contract.js";
+import type {
+  SessionTranscriptMessageEvent,
+  TranscriptEvent,
+} from "./session-accessor.sqlite-contract.js";
 import { positionTranscriptDisplayEvents } from "./session-accessor.sqlite-display-position.js";
 import { findUnindexedActiveTranscriptEntry } from "./session-accessor.sqlite-history-navigation.js";
 import {
   getActiveTranscriptKysely,
-  type SessionTranscriptMessageAnchorPage,
   type CurrentTranscriptProjection,
-  type SessionTranscriptMessageEvent,
 } from "./session-accessor.sqlite-projection-read.js";
 import {
   readUnindexedHistoryControls,
   resolveClosedResetInterval,
   type ClosedResetInterval,
 } from "./session-accessor.sqlite-reset-window.js";
+import type { SessionTranscriptMessageAnchorPage } from "./session-history-types.js";
 import { transcriptEventReadBytesSql } from "./session-transcript-read-bytes.js";
 import { transcriptEventJsonSql, transcriptEventNavigationSql } from "./transcript-payload.js";
 

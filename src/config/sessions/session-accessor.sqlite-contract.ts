@@ -1,3 +1,4 @@
+import type { TranscriptDisplayPosition } from "../../chat/transcript-display-position.js";
 import type { SqliteWalHealth } from "../../infra/sqlite-wal-checkpoint.js";
 import type { SessionTranscriptWatermark } from "./session-accessor.sqlite-transcript-watermark-read.js";
 import type {
@@ -21,6 +22,13 @@ export type {
 } from "./session-accessor.lifecycle-types.js";
 
 export type SessionEntryStatus = NonNullable<SessionEntry["status"]>;
+
+export type SessionTranscriptMessageEvent = {
+  event: TranscriptEvent;
+  eventSeq: number;
+  seq: number;
+  displayPosition?: TranscriptDisplayPosition;
+};
 
 export type SessionTranscriptContextVersion = {
   generation: string | null;

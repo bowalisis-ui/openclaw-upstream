@@ -5,7 +5,6 @@ import {
 } from "../config/sessions/session-accessor.sqlite-active-events.js";
 import { withCurrentProjectionSnapshot } from "../config/sessions/session-accessor.sqlite-active-projection.js";
 import type { SessionTranscriptReadScope } from "../config/sessions/session-accessor.sqlite-contract.js";
-import type { SessionTranscriptBoundedMessageTailOptions } from "../config/sessions/session-accessor.sqlite-projection-read.js";
 import {
   prepareSqliteTranscriptReadScope,
   toDatabaseOptions,
@@ -16,6 +15,7 @@ import { readRestoredSessionTranscript } from "../config/sessions/session-cold-s
 import type {
   SessionArtifactReadQuery,
   SessionArtifactReadResult,
+  SessionTranscriptBoundedMessageTailOptions,
 } from "../config/sessions/session-history-types.js";
 import { readSessionTranscriptAccountingFromProjection } from "../config/sessions/session-transcript-accounting.js";
 import type { SessionTranscriptAccountingOptions } from "../config/sessions/session-transcript-accounting.types.js";

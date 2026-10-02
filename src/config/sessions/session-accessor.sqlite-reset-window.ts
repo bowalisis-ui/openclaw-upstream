@@ -9,6 +9,7 @@ import {
 } from "../../infra/kysely-sync.js";
 import { pruneMapToMaxSize } from "../../infra/map-size.js";
 import { hasSqlitePostCommitScope } from "../../infra/sqlite-post-commit.js";
+import type { SessionTranscriptMessageEvent } from "./session-accessor.sqlite-contract.js";
 import {
   iterateUnindexedActiveTranscriptNavigation,
   iterateUnindexedTranscriptNavigation,
@@ -27,7 +28,6 @@ import {
   type MessageRangeSelection,
   parseActiveTranscriptMessageRow,
   type CurrentTranscriptProjection,
-  type SessionTranscriptMessageEvent,
 } from "./session-accessor.sqlite-projection-read.js";
 import { transcriptEventReadBytesSql } from "./session-transcript-read-bytes.js";
 import {

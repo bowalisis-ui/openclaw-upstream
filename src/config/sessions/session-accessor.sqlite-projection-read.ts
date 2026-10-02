@@ -1,6 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
 import { sql, type InferResult, type RawBuilder } from "kysely";
-import type { TranscriptDisplayPosition } from "../../chat/transcript-display-position.js";
 import {
   getNodeSqliteKysely,
   prepareSqliteQueryIterator,
@@ -8,10 +7,12 @@ import {
   prepareSqliteQueryTakeFirstSync,
 } from "../../infra/kysely-sync.js";
 import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
-import type { TranscriptReadWindow } from "../../sessions/transcript-read-window.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
-import type { TranscriptEvent } from "./session-accessor.sqlite-contract.js";
+import type {
+  SessionTranscriptMessageEvent,
+  TranscriptEvent,
+} from "./session-accessor.sqlite-contract.js";
 import type { UnindexedHistoryControl } from "./session-accessor.sqlite-history-navigation.types.js";
 import type { resolveSqliteTranscriptReadScope } from "./session-accessor.sqlite-scope.js";
 import { SessionTranscriptColdError } from "./session-cold-storage-state.js";
@@ -41,56 +42,6 @@ export type CurrentTranscriptProjection = {
   };
   resolved: ReturnType<typeof resolveSqliteTranscriptReadScope>;
   state: SessionTranscriptProjectionState;
-};
-
-export type SessionTranscriptMessageEvent = {
-  event: TranscriptEvent;
-  eventSeq: number;
-  seq: number;
-  displayPosition?: TranscriptDisplayPosition;
-};
-
-export type SessionTranscriptMessageEventPage = {
-  /** Source offset for the next older bounded page, independent of rendered message count. */
-  olderOffset?: number;
-  /** One source event exceeded a strict page byte limit and was skipped. */
-  omittedOversized?: boolean;
-  activeLeafEntryId?: string | null;
-  deltaCursor?: string;
-  displaySource?: string;
-  readWindow?: TranscriptReadWindow;
-  windowReset?: boolean;
-  events: SessionTranscriptMessageEvent[];
-  totalMessages: number;
-};
-
-export type SessionTranscriptMessageAnchorPage = SessionTranscriptMessageEventPage & {
-  found: boolean;
-  hasOverreadContext: boolean;
-  offset: number;
-};
-
-export type SessionTranscriptBoundedMessageTailPage = SessionTranscriptMessageEventPage & {
-  /** Role-matched individual oversized messages in the requested check range. */
-  hasOversizedMessages?: boolean;
-  // `events` may remain sparse for salvage callers; this count marks the
-  // authoritative newest suffix before the first byte-budget omission.
-  newestContiguousEventCount: number;
-  scannedMessages: number;
-  serializedBytes: number;
-  snapshot: {
-    boundarySeq?: number;
-    generation?: string;
-    indexedSeq: number;
-  };
-};
-
-export type SessionTranscriptBoundedMessageTailOptions = {
-  maxBytes: number;
-  maxMessages: number;
-  offset: number;
-  readOnly?: boolean;
-  oversizedMessageCheck?: { roles: readonly string[]; includeEarlier?: boolean };
 };
 
 const EMPTY_PROJECTION_STATE: SessionTranscriptProjectionState = {

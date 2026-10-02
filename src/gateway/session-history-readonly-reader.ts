@@ -7,7 +7,6 @@ import { readTranscriptDisplayDeltaFromProjection } from "../config/sessions/ses
 import {
   readCurrentProjectionSnapshot,
   type CurrentTranscriptProjection,
-  type SessionTranscriptBoundedMessageTailOptions,
 } from "../config/sessions/session-accessor.sqlite-projection-read.js";
 import { readSessionTranscriptBindingFromProjection } from "../config/sessions/session-accessor.sqlite-transcript-binding.js";
 import type { SessionTranscriptRawDeltaLimits } from "../config/sessions/session-accessor.types.js";
@@ -15,6 +14,7 @@ import { readWithCanonicalSessionAdmission } from "../config/sessions/session-ca
 import type {
   SessionArtifactReadQuery,
   SessionConversationBinding,
+  SessionTranscriptBoundedMessageTailOptions,
 } from "../config/sessions/session-history-types.js";
 import { listSessionReactionsInDatabase } from "../config/sessions/session-reaction-store.read.js";
 import { readSessionTranscriptAccountingFromProjection } from "../config/sessions/session-transcript-accounting.js";

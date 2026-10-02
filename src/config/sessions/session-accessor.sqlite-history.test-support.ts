@@ -6,6 +6,7 @@ import { useSessionStoreTempDirs } from "../../test-utils/session-state-cleanup.
 import { withRecentSessionTranscriptActiveEventsInSnapshot } from "./session-accessor.sqlite-active-events-read.js";
 import { withCurrentProjectionSnapshot } from "./session-accessor.sqlite-active-projection.js";
 import type {
+  SessionTranscriptMessageEvent,
   SessionTranscriptReadScope,
   TranscriptEvent,
 } from "./session-accessor.sqlite-contract.js";
@@ -15,12 +16,11 @@ import {
   readSessionTranscriptHistoryEventByIdFromProjection,
   readSessionTranscriptHistoryAnchorPageFromProjection,
 } from "./session-accessor.sqlite-history-query.js";
-import type {
-  SessionTranscriptMessageEvent,
-  SessionTranscriptMessageAnchorPage,
-} from "./session-accessor.sqlite-projection-read.js";
 import { readVisibleTranscriptStats } from "./session-accessor.sqlite-reset-window.js";
-import type { SessionTranscriptMessageByIdOptions } from "./session-history-types.js";
+import type {
+  SessionTranscriptMessageAnchorPage,
+  SessionTranscriptMessageByIdOptions,
+} from "./session-history-types.js";
 
 export function readActiveTranscriptStats(scope: SessionTranscriptReadScope) {
   return withCurrentProjectionSnapshot(scope, readVisibleTranscriptStats);

@@ -11,6 +11,7 @@ import {
 } from "./session-accessor.sqlite-active-events-read.js";
 import { withCurrentProjectionSnapshot } from "./session-accessor.sqlite-active-projection.js";
 import type {
+  SessionTranscriptMessageEvent,
   SessionTranscriptVisibleMessageDeltaLimits,
   SessionTranscriptVisibleMessageDeltaResult,
   SessionTranscriptReadScope,
@@ -24,10 +25,6 @@ import {
   selectMessagePayload,
   selectMessageRows,
   type CurrentTranscriptProjection,
-  type SessionTranscriptMessageEventPage,
-  type SessionTranscriptBoundedMessageTailPage,
-  type SessionTranscriptBoundedMessageTailOptions,
-  type SessionTranscriptMessageEvent,
 } from "./session-accessor.sqlite-projection-read.js";
 import {
   iterateVisibleMessageRange,
@@ -46,6 +43,11 @@ import {
   normalizeVisibleMessageLimit,
   parseVisibleMessageCursor,
 } from "./session-accessor.sqlite-visible-cursor.js";
+import type {
+  SessionTranscriptBoundedMessageTailOptions,
+  SessionTranscriptBoundedMessageTailPage,
+  SessionTranscriptMessageEventPage,
+} from "./session-history-types.js";
 import {
   resolveSqliteSessionTranscriptReadFence,
   SessionTranscriptReadFenceError,
@@ -56,7 +58,6 @@ export {
   isSessionTranscriptProjectionUnavailableError,
   SessionTranscriptProjectionUnavailableError,
 } from "./session-transcript-projection-error.js";
-export type { SessionTranscriptMessageEvent } from "./session-accessor.sqlite-projection-read.js";
 
 /** Reads every message event on the active path. Full callers remain intentionally O(output). */
 export function readSessionTranscriptMessageEvents(

@@ -12,6 +12,7 @@ import {
 import type { TranscriptReadWindowOptions } from "../../sessions/transcript-read-window.js";
 import { isVisibleTranscriptRecord } from "../../sessions/transcript-visible-record.js";
 import type {
+  SessionTranscriptMessageEvent,
   SessionTranscriptRawDeltaLimits,
   TranscriptEvent,
 } from "./session-accessor.sqlite-contract.js";
@@ -34,10 +35,7 @@ import {
 } from "./session-accessor.sqlite-history-projection.js";
 import {
   getActiveTranscriptKysely,
-  type SessionTranscriptMessageAnchorPage,
-  type SessionTranscriptMessageEventPage,
   type CurrentTranscriptProjection,
-  type SessionTranscriptMessageEvent,
 } from "./session-accessor.sqlite-projection-read.js";
 import {
   createTranscriptRawDeltaCursor,
@@ -54,7 +52,9 @@ import {
 import { MAX_VISIBLE_MESSAGE_MAX_MESSAGES } from "./session-accessor.sqlite-visible-cursor.js";
 import type {
   SessionTranscriptDisplayDeltaResult,
+  SessionTranscriptMessageAnchorPage,
   SessionTranscriptMessageByIdOptions,
+  SessionTranscriptMessageEventPage,
 } from "./session-history-types.js";
 import { resolveSessionTranscriptReadFence } from "./session-transcript-read-fence.js";
 import { transcriptEventJsonSql } from "./transcript-payload.js";

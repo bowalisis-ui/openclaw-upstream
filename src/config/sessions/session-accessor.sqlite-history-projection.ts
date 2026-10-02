@@ -7,6 +7,7 @@ import {
   prepareSqliteQueryTakeFirstSync,
 } from "../../infra/kysely-sync.js";
 import type { TranscriptReadWindow } from "../../sessions/transcript-read-window.js";
+import type { SessionTranscriptMessageEvent } from "./session-accessor.sqlite-contract.js";
 import { readTranscriptDisplaySource } from "./session-accessor.sqlite-display-position.js";
 import {
   isVisibleHistoryNonMessageEvent,
@@ -15,7 +16,6 @@ import {
 import {
   getActiveTranscriptKysely,
   type CurrentTranscriptProjection,
-  type SessionTranscriptMessageEvent,
 } from "./session-accessor.sqlite-projection-read.js";
 import {
   readUnindexedHistoryControls,

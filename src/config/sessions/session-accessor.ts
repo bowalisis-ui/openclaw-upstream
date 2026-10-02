@@ -1,4 +1,7 @@
-export type { SessionIdentityEvidenceResult } from "./session-accessor.sqlite-contract.js";
+export type {
+  SessionIdentityEvidenceResult,
+  SessionTranscriptMessageEvent,
+} from "./session-accessor.sqlite-contract.js";
 /**
  * Stable storage-neutral session and transcript access API.
  *
@@ -287,9 +290,8 @@ export {
 export type {
   SessionTranscriptBoundedMessageTailPage,
   SessionTranscriptMessageAnchorPage,
-  SessionTranscriptMessageEvent,
   SessionTranscriptMessageEventPage,
-} from "./session-accessor.sqlite-projection-read.js";
+} from "./session-history-types.js";
 export type { SessionTranscriptWatermark } from "./session-accessor.sqlite-transcript-watermark-read.js";
 export { readSessionTranscriptWatermark } from "./session-accessor.sqlite-transcript-watermark.js";
 export {

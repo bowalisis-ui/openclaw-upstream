@@ -1,6 +1,9 @@
 import { resolveIntegerOption } from "@openclaw/normalization-core/number-coercion";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
-import type { SessionTranscriptReadScope } from "../config/sessions/session-accessor.sqlite-contract.js";
+import type {
+  SessionTranscriptMessageEvent,
+  SessionTranscriptReadScope,
+} from "../config/sessions/session-accessor.sqlite-contract.js";
 import { resolveVisibleHistoryEventCount } from "../config/sessions/session-accessor.sqlite-history-projection.js";
 import {
   readRecentSessionTranscriptHistoryEventsFromProjection,
@@ -10,10 +13,7 @@ import {
   readSessionTranscriptHistoryEventsFromProjection,
   readSessionTranscriptHistoryAnchorPageFromProjection,
 } from "../config/sessions/session-accessor.sqlite-history-query.js";
-import type {
-  CurrentTranscriptProjection,
-  SessionTranscriptMessageEvent,
-} from "../config/sessions/session-accessor.sqlite-projection-read.js";
+import type { CurrentTranscriptProjection } from "../config/sessions/session-accessor.sqlite-projection-read.js";
 import {
   iterateVisibleMessageRange,
   resolveVisibleMessagePositions,
