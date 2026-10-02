@@ -5,29 +5,19 @@ import { deferSqliteWorkerCommitReceipt } from "../../infra/sqlite-worker-operat
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import type {
   WorkerOperationContext,
-  WorkerOperationHandlers,
+  WorkerOperationHandlersFor,
 } from "../../state/worker-operation-registry.js";
-import {
-  advanceCursor,
-  normalizeEpoch,
-  required,
-  type WorkerSessionTurnClaim,
-  type WorkerTurnClaimInput,
-} from "./placement-record.js";
+import { advanceCursor, normalizeEpoch, required } from "./placement-record.js";
 import { find, getRequired, query } from "./placement-row-codec.js";
 import type { PlacementStoreRuntime } from "./placement-runtime.js";
 import { createPlacementTurnClaimOps } from "./placement-turn-claims.js";
-import type {
-  PlacementAckCursorInput,
-  PlacementTurnClaimReceipt,
-} from "./placement-turn-claims.types.js";
+import type { PlacementTurnClaimReceipt } from "./placement-turn-claims.types.js";
+import type { PlacementTurnClaimWorkerOperations } from "./placement-turn-claims.worker-contract.js";
 import {
   createPlacementWorkspaceResultOps,
   insertWorkerWorkspacePendingResult,
   recordStagedWorkerWorkspaceResult,
 } from "./placement-workspace-result.js";
-
-type ClaimInput = { claim: WorkerSessionTurnClaim; nowMs?: number };
 
 function operation<
   Input extends {
@@ -75,7 +65,7 @@ function operation<
 export const placementTurnClaimOperations = {
   "placementTurns.updateAckCursors": operation(
     "placementTurns.updateAckCursors",
-    (runtime, input: PlacementAckCursorInput & { gatewayInstanceId: string; nowMs?: number }) => {
+    (runtime, input) => {
       const sessionId = required(input.claim.sessionId, "session id");
       const claimId = required(input.claim.claimId, "turn claim id");
       const runId = required(input.claim.runId, "turn claim run id");
@@ -151,34 +141,20 @@ export const placementTurnClaimOperations = {
     },
     true,
   ),
-  "placementTurns.claim": operation(
-    "placementTurns.claim",
-    (runtime, input: { claim: WorkerTurnClaimInput; nowMs?: number }) => {
-      const claim = createPlacementTurnClaimOps(runtime).claimTurn(input.claim);
-      return { claim, placement: getRequired(runtime.read(), claim.sessionId) };
-    },
-  ),
+  "placementTurns.claim": operation("placementTurns.claim", (runtime, input) => {
+    const claim = createPlacementTurnClaimOps(runtime).claimTurn(input.claim);
+    return { claim, placement: getRequired(runtime.read(), claim.sessionId) };
+  }),
   "placementTurns.updateWorkspaceBaseManifest": operation(
     "placementTurns.updateWorkspaceBaseManifest",
-    (
-      runtime,
-      input: ClaimInput & {
-        manifestRef: string;
-        sessionEntryCurrentSource?: SessionEntryCurrentSource;
-      },
-    ) => ({ placement: createPlacementTurnClaimOps(runtime).updateWorkspaceBaseManifest(input) }),
+    (runtime, input) => ({
+      placement: createPlacementTurnClaimOps(runtime).updateWorkspaceBaseManifest(input),
+    }),
     true,
   ),
   "placementTurns.recordStagedResult": operation(
     "placementTurns.recordStagedResult",
-    (
-      runtime,
-      input: ClaimInput & {
-        stagedResultRef: string;
-        repositoryWorkspaceId?: string;
-        sessionEntryCurrentSource?: SessionEntryCurrentSource;
-      },
-    ) => {
+    (runtime, input) => {
       const db = runtime.read();
       recordStagedWorkerWorkspaceResult(
         db,
@@ -192,7 +168,7 @@ export const placementTurnClaimOperations = {
   ),
   "placementTurns.recoverWorkspace": operation(
     "placementTurns.recoverWorkspace",
-    (runtime, input: ClaimInput & { gatewayInstanceId: string }) => {
+    (runtime, input) => {
       const results = createPlacementWorkspaceResultOps(runtime);
       results.markWorkspaceResultPending(input.claim);
       results.handoffWorkspaceResultRecovery(input.claim);
@@ -201,10 +177,7 @@ export const placementTurnClaimOperations = {
   ),
   "placementTurns.handoffRuntimeRefreshResult": operation(
     "placementTurns.handoffRuntimeRefreshResult",
-    (
-      runtime,
-      input: ClaimInput & { expectedGeneration: number; gatewayInstanceId: string; nowMs: number },
-    ) => {
+    (runtime, input) => {
       const placement = getRequired(runtime.read(), input.claim.sessionId);
       if (
         placement.state !== "active" ||
@@ -217,16 +190,13 @@ export const placementTurnClaimOperations = {
       return { placement };
     },
   ),
-  "placementTurns.releaseIfOwned": operation(
-    "placementTurns.releaseIfOwned",
-    (runtime, input: ClaimInput) => {
-      const claims = createPlacementTurnClaimOps(runtime);
-      return claims.validateTurnClaim(input.claim)
-        ? { placement: claims.releaseTurn(input.claim) }
-        : {};
-    },
-  ),
-  "placementTurns.release": operation("placementTurns.release", (runtime, input: ClaimInput) => ({
+  "placementTurns.releaseIfOwned": operation("placementTurns.releaseIfOwned", (runtime, input) => {
+    const claims = createPlacementTurnClaimOps(runtime);
+    return claims.validateTurnClaim(input.claim)
+      ? { placement: claims.releaseTurn(input.claim) }
+      : {};
+  }),
+  "placementTurns.release": operation("placementTurns.release", (runtime, input) => ({
     placement: createPlacementTurnClaimOps(runtime).releaseTurn(input.claim),
   })),
-} satisfies WorkerOperationHandlers;
+} satisfies WorkerOperationHandlersFor<PlacementTurnClaimWorkerOperations>;
